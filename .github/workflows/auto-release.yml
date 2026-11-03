@@ -78,7 +78,7 @@ jobs:
 
       # 4. Cài đặt các thư viện cần thiết (bao gồm cả Capacitor Android Core)
       - name: Install Dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm install --legacy-peer-deps
 
       - name: Type-check and test
         run: |
