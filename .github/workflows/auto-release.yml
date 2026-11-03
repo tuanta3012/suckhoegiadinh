@@ -258,6 +258,7 @@ jobs:
         run: |
           node scripts/patch-google-auth.cjs
           npx cap sync android
+          chmod +x android/gradlew
 
       - name: Compile signed APK
         env:
@@ -267,6 +268,7 @@ jobs:
           ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD != '' && secrets.ANDROID_RELEASE_KEY_PASSWORD || 'android' }}
         run: |
           cd android
+          chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
 
       - name: Copy & Rename APK
@@ -289,6 +291,7 @@ jobs:
         run: |
           node scripts/patch-google-auth.cjs
           npx cap sync android
+          chmod +x android/gradlew
 
       - name: Sanitize AndroidManifest for Google Play Compliance
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
@@ -313,6 +316,7 @@ jobs:
           ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD != '' && secrets.ANDROID_RELEASE_KEY_PASSWORD || 'android' }}
         run: |
           cd android
+          chmod +x ./gradlew
           ./gradlew bundleRelease --no-daemon
 
       - name: Copy & Store AAB in Dedicated Directory
