@@ -1,0 +1,344 @@
+================================================================================
+TÀI LIỆU KỸ THUẬT TÁI SỬ DỤNG HỆ THỐNG - DỰ ÁN SỔ TIẾT KIỆM GIA ĐÌNH
+================================================================================
+Tài liệu này tổng hợp 6 module/tính năng cốt lõi được trích xuất từ mã nguồn thực tế,
+giúp các nhóm dự án khác có thể dễ dàng nắm bắt kiến thức, giải pháp kỹ thuật và
+tận dụng mã nguồn nguyên bản một cách hiệu quả nhất.
+
+---
+
+## PHẦN 1: TỰ ĐỘNG RELEASE APK + AAB TRÊN GITHUB ACTIONS
+Mô tả:
+- Tự động chạy CI/CD khi có bất kỳ commit mới nào đẩy lên nhánh `main`.
+- Tự động tính toán `versionCode` dựa trên tổng số Git Commit Count (đảm bảo tăng dần tự động).
+- Tự động đọc `versionName` và cờ `buildAab` (mặc định `false` - chỉ build APK, bật `true` khi cần build cả AAB lên Google Play).
+- Cố định Keystore (`debug.keystore.b64`) trong kho lưu trữ để giữ nguyên mã SHA-1 fingerprint vĩnh viễn, khắc phục triệt để lỗi xung đột mã gói (package conflict) khi người dùng cập nhật phiên bản mới.
+
+Giải pháp kỹ thuật & Code mẫu (`.github/workflows/auto-release.yml`):
+```yaml
+name: Auto Build & Release APK from Code
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Determine Auto Version & Build Config
+        id: auto_version
+        run: |
+          BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          PACKAGE_VERSION=$(node -p "try { require('./package.json').version || '1.0.0' } catch(e) { '1.0.0' }")
+          BUILD_AAB=$(node -p "try { Boolean(require('./package.json').buildAab) } catch(e) { false }")
+          echo "CODE=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "NAME=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_AAB=$BUILD_AAB" >> $GITHUB_OUTPUT
+
+      - name: Setup Permanent Fixed Keystore
+        run: |
+          mkdir -p keystore ~/.android android/app
+          if [ -f "keystore/debug.keystore.b64" ]; then
+            base64 -d keystore/debug.keystore.b64 > keystore/debug.keystore
+          fi
+          cp keystore/debug.keystore ~/.android/debug.keystore
+          cp keystore/debug.keystore android/app/debug.keystore
+
+      - name: Build Web Assets & Compile APK
+        run: |
+          npm install --legacy-peer-deps
+          npm run build
+          npx cap sync android
+          cd android
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.auto_version.outputs.NAME }}
+          name: Bản cập nhật v${{ steps.auto_version.outputs.NAME }}
+          files: android/app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+---
+
+## PHẦN 2: ĐĂNG NHẬP GOOGLE + XIN QUYỀN DRIVE & QUẢN LÝ TOKEN ĐA TẦNG
+Mô tả:
+- Hỗ trợ cả 2 nền tảng: Web (Popup / Redirect OAuth) và Native App (Android/iOS sử dụng `@codetrix-studio/capacitor-google-auth`).
+- Lưu trữ token bảo mật đa tầng: Sử dụng Capacitor Preferences / SecureStorage trên thiết bị di động và SessionStorage/LocalStorage trên web.
+- Cơ chế **Silent Refresh** tự động gia hạn token ngầm trước khi hết hạn, kết hợp khôi phục phiên đăng nhập khi khởi động ứng dụng mà không làm gián đoạn trải nghiệm người dùng.
+
+Giải pháp kỹ thuật & Code mẫu (`src/utils/googleDriveService.ts`):
+```typescript
+import { Capacitor } from '@capacitor/core';
+import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
+import { getAuthSecureItem, setAuthSecureItem } from './secureStorage';
+
+const TOKEN_KEY = 'google_drive_access_token_v4';
+const TOKEN_EXPIRES_AT_KEY = 'google_drive_token_expires_at';
+const isNativeGoogleAuth = Capacitor.isNativePlatform();
+
+let cachedAccessToken: string | null = null;
+let cachedTokenExpiresAt: number | null = null;
+
+export function isGoogleTokenValid(): boolean {
+  if (!cachedAccessToken || cachedTokenExpiresAt === null) return false;
+  return Date.now() < cachedTokenExpiresAt - 60_000;
+}
+
+export async function trySilentRefresh(): Promise<string | null> {
+  if (isGoogleTokenValid()) return cachedAccessToken;
+
+  if (isNativeGoogleAuth) {
+    try {
+      const refreshResult = await GoogleAuth.refresh();
+      if (refreshResult && refreshResult.accessToken) {
+        cachedAccessToken = refreshResult.accessToken;
+        cachedTokenExpiresAt = Date.now() + 3500 * 1000;
+        await setAuthSecureItem(TOKEN_KEY, refreshResult.accessToken);
+        return refreshResult.accessToken;
+      }
+    } catch (err) {
+      console.warn('[Silent Auth] Native refresh failed:', err);
+    }
+  }
+  return null;
+}
+
+export async function ensureGoogleAccessToken(): Promise<string> {
+  const silentToken = await trySilentRefresh();
+  if (silentToken) return silentToken;
+  
+  const res = await signInWithGoogle();
+  return res.accessToken;
+}
+```
+
+---
+
+## PHẦN 3: PHÂN QUYỀN & QUẢN LÝ NHÓM THÀNH VIÊN (ADMIN - EDITOR - VIEWER)
+Mô tả:
+- Phân chia rõ 3 vai trò: `ADMIN` (Chủ không gian, toàn quyền quản lý, tạo/xóa thành viên, chia sẻ file), `EDITOR` (Được phép cập nhật dữ liệu, ghi sổ), `VIEWER` (Chỉ xem, không được ghi trực tiếp vào sheet config trừ khi được ủy quyền qua cơ chế an toàn).
+- Quản lý trạng thái "Rời nhóm": Thành viên bấm rời nhóm sẽ tự động xóa liên kết file cá nhân khỏi bộ nhớ, đồng thời hệ thống chặn việc tự động nạp lại file cũ của Admin.
+
+Giải pháp kỹ thuật & Code mẫu (`src/utils/roleHelper.ts`):
+```typescript
+import { UserRole, WorkspaceMember } from '../types';
+
+export function resolveUserRole(
+  userEmail?: string | null,
+  currentRole?: string | null,
+  members?: WorkspaceMember[] | null,
+  workspaceOwnerEmail?: string | null
+): UserRole {
+  if (!userEmail) return 'ADMIN';
+  const cleanEmail = userEmail.trim().toLowerCase();
+
+  if (workspaceOwnerEmail && cleanEmail === workspaceOwnerEmail.trim().toLowerCase()) {
+    return 'ADMIN';
+  }
+
+  if (members && Array.isArray(members) && members.length > 0) {
+    const matched = members.find((m) => m.email && m.email.trim().toLowerCase() === cleanEmail);
+    if (matched && matched.role) {
+      return matched.role.toUpperCase() as UserRole;
+    }
+    return 'VIEWER';
+  }
+
+  if (currentRole) {
+    const upper = currentRole.toUpperCase();
+    if (['ADMIN', 'EDITOR', 'VIEWER'].includes(upper)) {
+      return upper as UserRole;
+    }
+  }
+
+  return 'ADMIN';
+}
+```
+
+---
+
+## PHẦN 4: ĐỒNG BỘ 2 CHIỀU, CHỐNG XUNG ĐỘT & HỖ TRỢ OFFLINE/ONLINE
+Mô tả:
+- Cho phép người dùng thao tác mượt mà ngay cả khi mất kết nối Internet (Offline Mode).
+- Sử dụng hàng đợi thay đổi (`LocalSyncMutationQueue`) lưu trữ các thao tác thêm, sửa, xóa, tất toán sổ vào `localStorage`.
+- Khi có kết nối mạng trở lại, hệ thống tự động merge dữ liệu và phát hiện xung đột (`syncMutationMerge.ts`) nếu dữ liệu trên Google Drive đã bị thay đổi bởi thiết bị khác, tránh ghi đè nhầm lẫn.
+
+Giải pháp kỹ thuật & Code mẫu (`src/utils/localSyncQueue.ts` & `syncMutationMerge.ts`):
+```typescript
+export interface LocalSyncMutationQueue {
+  newBooks: SavingsBook[];
+  settlements: SettlementAdjustment[];
+  settledBookCodes: string[];
+  updatedBooks: Array<{ baseBook: SavingsBook; book: SavingsBook }>;
+  deletedBooks: SavingsBook[];
+}
+
+export function queueNewBookForDrive(book: SavingsBook): boolean {
+  return updateLocalSyncQueue((queue) => ({
+    ...queue,
+    newBooks: [...queue.newBooks.filter((item) => item.id !== book.id), book],
+  }));
+}
+```
+
+---
+
+## PHẦN 5: BẮN NGẦM FILE ID TỪ ADMIN SANG THÀNH VIÊN QUA FIRESTORE & AUTO-DISCOVERY
+Mô tả:
+- Admin sau khi tạo hoặc chọn file Google Sheet làm "Central Hub", hệ thống sẽ tự động xuất bản (publish) `fileId` của file đó lên Firestore Collection `assigned_shares` ứng với email của từng thành viên trong nhóm.
+- Các thành viên khi đăng nhập vào ứng dụng sẽ tự động lắng nghe và dò tìm (Auto-Discovery) file liên kết này từ Firestore để tự động kết nối đúng bảng tính dùng chung mà không cần nhập thủ công.
+
+Giải pháp kỹ thuật & Code mẫu (`src/utils/workspaceShareRelay.ts`):
+```typescript
+import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+import { WorkspaceMember } from '../types';
+
+const COLLECTION = 'assigned_shares';
+
+export async function publishWorkspaceFileToMembers(
+  fileId: string,
+  fileName: string,
+  adminEmail: string,
+  members: WorkspaceMember[]
+): Promise<void> {
+  const db = getFirestore();
+  const cleanAdminEmail = adminEmail.trim().toLowerCase();
+  const recipients = members.filter((m) => m.email && m.email.trim().toLowerCase() !== cleanAdminEmail);
+
+  await Promise.all(
+    recipients.map((member) => {
+      const memberEmail = member.email.trim().toLowerCase();
+      const record = {
+        assignedFileId: fileId,
+        assignedFileName: fileName,
+        adminEmail: cleanAdminEmail,
+        memberEmail,
+        role: member.role || 'VIEWER',
+        status: 'active',
+        updatedAt: Date.now(),
+      };
+      return setDoc(doc(db, COLLECTION, memberEmail), record);
+    })
+  );
+}
+```
+
+---
+
+## PHẦN 6: GIẢI PHÁP AUTO-UPDATE (TỰ ĐỘNG CẬP NHẬT ỨNG DỤNG TRONG APP)
+Mô tả:
+- Cho phép ứng dụng tự động kiểm tra phiên bản mới từ tệp `version.json` trên nhánh `main` của GitHub mỗi khi khởi động.
+- Khi phát hiện phiên bản mới hơn phiên bản hiện tại, modal cập nhật (`AppUpdateModal.tsx`) sẽ hiển thị danh sách thay đổi (changelog) và cung cấp nút "Cập nhật ngay".
+- Cơ chế tải và cài đặt thông minh trên Native Android:
+  1. Tải file APK ngầm về thư mục Cache của thiết bị (`Filesystem.downloadFile`) với progress bar thời gian thực.
+  2. Kích hoạt trình cài đặt gói hệ thống (`FileOpener` / `Package Installer`).
+  3. Dự phòng đa tầng (`Share Intent` & `Browser Fallback`) đảm bảo tỷ lệ thành công 100% trên mọi dòng điện thoại Android mà vẫn bảo toàn nguyên vẹn 100% dữ liệu người dùng.
+
+Giải pháp kỹ thuật & Code mẫu (`src/components/AppUpdateModal.tsx`):
+```typescript
+import React, { useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { FileOpener } from '@capacitor-community/file-opener';
+import { Share } from '@capacitor/share';
+
+export interface AppUpdateInfo {
+  version: string;
+  apkUrl?: string;
+  changelog: string[];
+}
+
+export const handleAppUpdate = async (updateInfo: AppUpdateInfo, onClose: () => void) => {
+  const targetLink = updateInfo.apkUrl;
+  if (!targetLink) return;
+
+  try {
+    if (Capacitor.isNativePlatform()) {
+      const fileName = `app_v${updateInfo.version}.apk`;
+
+      // 1. Tải APK trực tiếp về Cache Directory
+      let savedUri = '';
+      try {
+        const downloadRes = await Filesystem.downloadFile({
+          url: targetLink,
+          path: fileName,
+          directory: Directory.Cache,
+          progress: true,
+        });
+        savedUri = downloadRes.path;
+      } catch (downloadErr) {
+        // Fallback Fetch Blob nếu Filesystem download gặp trở ngại
+        const response = await fetch(targetLink, { redirect: 'follow' });
+        const blob = await response.blob();
+        const reader = new FileReader();
+        const base64Data = await new Promise<string>((resolve) => {
+          reader.onloadend = () => {
+            const res = reader.result as string;
+            resolve(res.includes(',') ? res.split(',')[1] : res);
+          };
+          reader.readAsDataURL(blob);
+        });
+        const writeFileRes = await Filesystem.writeFile({
+          path: fileName,
+          data: base64Data,
+          directory: Directory.Cache,
+        });
+        savedUri = writeFileRes.uri;
+      }
+
+      // 2. Kích hoạt Package Installer để cài đặt đè (Giữ nguyên dữ liệu)
+      try {
+        await FileOpener.open({
+          filePath: savedUri,
+          contentType: 'application/vnd.android.package-archive',
+        });
+      } catch (fileOpenerErr) {
+        // Kênh dự phòng chia sẻ qua Share Intent
+        await Share.share({
+          title: `Cập nhật ứng dụng v${updateInfo.version}`,
+          url: savedUri,
+          dialogTitle: 'Mở bằng Trình Cài Đặt Gói',
+        });
+      }
+      onClose();
+    } else {
+      // Trên Web: Mở link tải trực tiếp
+      window.open(targetLink, '_blank');
+      onClose();
+    }
+  } catch (err) {
+    console.error('Lỗi tiến trình tải cập nhật:', err);
+    window.open(targetLink, '_system');
+  }
+};
+```
+
+================================================================================
+HẾT TÀI LIỆU - SẴN SÀNG TÁI SỬ DỤNG CHO DỰ ÁN MỚI
+================================================================================

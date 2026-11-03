@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "MasterWorkspace": {
+      "title": "MasterWorkspace",
+      "description": "Không gian làm việc trung tâm quản lý liên kết file Google Sheets, phân quyền thành viên và nhật ký tất toán",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "unlinked"] },
+        "activeFileId": { "type": "string" },
+        "activeFileName": { "type": "string" },
+        "activeFileUrl": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "members": { "type": "array" },
+        "settlements": { "type": "array" },
+        "banksConfig": { "type": "array" },
+        "lastAction": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "status", "adminEmail", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Nhật ký kiểm toán và báo cáo lỗi đồng bộ tập trung từ tất cả các máy (giới hạn 50 bản ghi gần nhất)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "action": { "type": "string" },
+        "status": { "type": "string", "enum": ["SUCCESS", "ERROR", "WARNING", "INFO"] },
+        "details": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "currentRole": { "type": "string" },
+        "platform": { "type": "string" },
+        "appVersion": { "type": "string" },
+        "errorStack": { "type": "string" },
+        "technicalDetails": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "action", "status", "details", "userEmail", "currentRole"]
+    },
+    "AppBackup": {
+      "title": "AppBackup",
+      "description": "Bản sao lưu dự phòng so_tiet_kiem_backup.json lưu trữ đám mây trên Firestore",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "backupName": { "type": "string" },
+        "backupTimestamp": { "type": "string" },
+        "booksCount": { "type": "number" },
+        "settlementsCount": { "type": "number" },
+        "jsonData": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "appVersion": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "backupName", "backupTimestamp", "booksCount", "jsonData", "userEmail"]
+    },
+    "AssignedShare": {
+      "title": "AssignedShare",
+      "description": "Bản ghi chia sẻ liên kết file Google Sheets ngầm cho từng thành viên",
+      "type": "object",
+      "properties": {
+        "assignedFileId": { "type": "string" },
+        "assignedFileName": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "memberEmail": { "type": "string" },
+        "role": { "type": "string", "enum": ["EDITOR", "VIEWER"] },
+        "status": { "type": "string", "enum": ["active"] },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["assignedFileId", "adminEmail", "memberEmail", "role", "status", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/workspaces/{workspaceId}": {
+      "schema": "MasterWorkspace",
+      "description": "Thông tin trạng thái master workspace của gia đình"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Tập hợp các bản ghi log và lỗi đồng bộ từ toàn bộ các máy trạm gửi về (tối đa 50 bản ghi)"
+    },
+    "/app_backups/{backupId}": {
+      "schema": "AppBackup",
+      "description": "Bản sao lưu file so_tiet_kiem_backup.json dự phòng"
+    },
+    "/assigned_shares/{memberKey}": {
+      "schema": "AssignedShare",
+      "description": "Vé chuyển tiếp liên kết file ngầm cho thành viên dựa trên email"
+    }
+  }
+}

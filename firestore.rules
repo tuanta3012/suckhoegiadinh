@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /assigned_shares/{memberKey} {
+      function signedIn() {
+        return request.auth != null && request.auth.token.email is string;
+      }
+
+      function isMember() {
+        return signedIn() &&
+          memberKey == request.auth.token.email.lower() &&
+          resource.data.memberEmail == request.auth.token.email.lower();
+      }
+
+      function isAdminForAssignment() {
+        return signedIn() &&
+          resource.data.adminEmail == request.auth.token.email.lower();
+      }
+
+      function validAssignment() {
+        return request.resource.data.keys().hasOnly([
+            'assignedFileId',
+            'assignedFileName',
+            'adminEmail',
+            'memberEmail',
+            'role',
+            'status',
+            'updatedAt'
+          ]) &&
+          request.resource.data.assignedFileId is string &&
+          request.resource.data.assignedFileId.size() > 0 &&
+          request.resource.data.assignedFileName is string &&
+          request.resource.data.adminEmail is string &&
+          request.resource.data.memberEmail is string &&
+          memberKey == request.resource.data.memberEmail &&
+          request.resource.data.adminEmail == request.auth.token.email.lower() &&
+          request.resource.data.memberEmail == request.resource.data.memberEmail.lower() &&
+          request.resource.data.memberEmail != request.resource.data.adminEmail &&
+          request.resource.data.role in ['EDITOR', 'VIEWER'] &&
+          request.resource.data.status == 'active' &&
+          request.resource.data.updatedAt is number;
+      }
+
+      allow get: if isMember();
+      allow list: if false;
+      allow create: if signedIn() && validAssignment();
+      allow update: if signedIn() &&
+        resource.data.adminEmail == request.auth.token.email.lower() &&
+        validAssignment();
+      allow delete: if isMember() || isAdminForAssignment();
+    }
+
+    match /workspaces/{workspaceId} {
+      allow read, write: if true;
+    }
+
+    match /audit_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    match /user_feedbacks/{feedbackId} {
+      allow create: if true;
+      allow read: if true;
+      allow update, delete: if false;
+    }
+  }
+}

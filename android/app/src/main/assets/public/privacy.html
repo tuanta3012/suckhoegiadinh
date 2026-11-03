@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chính sách Bảo mật - Sổ tiết kiệm</title>
+    <meta name="google-site-verification" content="google38e39784f53380bb">
+    <link rel="icon" type="image/png" href="stk_app_icon.png">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #334155;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background-color: #f8fafc;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+            border: 1px solid #e2e8f0;
+        }
+        .header-logo-box {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid #10b981;
+        }
+        .app-logo {
+            width: 64px;
+            height: 64px;
+            border-radius: 14px;
+            object-fit: cover;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+            border: 1px solid #a7f3d0;
+        }
+        h1 {
+            color: #0f172a;
+            font-size: 26px;
+            margin: 0 0 4px 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        .app-subtitle {
+            margin: 0;
+            font-size: 14px;
+            color: #059669;
+            font-weight: 600;
+        }
+        h2 {
+            color: #1e293b;
+            font-size: 20px;
+            margin-top: 28px;
+            margin-bottom: 12px;
+        }
+        p, li {
+            font-size: 15px;
+            color: #475569;
+        }
+        ul {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+        .footer {
+            margin-top: 40px;
+            text-align: center;
+            font-size: 13px;
+            color: #94a3b8;
+            border-top: 1px solid #e2e8f0;
+            padding-top: 20px;
+        }
+        .contact-box {
+            background-color: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .contact-box a {
+            color: #059669;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .contact-box a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-logo-box">
+            <img src="stk_app_icon.png" alt="Logo Sổ tiết kiệm" class="app-logo">
+            <div>
+                <h1>Chính sách Bảo mật (Privacy Policy)</h1>
+                <p class="app-subtitle">Ứng dụng Quản lý Sổ tiết kiệm</p>
+            </div>
+        </div>
+        <p><em>Cập nhật lần cuối: Ngày 30 tháng 09 năm 2026</em></p>
+        
+        <p>Ứng dụng <strong>Sổ tiết kiệm</strong> (sau đây gọi tắt là "Ứng dụng") cam kết bảo vệ tuyệt đối thông tin riêng tư và dữ liệu tài chính cá nhân của người dùng. Chính sách Bảo mật này mô tả cách thức ứng dụng của chúng tôi hoạt động, xử lý dữ liệu và quyền lợi của người dùng liên quan đến thông tin cá nhân.</p>
+
+        <h2>1. Nguyên tắc Không Thu thập Dữ liệu (No Data Collection Policy)</h2>
+        <p>Ứng dụng của chúng tôi được thiết kế theo mô hình <strong>Local-first (Ưu tiên dữ liệu cục bộ)</strong>. Chúng tôi <strong>không có máy chủ trung gian</strong> lưu trữ thông tin tài chính của bạn:</p>
+        <ul>
+            <li>Chúng tôi không thu thập, không theo dõi và không lưu trữ bất kỳ thông tin nhạy cảm, số dư tài khoản hay sổ tiết kiệm nào của bạn trên bất kỳ hệ thống máy chủ bên thứ ba nào.</li>
+            <li>Mọi dữ liệu tính toán lãi suất, kỳ hạn gửi tiền và danh sách sổ tiết kiệm đều được xử lý và lưu trữ trực tiếp, an toàn trong bộ nhớ thiết bị của bạn.</li>
+        </ul>
+
+        <h2>2. Sử dụng Quyền truy cập Google Drive API</h2>
+        <p>Để hỗ trợ tính năng đồng bộ hóa và sao lưu dữ liệu gia đình tự động, Ứng dụng cung cấp tùy chọn liên kết với tài khoản Google Drive cá nhân của bạn. Khi bạn cấp quyền truy cập, Ứng dụng sẽ thực hiện:</p>
+        <ul>
+            <li><strong>Mục đích truy cập:</strong> Đọc và ghi các tệp bảng tính Excel (`.xlsx`) hoặc tệp cấu hình (`.json`) do chính ứng dụng này tạo ra trên tài khoản Google Drive của bạn.</li>
+            <li><strong>Phạm vi quyền (Scopes):</strong> Chúng tôi chỉ sử dụng các quyền tối thiểu cần thiết như <code>https://www.googleapis.com/auth/drive.file</code> (chỉ truy cập các tệp được mở hoặc tạo bởi chính ứng dụng này) để thực hiện sao lưu và đồng bộ hóa giữa các thành viên trong gia đình bạn.</li>
+            <li><strong>Không chia sẻ dữ liệu:</strong> Dữ liệu trên Google Drive của bạn hoàn toàn thuộc sở hữu của bạn. Chúng tôi tuyệt đối không chia sẻ, bán hoặc chuyển giao thông tin này cho bất kỳ cá nhân hay tổ chức nào khác.</li>
+        </ul>
+
+        <h2>3. Quyền Thông báo đẩy (Local Notifications)</h2>
+        <p>Ứng dụng yêu cầu quyền gửi thông báo cục bộ trên thiết bị của bạn để thực hiện nhiệm vụ nhắc nhở tự động ngày đáo hạn sổ tiết kiệm. Quyền thông báo này hoàn toàn chạy offline trên thiết bị của bạn, không gửi hay nhận dữ liệu từ bất kỳ máy chủ bên ngoài nào.</p>
+
+        <h2>4. Bảo mật sinh trắc học (Biometric Authentication)</h2>
+        <p>Nếu bạn kích hoạt tính năng khóa bảo vệ bằng Vân tay hoặc Khuôn mặt (FaceID/TouchID), quy trình xác thực này được xử lý trực tiếp bởi hệ điều hành Android/iOS. Ứng dụng tuyệt đối không lưu giữ khóa sinh trắc học của bạn.</p>
+
+        <h2>5. Thay đổi Chính sách Bảo mật</h2>
+        <p>Chúng tôi có thể cập nhật chính sách bảo mật này theo thời gian để phù hợp với các nâng cấp kỹ thuật mới nhất. Mọi thay đổi sẽ được cập nhật công khai ngay tại trang này.</p>
+
+        <h2>6. Thông tin Liên hệ và Hỗ trợ</h2>
+        <p>Nếu bạn có bất kỳ câu hỏi, phản hồi hoặc cần hỗ trợ kỹ thuật liên quan đến bảo mật và quyền riêng tư dữ liệu, vui lòng liên hệ với chúng tôi qua các kênh chính thức sau:</p>
+        
+        <div class="contact-box">
+            <ul>
+                <li><strong>Email Hỗ trợ chính thức:</strong> <a href="mailto:sotietkiem.support@gmail.com">sotietkiem.support@gmail.com</a></li>
+                <li><strong>Trang báo lỗi GitHub Issues:</strong> <a href="https://github.com/tuanta3012/sotietkiem/issues" target="_blank">github.com/tuanta3012/sotietkiem/issues</a></li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>&copy; 2026 Sổ tiết kiệm. Tất cả các quyền được bảo lưu.</p>
+        </div>
+    </div>
+</body>
+</html>

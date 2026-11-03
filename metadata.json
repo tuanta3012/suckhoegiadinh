@@ -1,0 +1,8 @@
+{
+  "name": "Suc khoe gia dinh",
+  "description": "Quan ly va theo doi suc khoe cua cac thanh vien trong gia dinh.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

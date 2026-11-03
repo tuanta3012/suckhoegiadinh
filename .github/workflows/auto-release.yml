@@ -1,0 +1,418 @@
+name: Auto Build & Release APK from AI Studio Code
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. Cấu hình môi trường Node.js và JDK 17 (chuẩn cho Gradle 8.2 & Capacitor 6)
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      # 2. Tự động lấy versionName, buildAab từ package.json & versionCode từ Git Commit Count
+      - name: Determine Auto Version
+        id: auto_version
+        run: |
+          BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          PACKAGE_VERSION=$(node -p "try { require('./package.json').version || '1.0.0' } catch(e) { '1.0.0' }")
+          BUILD_AAB=$(node -p "try { Boolean(require('./package.json').buildAab) } catch(e) { false }")
+          echo "CODE=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "NAME=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_AAB=$BUILD_AAB" >> $GITHUB_OUTPUT
+          echo "Auto Generated versionCode: $BUILD_NUMBER, versionName: $PACKAGE_VERSION, buildAab: $BUILD_AAB"
+
+      # 3. Tạo init.gradle cấp hệ thống giải quyết triệt để lỗi BouncyCastle (bcprov) và androidx.browser metadata
+      - name: Create Gradle Init Script for Dependencies & Browser Version
+        run: |
+          mkdir -p ~/.gradle
+          cat << 'EOF' > ~/.gradle/init.gradle
+          allprojects {
+              buildscript {
+                  configurations.all {
+                      resolutionStrategy {
+                          force 'org.bouncycastle:bcprov-jdk15to18:1.70'
+                          force 'androidx.browser:browser:1.8.0'
+                          dependencySubstitution {
+                              substitute module('org.bouncycastle:bcprov-jdk18on') using module('org.bouncycastle:bcprov-jdk15to18:1.70')
+                          }
+                      }
+                  }
+              }
+              configurations.all {
+                  resolutionStrategy {
+                      force 'org.bouncycastle:bcprov-jdk15to18:1.70'
+                      force 'androidx.browser:browser:1.8.0'
+                      force 'com.google.android.gms:play-services-auth:21.6.0'
+                      dependencySubstitution {
+                          substitute module('org.bouncycastle:bcprov-jdk18on') using module('org.bouncycastle:bcprov-jdk15to18:1.70')
+                      }
+                  }
+              }
+          }
+          EOF
+
+      # 4. Cài đặt các thư viện cần thiết (bao gồm cả Capacitor Android Core)
+      - name: Install Dependencies
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+          else
+            npm install --legacy-peer-deps
+          fi
+          node scripts/patch-google-auth.cjs
+
+      - name: Type-check and test
+        run: |
+          npm run lint
+          npm test
+
+      # 5. Khởi tạo lại hoàn toàn thư mục Android nếu bị rỗng / thiếu file build.gradle
+      - name: Generate Fresh Android Project
+        run: |
+          if [ ! -f "android/build.gradle" ]; then
+            echo "Thư mục android bị rỗng hoặc chưa hoàn chỉnh. Tiến hành khởi tạo mới..."
+            mkdir -p dist
+            if [ -f "android/app/google-services.json" ]; then
+              cp android/app/google-services.json /tmp/google-services.json
+            fi
+            rm -rf android
+            npx cap add android
+            if [ -f "/tmp/google-services.json" ]; then
+              mkdir -p android/app
+              cp /tmp/google-services.json android/app/google-services.json
+            fi
+          fi
+
+      # 6. Cập nhật SDK, strings.xml, Cấu hình Chặn Google One Auto-Backup & Phiên bản
+      - name: Update Android Config, SDK, Anti-Backup Rules & Strings
+        env:
+          VERSION_CODE: ${{ steps.auto_version.outputs.CODE }}
+          VERSION_NAME: ${{ steps.auto_version.outputs.NAME }}
+        run: |
+          mkdir -p android/app/src/main/res/values
+          cat << 'EOF' > android/app/src/main/res/values/strings.xml
+          <?xml version='1.0' encoding='utf-8'?>
+          <resources>
+              <string name="app_name">Sổ tiết kiệm</string>
+              <string name="title_activity_main">Sổ tiết kiệm</string>
+              <string name="package_name">com.tietkiemgiadinh.app</string>
+              <string name="custom_url_scheme">com.tietkiemgiadinh.app</string>
+              <string name="server_client_id">864440372329-fgoo89lqp196nvcptmfc7pquofuj8agt.apps.googleusercontent.com</string>
+          </resources>
+          EOF
+
+          # Tạo thư mục và cấu hình XML chặn Google One khôi phục snapshot cũ
+          mkdir -p android/app/src/main/res/xml
+          cat << 'EOF' > android/app/src/main/res/xml/data_extraction_rules.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <data-extraction-rules>
+              <cloud-backup>
+                  <exclude path="." />
+              </cloud-backup>
+              <device-transfer>
+                  <exclude path="." />
+              </device-transfer>
+          </data-extraction-rules>
+          EOF
+
+          cat << 'EOF' > android/app/src/main/res/xml/backup_rules.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <full-backup-content>
+              <exclude domain="root" path="." />
+              <exclude domain="file" path="." />
+              <exclude domain="database" path="." />
+              <exclude domain="sharedpref" path="." />
+              <exclude domain="external" path="." />
+          </full-backup-content>
+          EOF
+
+          cat << 'EOF' > android/app/src/main/res/xml/file_paths.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <external-path name="external_files" path="." />
+              <cache-path name="cache_files" path="." />
+              <external-cache-path name="external_cache_files" path="." />
+              <files-path name="internal_files" path="." />
+          </paths>
+          EOF
+
+          # Thiết lập phân quyền REQUEST_INSTALL_PACKAGES & cấu hình chống backup vào AndroidManifest.xml
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+            node -e "
+              const fs = require('fs');
+              const manifestPath = 'android/app/src/main/AndroidManifest.xml';
+              let manifest = fs.readFileSync(manifestPath, 'utf8');
+
+              // 1. Bổ sung quyền bắt buộc để kích hoạt Trình cài đặt gói (Package Installer)
+              if (!manifest.includes('REQUEST_INSTALL_PACKAGES')) {
+                manifest = manifest.replace('<application', '    <uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" />\n    <application');
+              }
+
+              // 2. Thiết lập cấu hình chống backup
+              if (manifest.includes('<application')) {
+                manifest = manifest.replace(/android:allowBackup=\"[^\"]*\"/g, 'android:allowBackup=\"false\"');
+                if (!manifest.includes('android:allowBackup=\"false\"')) {
+                  manifest = manifest.replace('<application', '<application\n        android:allowBackup=\"false\"');
+                }
+                if (!manifest.includes('android:fullBackupOnly')) {
+                  manifest = manifest.replace('<application', '<application\n        android:fullBackupOnly=\"false\"');
+                }
+                if (!manifest.includes('android:dataExtractionRules')) {
+                  manifest = manifest.replace('<application', '<application\n        android:dataExtractionRules=\"@xml/data_extraction_rules\"');
+                }
+                if (!manifest.includes('android:fullBackupContent')) {
+                  manifest = manifest.replace('<application', '<application\n        android:fullBackupContent=\"@xml/backup_rules\"');
+                }
+
+                // 3. Đảm bảo cấu hình FileProvider chuẩn mực
+                if (!manifest.includes('androidx.core.content.FileProvider')) {
+                  const providerXml = '        <provider\n            android:name=\"androidx.core.content.FileProvider\"\n            android:authorities=\"${applicationId}.fileprovider\"\n            android:exported=\"false\"\n            android:grantUriPermissions=\"true\">\n            <meta-data\n                android:name=\"android.support.FILE_PROVIDER_PATHS\"\n                android:resource=\"@xml/file_paths\" />\n        </provider>\n    </application>';
+                  manifest = manifest.replace('</application>', providerXml);
+                } else if (manifest.includes('android.support.load.file_provider_paths')) {
+                  manifest = manifest.replace('android.support.load.file_provider_paths', 'android.support.FILE_PROVIDER_PATHS');
+                }
+                fs.writeFileSync(manifestPath, manifest, 'utf8');
+              }
+            "
+          fi
+
+          if [ -f "android/variables.gradle" ]; then
+            sed -i "s/minSdkVersion = .*/minSdkVersion = 23/g" android/variables.gradle
+            sed -i "s/compileSdkVersion = .*/compileSdkVersion = 35/g" android/variables.gradle
+            sed -i "s/targetSdkVersion = .*/targetSdkVersion = 35/g" android/variables.gradle
+          fi
+          if [ -f "android/build.gradle" ]; then
+            node -e "
+              const fs = require('fs');
+              const file = 'android/build.gradle';
+              let content = fs.readFileSync(file, 'utf8');
+              if (!content.includes('androidx.browser:browser:1.8.0')) {
+                content += '\nallprojects { configurations.all { resolutionStrategy { force \"androidx.browser:browser:1.8.0\"\nforce \"com.google.android.gms:play-services-auth:21.6.0\" } } }\n';
+                fs.writeFileSync(file, content, 'utf8');
+              }
+            "
+          fi
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/g" android/app/build.gradle
+            sed -i "s/versionName \"[^\"]*\"/versionName \"$VERSION_NAME\"/g" android/app/build.gradle
+          fi
+
+      # 7. Copy google-services.json (nếu có) & Tạo icon
+      - name: Copy google-services.json
+        run: |
+          if [ -f "google-services.json" ]; then
+            mkdir -p android/app
+            cp google-services.json android/app/google-services.json
+          fi
+
+      - name: Install ImageMagick for Icon Generation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      - name: Generate App Icons
+        run: |
+          python3 scripts/generate_app_icons.py
+          npx @capacitor/assets generate --android || true
+          python3 scripts/generate_app_icons.py
+
+      # 8. Khởi tạo & Sử dụng Keystore cố định trong Repo (Không bao giờ đổi SHA-1)
+      - name: Setup Permanent Fixed Keystore
+        run: |
+          mkdir -p keystore ~/.android android/app
+          
+          # 1. Ưu tiên giải mã Keystore vĩnh viễn từ file b64 trong Repo
+          if [ -f "keystore/debug.keystore.b64" ]; then
+            echo "Khôi phục Keystore cố định từ keystore/debug.keystore.b64..."
+            base64 -d keystore/debug.keystore.b64 > keystore/debug.keystore
+          elif [ ! -f "keystore/debug.keystore" ]; then
+            echo "Khởi tạo Keystore cố định cho Repository..."
+            keytool -genkeypair -v \
+              -keystore keystore/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug, O=Android, C=US"
+            base64 -w 0 keystore/debug.keystore > keystore/debug.keystore.b64
+          fi
+          
+          # Đồng bộ keystore cố định vào các vị trí chuẩn của Android build
+          cp keystore/debug.keystore ~/.android/debug.keystore
+          cp keystore/debug.keystore android/app/debug.keystore
+          
+          SHA1_VAL=$(keytool -list -v -keystore keystore/debug.keystore -alias androiddebugkey -storepass android | grep "SHA1:" | head -1 | awk '{print $2}')
+          
+          echo "===================================================="
+          echo "=== PERMANENT SHA-1 FINGERPRINT FOR FIREBASE ======="
+          echo "SHA-1: $SHA1_VAL"
+          echo "===================================================="
+          
+          echo "### 🔑 Android App Fingerprints (SHA-1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Name:** \`com.tietkiemgiadinh.app\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cố định SHA-1:** \`$SHA1_VAL\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Mã này được cố định vĩnh viễn trong file \`keystore/debug.keystore\`." >> $GITHUB_STEP_SUMMARY
+          echo "- Hãy đối chiếu với Firebase Console: nếu chưa có mã trên, bấm **Add fingerprint** và dán vào." >> $GITHUB_STEP_SUMMARY
+
+      # 9. Biên dịch phiên bản APK Sideload (Có bật Kiểm tra cập nhật)
+      - name: Build Web Assets for APK
+        env:
+          VITE_APP_MODE: apk
+          VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
+        run: npm run build
+
+      - name: Sync APK Assets to Android
+        run: |
+          node scripts/patch-google-auth.cjs
+          npx cap sync android
+
+      - name: Compile APK file
+        run: |
+          cd android
+          echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" >> gradle.properties
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon 2>&1 | tee /tmp/gradle_build.log || {
+            BUILD_STATUS=$?
+            echo "=========================================================="
+            echo "=== CHI TIẾT LỖI BIÊN DỊCH Ở ĐÂY (ERROR DETAILS): ==="
+            echo "=========================================================="
+            grep -E -C 3 -i "(error:|cannot find symbol|compilation failed|FAILED)" /tmp/gradle_build.log | tail -n 40 || tail -n 30 /tmp/gradle_build.log
+            exit $BUILD_STATUS
+          }
+
+      - name: Copy & Rename APK
+        run: |
+          mkdir -p dist-release
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist-release/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk
+
+      # 10. Biên dịch phiên bản AAB cho Google Play (Chỉ chạy khi buildAab: true trong package.json)
+      - name: Build Web Assets for Google Play AAB
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        env:
+          VITE_APP_MODE: play
+          VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
+        run: npm run build
+
+      - name: Sync AAB Assets to Android
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        run: |
+          node scripts/patch-google-auth.cjs
+          npx cap sync android
+
+      - name: Sanitize AndroidManifest for Google Play Compliance
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const manifestPath = 'android/app/src/main/AndroidManifest.xml';
+            if (fs.existsSync(manifestPath)) {
+              let manifest = fs.readFileSync(manifestPath, 'utf8');
+              manifest = manifest.replace(/<uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" \/>\s*/g, '');
+              fs.writeFileSync(manifestPath, manifest, 'utf8');
+              console.log('✓ Đã loại bỏ quyền REQUEST_INSTALL_PACKAGES để đảm bảo 100% tuân thủ chính sách Google Play Store!');
+            }
+          "
+
+      - name: Prepare protected Google Play signing key
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ] || \
+             [ -z "$ANDROID_RELEASE_STORE_PASSWORD" ] || \
+             [ -z "$ANDROID_RELEASE_KEY_ALIAS" ] || \
+             [ -z "$ANDROID_RELEASE_KEY_PASSWORD" ]; then
+            echo "::error::AAB builds require the four ANDROID_RELEASE_* GitHub Actions secrets."
+            exit 1
+          fi
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/sotietkiem-release.jks"
+          chmod 600 "$RUNNER_TEMP/sotietkiem-release.jks"
+
+      - name: Compile AAB file
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        env:
+          ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/sotietkiem-release.jks
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          cd android
+          ./gradlew bundleRelease --no-daemon
+
+      - name: Copy & Store AAB in Dedicated Directory
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        run: |
+          mkdir -p dist-aab
+          if [ -f "android/app/build/outputs/bundle/release/app-release.aab" ]; then
+            cp android/app/build/outputs/bundle/release/app-release.aab dist-aab/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.aab
+          else
+            echo "::error::The signed release AAB was not produced."
+            exit 1
+          fi
+
+      - name: Upload AAB to GitHub Actions Artifacts (Private Storage for Play Store)
+        if: steps.auto_version.outputs.BUILD_AAB == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotietkiem_v${{ steps.auto_version.outputs.NAME }}_aab
+          path: dist-aab/*.aab
+          retention-days: 30
+
+      # 11. Tự động tạo GitHub Release (CHỈ đính kèm file APK, tuyệt đối không chứa file AAB)
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.auto_version.outputs.NAME }}
+          name: Bản cập nhật v${{ steps.auto_version.outputs.NAME }}
+          body: |
+            Bản cập nhật tự động xuất bản từ AI Studio:
+            - **sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk**: Bản APK cài đặt trực tiếp bên ngoài (có tích hợp thông báo cập nhật tự động).
+          files: dist-release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 12. Tự động cập nhật file version.json trên nhánh main
+      - name: Update version.json
+        run: |
+          APK_URL="https://github.com/tuanta3012/sotietkiem/releases/download/v${{ steps.auto_version.outputs.NAME }}/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk"
+          cat <<EOF > version.json
+          {
+            "version": "${{ steps.auto_version.outputs.NAME }}",
+            "notes": "Bản cập nhật tự động v${{ steps.auto_version.outputs.NAME }}",
+            "apkUrl": "$APK_URL"
+          }
+          EOF
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: auto-update version.json [skip ci]" || echo "No changes to commit"
+          git push

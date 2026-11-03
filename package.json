@@ -1,0 +1,58 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "1.0.5",
+  "buildAab": false,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('server.js', { force: true });\"",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "postinstall": "node scripts/patch-google-auth.cjs"
+  },
+  "dependencies": {
+    "@capacitor-community/file-opener": "^6.0.0",
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/app": "^6.0.3",
+    "@capacitor/browser": "^6.0.6",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/filesystem": "^6.0.4",
+    "@capacitor/local-notifications": "^6.1.0",
+    "@capacitor/preferences": "^6.0.0",
+    "@capacitor/share": "^6.0.4",
+    "@capacitor/status-bar": "^6.0.0",
+    "@capgo/capacitor-native-biometric": "^6.0.0",
+    "@codetrix-studio/capacitor-google-auth": "3.4.0-rc.4",
+    "capacitor-secure-storage-plugin": "^0.10.0",
+    "firebase": "^12.19.0",
+    "lucide-react": "^0.546.0",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "react-is": "^19.3.0",
+    "recharts": "^3.10.1",
+    "xlsx": "npm:@keep-lts/xlsx@0.18.6"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.1.14",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3",
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "@capacitor/cli": {
+      "tar": "^6.2.1"
+    },
+    "@firebase/firestore": {
+      "@grpc/grpc-js": "1.14.7"
+    }
+  }
+}
