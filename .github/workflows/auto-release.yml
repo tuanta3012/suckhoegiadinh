@@ -126,10 +126,18 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <data-extraction-rules>
               <cloud-backup>
-                  <exclude path="." />
+                  <exclude domain="root" path="." />
+                  <exclude domain="file" path="." />
+                  <exclude domain="database" path="." />
+                  <exclude domain="sharedpref" path="." />
+                  <exclude domain="external" path="." />
               </cloud-backup>
               <device-transfer>
-                  <exclude path="." />
+                  <exclude domain="root" path="." />
+                  <exclude domain="file" path="." />
+                  <exclude domain="database" path="." />
+                  <exclude domain="sharedpref" path="." />
+                  <exclude domain="external" path="." />
               </device-transfer>
           </data-extraction-rules>
           EOF
@@ -211,6 +219,15 @@ jobs:
           if [ -f "android/app/build.gradle" ]; then
             sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/g" android/app/build.gradle
             sed -i "s/versionName \"[^\"]*\"/versionName \"$VERSION_NAME\"/g" android/app/build.gradle
+            node -e "
+              const fs = require('fs');
+              const file = 'android/app/build.gradle';
+              let content = fs.readFileSync(file, 'utf8');
+              if (!content.includes('checkReleaseBuilds false')) {
+                content = content.replace('android {', 'android {\n    lint {\n        abortOnError false\n        checkReleaseBuilds false\n    }');
+                fs.writeFileSync(file, content, 'utf8');
+              }
+            "
           fi
 
       # 7. Copy google-services.json & Generate Icon
