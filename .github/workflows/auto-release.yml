@@ -258,8 +258,8 @@ jobs:
           elif [ -n "${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}" ]; then
             printf '%s' "${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/suckhoegiadinh-release.jks"
           else
-            echo "Generating fallback keystore..."
-            keytool -genkey -v -keystore "$RUNNER_TEMP/suckhoegiadinh-release.jks" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android
+            echo "::error::No stable Android signing key is configured. Configure the existing release keystore before building an APK that updates installed apps."
+            exit 1
           fi
           chmod 600 "$RUNNER_TEMP/suckhoegiadinh-release.jks"
 
@@ -367,7 +367,7 @@ jobs:
           path: dist-aab/*.aab
           retention-days: 30
 
-      # 10. Tạo release chứa APK và AAB (nếu có)
+      # 10. Public GitHub Release chỉ chứa APK cài trực tiếp; AAB giữ trong Actions artifact.
       - name: Create GitHub Release
         id: create_repo_release
         uses: softprops/action-gh-release@v2
@@ -377,10 +377,7 @@ jobs:
           body: |
             Bản phát hành Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}.
             - APK đã ký release để cài đặt trực tiếp.
-          files: |
-            dist-release/*.apk
-            dist-aab/*.aab
-          fail_on_unmatched_files: false
+          files: dist-release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

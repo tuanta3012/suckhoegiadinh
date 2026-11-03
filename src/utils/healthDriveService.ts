@@ -26,7 +26,6 @@ export interface HealthDriveWorkspace {
   familyFileId: string;
   family: HealthFamily;
   relayRegistrationError?: string;
-  isLocal?: boolean;
 }
 
 function accessToken(): string {
@@ -91,6 +90,21 @@ async function listFiles(parentId: string, name?: string, mimeType?: string): Pr
     pageToken = result.nextPageToken;
   } while (pageToken);
   return files;
+}
+
+async function listFolderContentsRecursively(folderId: string, visited = new Set<string>()): Promise<DriveFile[]> {
+  if (visited.has(folderId)) return [];
+  visited.add(folderId);
+  const children = await listFiles(folderId);
+  const descendants: DriveFile[] = [];
+  for (const child of children) {
+    if (child.mimeType === FOLDER_MIME) {
+      descendants.push(...await listFolderContentsRecursively(child.id, visited));
+    } else {
+      descendants.push(child);
+    }
+  }
+  return [...descendants, ...children.filter((child) => child.mimeType === FOLDER_MIME)];
 }
 
 async function createFolder(name: string, parentId?: string): Promise<DriveFile> {
@@ -274,6 +288,86 @@ export async function addDriveFamilyMember(
   );
   const family = { ...workspace.family, members: [...workspace.family.members, member] };
   return saveHealthFamily(workspace, family);
+}
+
+export async function deleteDriveFamilyMember(
+  workspace: HealthDriveWorkspace,
+  memberId: string,
+): Promise<{ workspace: HealthDriveWorkspace; cleanupError?: string }> {
+  const member = workspace.family.members.find((item) => item.id === memberId);
+  if (!member) throw new Error('Không tìm thấy thành viên cần xóa trong Workspace hiện tại.');
+  if (!member.driveFolderId || !member.profileFileId) {
+    throw new Error('Thành viên thiếu ID thư mục hoặc hồ sơ Drive; không thể xóa an toàn.');
+  }
+
+  const filesToDelete = await listFolderContentsRecursively(member.driveFolderId);
+  const fileIds = [...new Set([
+    member.profileFileId,
+    ...filesToDelete.map((file) => file.id),
+    member.driveFolderId,
+  ])];
+  const familyWithoutMember: HealthFamily = {
+    ...workspace.family,
+    members: workspace.family.members.filter((item) => item.id !== memberId),
+  };
+  const updatedWorkspace = await removeFamilyMemberFromManifest(workspace, familyWithoutMember, memberId);
+
+  try {
+    for (const fileId of fileIds) {
+      await deleteDriveFile(fileId);
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Lỗi không xác định.';
+    return {
+      workspace: updatedWorkspace,
+      cleanupError: `Đã gỡ thành viên khỏi danh sách gia đình nhưng chưa xóa hết tệp Drive của họ: ${reason}. Hãy kiểm tra thư mục raw_files và profiles trên Google Drive.`,
+    };
+  }
+
+  return { workspace: updatedWorkspace };
+}
+
+async function removeFamilyMemberFromManifest(
+  workspace: HealthDriveWorkspace,
+  family: HealthFamily,
+  memberId: string,
+): Promise<HealthDriveWorkspace> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await authenticatedDriveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`
+    );
+    if (!response.ok) {
+      throw new Error(`Không thể tải family.json trước khi gỡ thành viên (HTTP ${response.status}).`);
+    }
+    const latest = await response.json() as HealthFamily;
+    if (latest.schemaVersion !== 1 || !Array.isArray(latest.members)) {
+      throw new Error('family.json không hợp lệ; không thể gỡ thành viên.');
+    }
+    if (!latest.members.some((item) => item.id === memberId)) {
+      return { ...workspace, family: latest };
+    }
+
+    const next: HealthFamily = {
+      ...latest,
+      ...family,
+      members: latest.members.filter((item) => item.id !== memberId),
+      createdAt: latest.createdAt || family.createdAt,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      const file = await replaceContent(
+        workspace.familyFileId,
+        'family.json',
+        JSON_MIME,
+        new Blob([JSON.stringify(next, null, 2)]),
+        response.headers.get('etag') || undefined,
+      );
+      return { ...workspace, familyFileId: file.id, family: next };
+    } catch (error) {
+      if (!(error instanceof DriveConflictError) || attempt === 2) throw error;
+    }
+  }
+  throw new Error('Danh sách gia đình đang được sửa trên thiết bị khác. Hãy đồng bộ rồi thử xóa lại.');
 }
 
 export async function loadHealthProfile(fileId: string): Promise<HealthProfile> {

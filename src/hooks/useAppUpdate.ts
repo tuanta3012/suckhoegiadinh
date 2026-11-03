@@ -1,17 +1,39 @@
 import { useState, useCallback, useEffect } from 'react';
-import { AppUpdateInfo } from '../components/AppUpdateModal';
+import type { AppUpdateInfo } from '../components/AppUpdateModal';
+
+const VERSION_PATTERN = /^v?(\d+(?:\.\d+){0,3})$/i;
+const UPDATE_CHECK_TIMEOUT_MS = 10_000;
 
 export function isNewerVersion(current: string, latest: string): boolean {
-  const parse = (v: string) => v.replace(/^v/i, '').split('.').map(Number);
+  const parse = (version: string): number[] | null => {
+    const match = VERSION_PATTERN.exec(version.trim());
+    if (!match) return null;
+    return match[1].split('.').map(Number);
+  };
   const currParts = parse(current);
   const lateParts = parse(latest);
+  if (!currParts || !lateParts) return false;
   for (let i = 0; i < Math.max(currParts.length, lateParts.length); i++) {
-    const c = currParts[i] || 0;
-    const l = lateParts[i] || 0;
+    const c = currParts[i] ?? 0;
+    const l = lateParts[i] ?? 0;
     if (l > c) return true;
     if (c > l) return false;
   }
   return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getHttpsUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface UseAppUpdateOptions {
@@ -45,44 +67,62 @@ export function useAppUpdate({
     if (manual && onNotification) {
       onNotification('Đang kiểm tra phiên bản mới từ máy chủ...', 'info');
     }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
     try {
-      const res = await fetch(`${updateServerUrl}?_t=${Date.now()}`);
-      if (res.ok) {
-        const data = await res.json();
-        const latestVersion = data.version || data.versionName;
-        if (data && latestVersion) {
-          const isNewer = isNewerVersion(currentVersion, latestVersion);
-          if (isNewer) {
-            setUpdateInfo({
-              version: latestVersion,
-              downloadUrl: data.downloadUrl || data.apkUrl,
-              apkUrl: data.apkUrl || data.downloadUrl,
-              changelog: Array.isArray(data.changelog)
-                ? data.changelog
-                : (data.notes ? [data.notes] : ['Nâng cấp tính năng và cải thiện hiệu năng.']),
-              releaseDate: data.releaseDate || data.date,
-            });
-            setIsUpdateModalOpen(true);
-            if (manual && onNotification) {
-              onNotification(`Đã tìm thấy bản cập nhật mới v${latestVersion}!`, 'success');
-            }
-          } else {
-            if (manual && onNotification) {
-              onNotification(`Bạn đang dùng phiên bản mới nhất (v${currentVersion}).`, 'success');
-            }
-          }
-        }
-      } else {
-        if (manual && onNotification) {
-          onNotification(`Không thể kết nối máy chủ cập nhật (Mã lỗi ${res.status}).`, 'error');
-        }
+      const separator = updateServerUrl.includes('?') ? '&' : '?';
+      const response = await fetch(`${updateServerUrl}${separator}_t=${Date.now()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Máy chủ cập nhật trả về lỗi HTTP ${response.status}.`);
       }
-    } catch (err: any) {
-      console.warn('Lỗi kiểm tra cập nhật:', err);
+
+      const manifest: unknown = await response.json();
+      if (!isRecord(manifest)) throw new Error('Dữ liệu version.json không hợp lệ.');
+      const latestVersion = manifest.version ?? manifest.versionName;
+      if (typeof latestVersion !== 'string' || !VERSION_PATTERN.test(latestVersion.trim())) {
+        throw new Error('version.json thiếu phiên bản hợp lệ.');
+      }
+
+      if (isNewerVersion(currentVersion, latestVersion)) {
+        const downloadUrl = getHttpsUrl(manifest.downloadUrl) || getHttpsUrl(manifest.apkUrl);
+        if (!downloadUrl) throw new Error('version.json thiếu đường dẫn HTTPS hợp lệ tới APK.');
+        const notes = typeof manifest.notes === 'string' ? manifest.notes : undefined;
+        const changelog = Array.isArray(manifest.changelog)
+          ? manifest.changelog.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          : [];
+        setUpdateInfo({
+          version: latestVersion,
+          downloadUrl,
+          apkUrl: downloadUrl,
+          changelog: changelog.length ? changelog : [notes || 'Nâng cấp tính năng và cải thiện hiệu năng.'],
+          releaseDate: typeof manifest.releaseDate === 'string'
+            ? manifest.releaseDate
+            : typeof manifest.date === 'string'
+              ? manifest.date
+              : undefined,
+        });
+        setIsUpdateModalOpen(true);
+        if (manual && onNotification) {
+          onNotification(`Đã tìm thấy bản cập nhật mới v${latestVersion}!`, 'success');
+        }
+      } else if (manual && onNotification) {
+        onNotification(`Bạn đang dùng phiên bản mới nhất (v${currentVersion}).`, 'success');
+      }
+    } catch (error) {
+      console.warn('Lỗi kiểm tra cập nhật:', error);
       if (manual && onNotification) {
-        onNotification('Không thể kết nối máy chủ. Vui lòng kiểm tra lại mạng.', 'error');
+        const message = error instanceof DOMException && error.name === 'AbortError'
+          ? 'Máy chủ cập nhật phản hồi quá lâu. Vui lòng thử lại.'
+          : error instanceof Error
+            ? error.message
+            : 'Không thể kết nối máy chủ. Vui lòng kiểm tra lại mạng.';
+        onNotification(message, 'error');
       }
     } finally {
+      clearTimeout(timeout);
       setIsChecking(false);
     }
   }, [currentVersion, updateServerUrl, onNotification]);

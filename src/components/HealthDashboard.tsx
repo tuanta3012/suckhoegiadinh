@@ -65,6 +65,7 @@ import {
   addDriveFamilyMember,
   cleanupExpiredRawFiles,
   createHealthWorkspace,
+  deleteDriveFamilyMember,
   type HealthDriveWorkspace,
   openHealthWorkspace,
   loadHealthProfile,
@@ -91,6 +92,8 @@ import {
   type HealthWorkspaceAssignment,
   type WorkspaceAccessRole,
 } from '../utils/workspaceShareRelay';
+import { useConfirmDialog } from '../context/ConfirmDialogContext';
+import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
 
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
@@ -150,56 +153,7 @@ export function HealthDashboard({
 }: HealthDashboardProps) {
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [rootIdInput, setRootIdInput] = useState('');
-  const [workspace, setWorkspace] = useState<HealthDriveWorkspace | null>(() => {
-    const LOCAL_KEY = 'health_family_local_workspace_v2';
-    try {
-      const saved = localStorage.getItem(LOCAL_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as HealthDriveWorkspace;
-        if (parsed?.family?.members?.length) return parsed;
-      }
-    } catch {}
-
-    const defaultWs: HealthDriveWorkspace = {
-      rootFolderId: 'local_root_folder',
-      familyFileId: 'local_family_file',
-      family: {
-        schemaVersion: 1,
-        rawFilesFolderId: 'local_raw_files',
-        profilesFolderId: 'local_profiles',
-        members: [
-          {
-            id: 'member_bo',
-            name: 'Bố (Nguyễn Văn An)',
-            role: 'father',
-            driveFolderId: 'local_bo_folder',
-            profileFileId: 'local_bo_profile',
-          },
-          {
-            id: 'member_me',
-            name: 'Mẹ (Trần Thị Mai)',
-            role: 'mother',
-            driveFolderId: 'local_me_folder',
-            profileFileId: 'local_me_profile',
-          },
-          {
-            id: 'member_con',
-            name: 'Con (Nguyễn Minh Khoa)',
-            role: 'child',
-            driveFolderId: 'local_con_folder',
-            profileFileId: 'local_con_profile',
-          },
-        ],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      },
-      isLocal: true,
-    };
-    try {
-      localStorage.setItem(LOCAL_KEY, JSON.stringify(defaultWs));
-    } catch {}
-    return defaultWs;
-  });
+  const [workspace, setWorkspace] = useState<HealthDriveWorkspace | null>(null);
   const [profiles, setProfiles] = useState<Record<string, HealthProfile>>({});
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
   const [selectedMemberId, setSelectedMemberId] = useState('');
@@ -225,6 +179,7 @@ export function HealthDashboard({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cleanupInFlight = useRef(false);
+  const { confirm } = useConfirmDialog();
 
   const {
     updateInfo,
@@ -329,20 +284,18 @@ export function HealthDashboard({
     return list.sort((a, b) => a.daysRemaining - b.daysRemaining);
   }, [members, profiles]);
 
+  useEffect(() => {
+    try {
+      clearLegacyHealthDemoData(localStorage);
+    } catch (error) {
+      console.warn('Không thể dọn workspace mẫu cũ khỏi thiết bị.', error);
+    }
+  }, []);
+
   const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
     const entries = await Promise.all(
       nextWorkspace.family.members.map(async (member) => {
         try {
-          if (nextWorkspace.isLocal) {
-            const rawLocal = localStorage.getItem(`health_local_profile_${member.id}`);
-            if (rawLocal) {
-              const parsed = JSON.parse(rawLocal);
-              return [member.id, parseHealthProfile(parsed, member), null] as const;
-            }
-            const created = createHealthProfile(member);
-            localStorage.setItem(`health_local_profile_${member.id}`, JSON.stringify(created));
-            return [member.id, created, null] as const;
-          }
           const remote = await loadHealthProfile(member.profileFileId);
           return [member.id, parseHealthProfile(remote, member), null] as const;
         } catch (error) {
@@ -514,6 +467,43 @@ export function HealthDashboard({
       setErrorMessage(error instanceof Error ? error.message : 'Không thể thêm thành viên.');
     } finally {
       setIsAddingMember(false);
+    }
+  }
+
+  async function handleDeleteFamilyMember(member: FamilyMember) {
+    if (!workspace || !driveAuthorized) return;
+    const confirmed = await confirm({
+      title: `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
+      message: `Thao tác này sẽ gỡ thành viên khỏi Workspace và xóa vĩnh viễn hồ sơ JSON cùng toàn bộ tài liệu trong thư mục Drive của họ. Không thể hoàn tác.`,
+      confirmLabel: 'Xóa vĩnh viễn',
+    });
+    if (!confirmed) return;
+
+    setIsLoading(true);
+    setErrorMessage('');
+    try {
+      const { workspace: next, cleanupError } = await deleteDriveFamilyMember(workspace, member.id);
+      setWorkspace(next);
+      setProfiles((previous) => {
+        const { [member.id]: _deletedProfile, ...remaining } = previous;
+        return remaining;
+      });
+      setProfileErrors((previous) => {
+        const { [member.id]: _deletedError, ...remaining } = previous;
+        return remaining;
+      });
+      setSelectedMemberId(next.family.members[0]?.id || '');
+      setChatMessages([]);
+      setActiveTab(next.family.members.length ? 'family' : 'overview');
+      if (cleanupError) {
+        setErrorMessage(cleanupError);
+      } else {
+        showToast(`Đã xóa vĩnh viễn thành viên ${member.name} và hồ sơ Drive liên quan.`, 'success');
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Không thể xóa thành viên.');
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -1720,16 +1710,30 @@ export function HealthDashboard({
                                 </p>
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedMemberId(m.id);
-                                setActiveTab('timeline');
-                              }}
-                              className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-xs"
-                            >
-                              Mở hồ sơ
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedMemberId(m.id);
+                                  setActiveTab('timeline');
+                                }}
+                                className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-xs"
+                              >
+                                Mở hồ sơ
+                              </button>
+                              {driveAuthorized && (
+                                <button
+                                  type="button"
+                                  disabled={isLoading}
+                                  onClick={() => void handleDeleteFamilyMember(m)}
+                                  aria-label={`Xóa vĩnh viễn hồ sơ của ${m.name}`}
+                                  title="Xóa vĩnh viễn thành viên và dữ liệu Drive"
+                                  className="p-2 rounded-lg border border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
