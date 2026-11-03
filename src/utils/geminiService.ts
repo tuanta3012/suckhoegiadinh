@@ -2,7 +2,7 @@ import type { FamilyMember, HealthEvent, HealthMetric, HealthProfile, JsonValue,
 import { auth } from './googleDriveService';
 
 interface ImportMetaEnv {
-  VITE_GEMINI_ENDPOINT?: string;
+  GEMINI_API_KEYS?: string;
 }
 
 interface GeminiResponse {
@@ -21,15 +21,15 @@ const EVENT_TYPES = new Set<HealthEvent['type']>([
 ]);
 
 function getEndpoint(): string {
-  const endpoint = (import.meta as ImportMeta & { env: ImportMetaEnv }).env.VITE_GEMINI_ENDPOINT?.trim();
+  const endpoint = (import.meta as ImportMeta & { env: ImportMetaEnv }).env.GEMINI_API_KEYS?.trim();
   if (!endpoint) {
-    throw new Error('Chưa cấu hình endpoint Gemini server-side. Tài liệu đã lưu an toàn trên Drive; có thể nhập thông tin thủ công.');
+    throw new Error('Chưa cấu hình GEMINI_API_KEYS. Tài liệu đã lưu an toàn trên Drive; có thể nhập thông tin thủ công.');
   }
   let url: URL;
   try {
     url = new URL(endpoint);
   } catch {
-    throw new Error('VITE_GEMINI_ENDPOINT không phải URL hợp lệ.');
+    throw new Error('GEMINI_API_KEYS không phải URL hợp lệ.');
   }
   if (url.protocol !== 'https:' && url.hostname !== 'localhost') {
     throw new Error('Endpoint Gemini phải dùng HTTPS.');

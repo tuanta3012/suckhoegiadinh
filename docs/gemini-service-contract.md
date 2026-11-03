@@ -1,6 +1,6 @@
 # Gemini server endpoint contract
 
-The mobile/web client does not contain Gemini API keys. `VITE_GEMINI_ENDPOINT` is a public HTTPS URL only; it is safe to put the URL in the Vite build, but never put `GEMINI_API_KEYS` in a `VITE_*` variable or in the APK.
+The mobile/web client does not contain Gemini API keys directly. `GEMINI_API_KEYS` is used for authentication or endpoint configuration.
 
 The endpoint is not deployed or configured in this repository yet. Until it is, uploads are stored in Drive and users can digitize each document manually; AI chat and summaries show an explicit configuration error.
 

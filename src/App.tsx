@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import type { AuthUser } from './types';
 import { HealthDashboard } from './components/HealthDashboard';
+import { SplashScreen } from './components/SplashScreen';
 import { RELEASE_APP_VERSION } from './version';
 import { useToast } from './context/ToastContext';
 import {
@@ -16,6 +17,7 @@ import {
 
 export default function App() {
   const { showToast } = useToast();
+  const [showSplash, setShowSplash] = useState(true);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [driveAuthorized, setDriveAuthorized] = useState(isGoogleTokenValid());
 
@@ -39,39 +41,46 @@ export default function App() {
     void restoreGoogleAuthSession()
       .then(() => {
         if (cancelled) return;
-        unsubscribe = initGoogleAuth((firebaseUser, token) => {
-          if (!firebaseUser.email) {
+        unsubscribe = initGoogleAuth(
+          (firebaseUser, token) => {
+            if (!firebaseUser.email) {
+              setCurrentUser(null);
+              setDriveAuthorized(false);
+              return;
+            }
+            setCurrentUser({
+              email: firebaseUser.email,
+              name: firebaseUser.displayName || 'Người dùng',
+              photoURL: firebaseUser.photoURL || undefined,
+              role: 'ADMIN',
+              title: 'Quản trị viên',
+            });
+            setDriveAuthorized(Boolean(token) || isGoogleTokenValid());
+          },
+          () => {
             setCurrentUser(null);
             setDriveAuthorized(false);
-            return;
           }
-          setCurrentUser({
-            email: firebaseUser.email,
-            name: firebaseUser.displayName || 'Người dùng',
-            photoURL: firebaseUser.photoURL || undefined,
-            role: 'ADMIN',
-            title: 'Quản trị viên',
-          });
-          setDriveAuthorized(Boolean(token) || isGoogleTokenValid());
-        }, () => {
-          setCurrentUser(null);
-          setDriveAuthorized(false);
-        });
+        );
       })
       .catch((error: unknown) => {
-        showToast(error instanceof Error ? error.message : 'Không thể khôi phục phiên Drive.', 'error');
+        console.warn('Phiên Google Drive:', error);
       });
     return () => {
       cancelled = true;
       unsubscribe?.();
     };
-  }, [showToast]);
+  }, []);
 
   const connectGoogle = useCallback(async () => {
     try {
       const { accessToken } = await signInWithGoogle();
       setDriveAuthorized(Boolean(accessToken));
-      if (!accessToken) showToast('Đăng nhập thành công nhưng chưa có quyền Drive. Hãy cấp quyền Google Drive.', 'error');
+      if (!accessToken) {
+        showToast('Đăng nhập thành công nhưng chưa có quyền Drive.', 'error');
+      } else {
+        showToast('Đã kết nối tài khoản Google Drive thành công!', 'success');
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể đăng nhập Google.', 'error');
     }
@@ -82,10 +91,15 @@ export default function App() {
       await signOutGoogle();
       setCurrentUser(null);
       setDriveAuthorized(false);
+      showToast('Đã đăng xuất tài khoản.', 'info');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể đăng xuất.', 'error');
     }
   }, [showToast]);
+
+  if (showSplash) {
+    return <SplashScreen onFinished={() => setShowSplash(false)} durationMs={1000} />;
+  }
 
   return (
     <HealthDashboard

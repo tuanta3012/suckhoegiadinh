@@ -26,6 +26,7 @@ export interface HealthDriveWorkspace {
   familyFileId: string;
   family: HealthFamily;
   relayRegistrationError?: string;
+  isLocal?: boolean;
 }
 
 function accessToken(): string {

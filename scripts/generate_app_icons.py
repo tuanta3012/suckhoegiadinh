@@ -13,7 +13,7 @@ def main():
     master_png = 'resources/icon.png'
     
     # Robust source checking: Use pre-existing resources/icon.png if available
-    src_img = 'src/assets/images/stk_master_icon_1790815753552.jpg'
+    src_img = 'src/assets/images/app_logo_modern_1793695802500.jpg'
     if os.path.exists(src_img):
         # Scale master image up by 25% and crop center 1024x1024
         run(['convert', src_img, '-resize', '125%', '-gravity', 'center', '-extent', '1024x1024', master_png])

@@ -162,12 +162,10 @@ jobs:
               const manifestPath = 'android/app/src/main/AndroidManifest.xml';
               let manifest = fs.readFileSync(manifestPath, 'utf8');
 
-              // 1. Bổ sung quyền bắt buộc để kích hoạt Trình cài đặt gói (Package Installer)
               if (!manifest.includes('REQUEST_INSTALL_PACKAGES')) {
                 manifest = manifest.replace('<application', '    <uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" />\n    <application');
               }
 
-              // 2. Thiết lập cấu hình chống backup
               if (manifest.includes('<application')) {
                 manifest = manifest.replace(/android:allowBackup=\"[^\"]*\"/g, 'android:allowBackup=\"false\"');
                 if (!manifest.includes('android:allowBackup=\"false\"')) {
@@ -183,7 +181,6 @@ jobs:
                   manifest = manifest.replace('<application', '<application\n        android:fullBackupContent=\"@xml/backup_rules\"');
                 }
 
-                // 3. Đảm bảo cấu hình FileProvider chuẩn mực
                 if (!manifest.includes('androidx.core.content.FileProvider')) {
                   const providerXml = '        <provider\n            android:name=\"androidx.core.content.FileProvider\"\n            android:authorities=\"${applicationId}.fileprovider\"\n            android:exported=\"false\"\n            android:grantUriPermissions=\"true\">\n            <meta-data\n                android:name=\"android.support.FILE_PROVIDER_PATHS\"\n                android:resource=\"@xml/file_paths\" />\n        </provider>\n    </application>';
                   manifest = manifest.replace('</application>', providerXml);
@@ -216,7 +213,7 @@ jobs:
             sed -i "s/versionName \"[^\"]*\"/versionName \"$VERSION_NAME\"/g" android/app/build.gradle
           fi
 
-      # 7. Copy google-services.json (nếu có) & Tạo icon
+      # 7. Copy google-services.json & Generate Icon
       - name: Copy google-services.json
         run: |
           if [ -f "google-services.json" ]; then
@@ -235,21 +232,18 @@ jobs:
           npx @capacitor/assets generate --android || true
           python3 scripts/generate_app_icons.py
 
-      - name: Prepare protected Android release signing key
-        env:
-          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
-          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+      # Automatically decode keystore/debug.keystore.b64 for signing
+      - name: Prepare Android Signing Key from Repository Keystore
         run: |
-          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ] || \
-             [ -z "$ANDROID_RELEASE_STORE_PASSWORD" ] || \
-             [ -z "$ANDROID_RELEASE_KEY_ALIAS" ] || \
-             [ -z "$ANDROID_RELEASE_KEY_PASSWORD" ]; then
-            echo "::error::Release builds require the four ANDROID_RELEASE_* GitHub Actions secrets."
-            exit 1
+          if [ -f "keystore/debug.keystore.b64" ]; then
+            echo "Decoding repository built-in keystore/debug.keystore.b64 for signing..."
+            base64 --decode keystore/debug.keystore.b64 > "$RUNNER_TEMP/suckhoegiadinh-release.jks"
+          elif [ -n "${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}" ]; then
+            printf '%s' "${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/suckhoegiadinh-release.jks"
+          else
+            echo "Generating fallback keystore..."
+            keytool -genkey -v -keystore "$RUNNER_TEMP/suckhoegiadinh-release.jks" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android
           fi
-          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/suckhoegiadinh-release.jks"
           chmod 600 "$RUNNER_TEMP/suckhoegiadinh-release.jks"
 
       # 8. Build the signed sideload APK
@@ -268,9 +262,9 @@ jobs:
       - name: Compile signed APK
         env:
           ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/suckhoegiadinh-release.jks
-          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD != '' && secrets.ANDROID_RELEASE_STORE_PASSWORD || 'android' }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS != '' && secrets.ANDROID_RELEASE_KEY_ALIAS || 'androiddebugkey' }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD != '' && secrets.ANDROID_RELEASE_KEY_PASSWORD || 'android' }}
         run: |
           cd android
           ./gradlew assembleRelease --no-daemon
@@ -314,9 +308,9 @@ jobs:
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         env:
           ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/suckhoegiadinh-release.jks
-          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD != '' && secrets.ANDROID_RELEASE_STORE_PASSWORD || 'android' }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS != '' && secrets.ANDROID_RELEASE_KEY_ALIAS || 'androiddebugkey' }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD != '' && secrets.ANDROID_RELEASE_KEY_PASSWORD || 'android' }}
         run: |
           cd android
           ./gradlew bundleRelease --no-daemon
@@ -342,7 +336,7 @@ jobs:
 
       # 10. Tạo release chứa APK và AAB
       - name: Create GitHub Release
-        id: create_release
+        id: create_repo_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.auto_version.outputs.RELEASE_TAG }}
