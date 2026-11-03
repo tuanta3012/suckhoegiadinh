@@ -2,7 +2,7 @@
   "name": "suc-khoe-gia-dinh",
   "private": true,
   "version": "1.0.0",
-  "buildAab": true,
+  "buildaab": false,
   "type": "module",
   "scripts": {
     "dev": "vite",

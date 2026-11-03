@@ -30,21 +30,21 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      # 2. Tự động lấy versionName, buildAab từ package.json & versionCode từ Git Commit Count
+      # 2. Tự động lấy versionName, buildaab từ package.json & versionCode từ Git Commit Count
       - name: Determine Auto Version
         id: auto_version
         run: |
           BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo "1")
           PACKAGE_VERSION=$(node -p "try { require('./package.json').version || '1.0.0' } catch(e) { '1.0.0' }")
-          BUILD_AAB=$(node -p "try { String(Boolean(require('./package.json').buildAab)) } catch(e) { 'false' }")
-          RELEASE_VERSION="${PACKAGE_VERSION}.${BUILD_NUMBER}"
+          BUILD_AAB=$(node -p "try { const p = require('./package.json'); String(Boolean(p.buildaab !== undefined ? p.buildaab : p.buildAab)) } catch(e) { 'false' }")
+          RELEASE_VERSION="${PACKAGE_VERSION}"
           RELEASE_TAG="v${RELEASE_VERSION}"
           echo "CODE=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           echo "NAME=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
           echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_OUTPUT
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
           echo "BUILD_AAB=$BUILD_AAB" >> $GITHUB_OUTPUT
-          echo "Auto Generated versionCode: $BUILD_NUMBER, versionName: $RELEASE_VERSION, buildAab: $BUILD_AAB"
+          echo "Auto Generated versionCode: $BUILD_NUMBER, versionName: $RELEASE_VERSION, buildaab: $BUILD_AAB"
 
       # 3. Tạo init.gradle cấp hệ thống giải quyết triệt để lỗi BouncyCastle (bcprov) và androidx.browser metadata
       - name: Create Gradle Init Script for Dependencies & Browser Version
@@ -304,11 +304,11 @@ jobs:
 
       - name: Copy & Rename APK
         run: |
-          mkdir -p dist-release
+          mkdir -p dist-release dist-aab
           cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}.apk
           cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh.apk
 
-      # 10. Biên dịch phiên bản AAB cho Google Play (Chỉ chạy khi buildAab: true trong package.json)
+      # 10. Biên dịch phiên bản AAB cho Google Play (Chỉ chạy khi buildaab: true trong package.json)
       - name: Build Web Assets for Google Play AAB
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         env:
@@ -369,7 +369,7 @@ jobs:
           path: dist-aab/*.aab
           retention-days: 30
 
-      # 10. Tạo release chứa APK và AAB
+      # 10. Tạo release chứa APK và AAB (nếu có)
       - name: Create GitHub Release
         id: create_repo_release
         uses: softprops/action-gh-release@v2
@@ -377,12 +377,12 @@ jobs:
           tag_name: ${{ steps.auto_version.outputs.RELEASE_TAG }}
           name: Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}
           body: |
-            Bản phát hành Sức khỏe gia đình.
+            Bản phát hành Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}.
             - APK đã ký release để cài đặt trực tiếp.
-            - AAB đã ký release để phân phối qua Google Play.
           files: |
             dist-release/*.apk
             dist-aab/*.aab
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
