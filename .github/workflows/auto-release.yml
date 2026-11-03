@@ -246,6 +246,20 @@ jobs:
           fi
           chmod 600 "$RUNNER_TEMP/suckhoegiadinh-release.jks"
 
+      - name: Display Keystore Fingerprints (SHA-1 & SHA-256)
+        run: |
+          echo "============================================================"
+          echo "         ANDROID KEYSTORE CERTIFICATE FINGERPRINTS          "
+          echo "============================================================"
+          KEYSTORE_FILE="$RUNNER_TEMP/suckhoegiadinh-release.jks"
+          KEY_PASS="${{ secrets.ANDROID_RELEASE_STORE_PASSWORD != '' && secrets.ANDROID_RELEASE_STORE_PASSWORD || 'android' }}"
+          keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$KEY_PASS" | grep -E "(Alias name|SHA1|SHA256)" || true
+          echo "============================================================"
+          echo "### 🔑 Android Signing Key Fingerprints" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$KEY_PASS" | grep -E "(Alias name|SHA1|SHA256)" >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
       # 8. Build the signed sideload APK
       - name: Build Web Assets for APK
         env:
