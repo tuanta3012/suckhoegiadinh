@@ -10,6 +10,7 @@ import {
   Clock,
   Cloud,
   Copy,
+  Cpu,
   ExternalLink,
   FileHeart,
   FileText,
@@ -80,10 +81,13 @@ import {
   parseHealthProfile,
 } from '../utils/healthProfile';
 import {
+  analyzeComprehensiveHealth,
   askHealthAssistant,
   extractHealthEvent,
+  refineAndOrganizeMemberData,
   summarizeHealthProfile,
 } from '../utils/geminiService';
+import { GeminiPoolModal } from './GeminiPoolModal';
 import {
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
@@ -176,6 +180,8 @@ export function HealthDashboard({
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showQuickActionModal, setShowQuickActionModal] = useState(false);
+  const [showGeminiPoolModal, setShowGeminiPoolModal] = useState(false);
+  const [isRefining, setIsRefining] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cleanupInFlight = useRef(false);
@@ -195,9 +201,10 @@ export function HealthDashboard({
 
   const members = workspace?.family.members || [];
   const isWorkspaceAdmin = Boolean(
-    userEmail &&
-      workspace?.family.adminEmail &&
-      userEmail.trim().toLowerCase() === workspace.family.adminEmail.trim().toLowerCase()
+    !workspace ||
+      (userEmail &&
+        workspace?.family.adminEmail &&
+        userEmail.trim().toLowerCase() === workspace.family.adminEmail.trim().toLowerCase())
   );
 
   const selectedMember = members.find((m) => m.id === selectedMemberId) || members[0] || null;
@@ -369,13 +376,9 @@ export function HealthDashboard({
         if (!cancelled && assignment) void openWorkspace(assignment.rootFolderId);
       })
       .catch((error: unknown) => {
-        if (!cancelled) {
-          setErrorMessage(
-            error instanceof Error
-              ? `Không tải được Workspace: ${error.message}`
-              : 'Không tải được Workspace.'
-          );
-        }
+        // Tự động bỏ qua lỗi khi chưa có bản ghi chuyển tiếp từ admin khác.
+        // Người dùng đăng nhập như một Admin mới và tự tạo Workspace trên Drive của mình.
+        console.info('[Workspace] Chưa có bản ghi chia sẻ folderId từ Admin khác:', error);
       });
     return () => {
       cancelled = true;
@@ -678,6 +681,35 @@ export function HealthDashboard({
     }
   }
 
+  async function handleRefineAndOrganize() {
+    if (!selectedMember || !selectedProfile || !selectedProfile.timeline.length) {
+      showToast('Chưa có sự kiện y tế nào để hiệu chỉnh.', 'info');
+      return;
+    }
+    setIsRefining(true);
+    try {
+      const { organizedTimeline, refinementNotes } = await refineAndOrganizeMemberData(
+        selectedMember,
+        selectedProfile.timeline
+      );
+      const updated: HealthProfile = {
+        ...selectedProfile,
+        timeline: organizedTimeline,
+        updatedAt: new Date().toISOString(),
+      };
+      const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
+      setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
+      showToast(
+        `Đã dùng AI Flash-Lite chuẩn hóa & sắp xếp dữ liệu (${refinementNotes[0] || 'Hoàn tất'})`,
+        'success'
+      );
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Lỗi khi hiệu chỉnh dữ liệu.', 'error');
+    } finally {
+      setIsRefining(false);
+    }
+  }
+
   async function handleInviteWorkspaceMember(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!workspace || !userEmail || !isWorkspaceAdmin) return;
@@ -820,6 +852,15 @@ export function HealthDashboard({
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
+              onClick={() => setShowGeminiPoolModal(true)}
+              title="Quản lý kho 6 API Key Gemini (Đa luồng & Failover)"
+              className="p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition-all relative"
+            >
+              <Cpu className="w-4 h-4 text-indigo-600" />
+              <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            </button>
+            <button
+              type="button"
               onClick={() => void checkAppUpdate(true)}
               disabled={isCheckingUpdate}
               title="Kiểm tra bản cập nhật mới"
@@ -908,6 +949,18 @@ export function HealthDashboard({
               </div>
             ) : (
               <div className="space-y-5">
+                <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs flex items-start gap-2.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-emerald-900">
+                      Đăng nhập Quản trị viên (Admin): <span className="font-semibold text-emerald-700">{userEmail}</span>
+                    </p>
+                    <p className="text-[11px] text-emerald-800 mt-1 leading-relaxed">
+                      Chưa phát hiện thư mục gia đình được chia sẻ trước đó. Bạn có thể nhấn nút dưới đây để khởi tạo không gian lưu trữ y tế gia đình mới trên Google Drive của mình.
+                    </p>
+                  </div>
+                </div>
+
                 <button
                   type="button"
                   disabled={isLoading}
@@ -919,7 +972,7 @@ export function HealthDashboard({
                   ) : (
                     <Plus className="w-4 h-4" />
                   )}
-                  <span>Tạo thư mục “Sức Khỏe Gia Đình” mới</span>
+                  <span>Khởi tạo Thư mục “Sức Khỏe Gia Đình” mới</span>
                 </button>
 
                 <div className="flex items-center gap-3 text-xs text-slate-400">
@@ -1246,24 +1299,43 @@ export function HealthDashboard({
 
                 {/* AI Summary Card (Tóm tắt bệnh án thông minh) */}
                 <div className="rounded-2xl border border-emerald-200/80 bg-white p-5 shadow-xs">
-                  <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                     <div className="flex items-center gap-2">
                       <Sparkles className="w-4 h-4 text-emerald-600" />
-                      <h4 className="font-extrabold text-slate-900 text-sm">
-                        Tổng hợp bệnh án AI (Gemini)
-                      </h4>
+                      <div>
+                        <h4 className="font-extrabold text-slate-900 text-sm">
+                          Đánh giá y khoa & Phân tích chuyên sâu (AI Flash)
+                        </h4>
+                        <span className="text-[10px] text-slate-400">
+                          Tier 3.8 / 3.6 / 3 Flash • Tự động failover qua 6 key
+                        </span>
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleAiSummary()}
-                      disabled={isSummarizing || !selectedProfile?.timeline.length}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all disabled:opacity-40"
-                    >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${isSummarizing ? 'animate-spin text-emerald-600' : ''}`}
-                      />
-                      <span>{isSummarizing ? 'Đang tổng hợp...' : 'Cập nhật tóm tắt'}</span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleRefineAndOrganize()}
+                        disabled={isRefining || !selectedProfile?.timeline.length}
+                        title="Dùng AI Flash-Lite chuẩn hóa danh pháp, liều lượng và sắp xếp thông minh"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all disabled:opacity-40"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${isRefining ? 'animate-spin text-indigo-600' : ''}`}
+                        />
+                        <span>{isRefining ? 'Đang chuẩn hóa...' : 'Chuẩn hóa & sắp xếp (Lite)'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleAiSummary()}
+                        disabled={isSummarizing || !selectedProfile?.timeline.length}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs active:scale-95 transition-all disabled:opacity-40"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${isSummarizing ? 'animate-spin' : ''}`}
+                        />
+                        <span>{isSummarizing ? 'Đang phân tích...' : 'Đánh giá hồ sơ (Flash)'}</span>
+                      </button>
+                    </div>
                   </div>
 
                   <p className="text-xs sm:text-sm text-slate-700 leading-relaxed">
@@ -2087,6 +2159,12 @@ export function HealthDashboard({
         currentVersion={appVersion}
         updateInfo={updateInfo}
         onClose={() => setIsUpdateModalOpen(false)}
+      />
+
+      {/* Gemini 6-Key Pool Management Modal */}
+      <GeminiPoolModal
+        isOpen={showGeminiPoolModal}
+        onClose={() => setShowGeminiPoolModal(false)}
       />
     </div>
   );

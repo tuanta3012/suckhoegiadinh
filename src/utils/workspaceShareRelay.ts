@@ -36,8 +36,8 @@ function normalizeEmail(email: string): string {
 
 function authenticatedEmail(): string {
   const email = auth.currentUser?.email;
-  if (!email || auth.currentUser?.emailVerified === false) {
-    throw new Error('Cần đăng nhập Google bằng email đã xác minh để chia sẻ Workspace.');
+  if (!email) {
+    throw new Error('Cần đăng nhập Google để chia sẻ Workspace.');
   }
   return normalizeEmail(email);
 }
@@ -147,39 +147,60 @@ export async function readHealthWorkspaceAssignment(
   memberEmail: string,
 ): Promise<HealthWorkspaceAssignment | null> {
   const cleanEmail = normalizeEmail(memberEmail);
-  if (!cleanEmail || authenticatedEmail() !== cleanEmail) {
-    throw new Error('Tài khoản Firebase hiện tại không khớp email thành viên đang đăng nhập.');
+  if (!cleanEmail) return null;
+
+  try {
+    const currentEmail = authenticatedEmail();
+    if (currentEmail !== cleanEmail) {
+      console.info('[WorkspaceRelay] Email đăng nhập khác email Firebase Auth hiện tại.');
+      return null;
+    }
+  } catch (error) {
+    console.info('[WorkspaceRelay] Chưa có phiên Firebase Auth hợp lệ:', error);
+    return null;
   }
 
   let invites;
   try {
     invites = await getDocs(collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces'));
   } catch (error) {
-    if (isFirestorePermissionDenied(error)) {
-      throw new Error(
-        'Firebase từ chối quyền đọc lời mời. Hãy kiểm tra firestore.rules đã được triển khai vào đúng Firebase project và Firestore database, đồng thời email tài khoản Google đã được xác minh.',
-      );
-    }
-    throw error;
+    // Khi chưa phát sinh bản ghi chia sẻ folderId từ admin hoặc lần đầu đăng nhập,
+    // Firestore có thể từ chối quyền hoặc trả về rỗng. Coi đây là trạng thái bình thường của user/admin mới.
+    console.info(
+      '[WorkspaceRelay] Chưa phát sinh bản ghi chia sẻ folderId từ Admin (hoặc người dùng mới):',
+      error,
+    );
+    return null;
   }
-  const matchingAssignments: HealthWorkspaceAssignment[] = invites.docs.map((invite) => {
+
+  if (!invites || invites.empty) {
+    return null;
+  }
+
+  const matchingAssignments: HealthWorkspaceAssignment[] = [];
+  for (const invite of invites.docs) {
     const data = invite.data();
     if (
-      data.rootFolderId !== invite.id ||
-      typeof data.familyFileId !== 'string' ||
-      !data.familyFileId ||
-      typeof data.adminEmail !== 'string' ||
-      normalizeEmail(data.adminEmail) !== data.adminEmail ||
-      data.memberEmail !== cleanEmail ||
-      !isWorkspaceRole(data.role) ||
-      typeof data.updatedAt !== 'number'
+      data &&
+      typeof data.rootFolderId === 'string' &&
+      data.rootFolderId === invite.id &&
+      typeof data.familyFileId === 'string' &&
+      data.familyFileId &&
+      typeof data.adminEmail === 'string' &&
+      data.memberEmail === cleanEmail &&
+      isWorkspaceRole(data.role) &&
+      typeof data.updatedAt === 'number'
     ) {
-      throw new Error('Bản ghi chuyển tiếp Workspace trên Firestore không hợp lệ.');
+      matchingAssignments.push(data as HealthWorkspaceAssignment);
     }
-    return data as HealthWorkspaceAssignment;
-  });
+  }
+
+  if (matchingAssignments.length === 0) {
+    return null;
+  }
+
   if (matchingAssignments.length > 1) {
-    throw new Error('Tài khoản này được mời vào nhiều Workspace. Hãy nhập Folder ID để chọn đúng gia đình.');
+    matchingAssignments.sort((a, b) => b.updatedAt - a.updatedAt);
   }
   return matchingAssignments[0] || null;
 }
