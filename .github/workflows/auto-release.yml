@@ -306,15 +306,13 @@ jobs:
         run: |
           mkdir -p dist-release dist-aab
           cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}.apk
-          cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh.apk
-
+          
       # 10. Biên dịch phiên bản AAB cho Google Play (Chỉ chạy khi buildaab: true trong package.json)
       - name: Build Web Assets for Google Play AAB
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         env:
           VITE_APP_MODE: play
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
-          VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
         run: npm run build
 
       - name: Sync AAB Assets to Android
@@ -375,7 +373,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.auto_version.outputs.RELEASE_TAG }}
-          name: Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}
+          name: Phiên bản v${{ steps.auto_version.outputs.RELEASE_VERSION }}
           body: |
             Bản phát hành Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}.
             - APK đã ký release để cài đặt trực tiếp.
