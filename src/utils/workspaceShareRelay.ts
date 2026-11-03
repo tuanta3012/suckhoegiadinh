@@ -46,6 +46,15 @@ function isWorkspaceRole(value: unknown): value is WorkspaceAccessRole {
   return value === 'EDITOR' || value === 'VIEWER';
 }
 
+function isFirestorePermissionDenied(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'permission-denied'
+  );
+}
+
 function memberAssignmentRef(rootFolderId: string, memberEmail: string) {
   return doc(db, RELAY_COLLECTION, rootFolderId, MEMBER_COLLECTION, normalizeEmail(memberEmail));
 }
@@ -142,7 +151,17 @@ export async function readHealthWorkspaceAssignment(
     throw new Error('Tài khoản Firebase hiện tại không khớp email thành viên đang đăng nhập.');
   }
 
-  const invites = await getDocs(collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces'));
+  let invites;
+  try {
+    invites = await getDocs(collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces'));
+  } catch (error) {
+    if (isFirestorePermissionDenied(error)) {
+      throw new Error(
+        'Firebase từ chối quyền đọc lời mời. Hãy kiểm tra firestore.rules đã được triển khai vào đúng Firebase project và Firestore database, đồng thời email tài khoản Google đã được xác minh.',
+      );
+    }
+    throw error;
+  }
   const matchingAssignments: HealthWorkspaceAssignment[] = invites.docs.map((invite) => {
     const data = invite.data();
     if (

@@ -5,14 +5,19 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.email_verified == true;
     }
 
+    function authenticatedEmail() {
+      return request.auth.token.email.lower();
+    }
+
     function ownsEmail(email) {
-      return signedIn() && request.auth.token.email == email;
+      return signedIn() && email is string && authenticatedEmail() == email.lower();
     }
 
     function workspaceAdmin(rootId) {
       return signedIn()
-        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail
-          == request.auth.token.email;
+        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail is string
+        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail.lower()
+          == authenticatedEmail();
     }
 
     function validAssignment(rootId, memberEmail) {
@@ -22,8 +27,10 @@ service cloud.firestore {
         && request.resource.data.rootFolderId == rootId
         && request.resource.data.familyFileId is string
         && request.resource.data.familyFileId.size() > 0
-        && request.resource.data.adminEmail == request.auth.token.email
-        && request.resource.data.memberEmail == memberEmail
+        && request.resource.data.adminEmail is string
+        && request.resource.data.adminEmail.lower() == authenticatedEmail()
+        && request.resource.data.memberEmail is string
+        && request.resource.data.memberEmail.lower() == memberEmail.lower()
         && (request.resource.data.role == 'EDITOR' || request.resource.data.role == 'VIEWER')
         && request.resource.data.updatedAt is number;
     }
@@ -74,7 +81,8 @@ service cloud.firestore {
         && request.resource.data.rootFolderId == rootId
         && request.resource.data.familyFileId is string
         && request.resource.data.familyFileId.size() > 0
-        && request.resource.data.adminEmail == request.auth.token.email
+        && request.resource.data.adminEmail is string
+        && request.resource.data.adminEmail.lower() == authenticatedEmail()
         && request.resource.data.updatedAt is number;
       allow update: if ownsEmail(resource.data.adminEmail)
         && request.resource.data.rootFolderId == resource.data.rootFolderId

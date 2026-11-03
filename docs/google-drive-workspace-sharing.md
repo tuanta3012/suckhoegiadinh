@@ -14,6 +14,8 @@ The app is configured for Firebase project `gen-lang-client-0324091386` and the 
 
 Before using invitations, deploy the repository's `firestore.rules` to that exact project **and database** in Firebase Console. Firestore rules do not deploy automatically with the app. The rules grant access only to the `health_workspace_relays` and `health_workspace_invites` paths; all other document paths remain denied.
 
+Email comparisons in the rules are case-insensitive to match the app's normalized lowercase invitation paths.
+
 After deployment, verify an Admin can create a Workspace and send an invitation, and that the invited account can open the same Drive folder after the Admin separately shares it in Google Drive. Do not treat a successful Firestore invitation as proof of Drive access.
 
 ## Operational limitations
