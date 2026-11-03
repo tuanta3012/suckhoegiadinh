@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chính sách Bảo mật - Sổ tiết kiệm</title>
+    <title>Chính sách Bảo mật - Sức khỏe gia đình</title>
     <meta name="google-site-verification" content="google38e39784f53380bb">
     <link rel="icon" type="image/png" href="stk_app_icon.png">
     <style>
@@ -96,36 +96,36 @@
 <body>
     <div class="container">
         <div class="header-logo-box">
-            <img src="stk_app_icon.png" alt="Logo Sổ tiết kiệm" class="app-logo">
+            <img src="stk_app_icon.png" alt="Logo Sức khỏe gia đình" class="app-logo">
             <div>
                 <h1>Chính sách Bảo mật (Privacy Policy)</h1>
-                <p class="app-subtitle">Ứng dụng Quản lý Sổ tiết kiệm</p>
+                <p class="app-subtitle">Ứng dụng Quản lý Hồ sơ Sức khỏe Gia đình</p>
             </div>
         </div>
-        <p><em>Cập nhật lần cuối: Ngày 30 tháng 09 năm 2026</em></p>
+        <p><em>Cập nhật lần cuối: Ngày 03 tháng 11 năm 2026</em></p>
         
-        <p>Ứng dụng <strong>Sổ tiết kiệm</strong> (sau đây gọi tắt là "Ứng dụng") cam kết bảo vệ tuyệt đối thông tin riêng tư và dữ liệu tài chính cá nhân của người dùng. Chính sách Bảo mật này mô tả cách thức ứng dụng của chúng tôi hoạt động, xử lý dữ liệu và quyền lợi của người dùng liên quan đến thông tin cá nhân.</p>
+        <p>Ứng dụng <strong>Sức khỏe gia đình</strong> giúp người dùng lưu trữ và theo dõi tài liệu sức khỏe của gia đình. Hồ sơ sức khỏe là dữ liệu nhạy cảm; chỉ kết nối tài khoản Google và chia sẻ thư mục Drive với những người được phép.</p>
 
-        <h2>1. Nguyên tắc Không Thu thập Dữ liệu (No Data Collection Policy)</h2>
-        <p>Ứng dụng của chúng tôi được thiết kế theo mô hình <strong>Local-first (Ưu tiên dữ liệu cục bộ)</strong>. Chúng tôi <strong>không có máy chủ trung gian</strong> lưu trữ thông tin tài chính của bạn:</p>
+        <h2>1. Nơi lưu trữ và quyền kiểm soát dữ liệu</h2>
+        <p>Tài liệu gốc được tải lên thư mục Google Drive do gia đình lựa chọn. Hồ sơ JSON của từng thành viên được lưu trong thư mục <code>profiles</code> trên cùng Drive. Google xử lý dữ liệu theo tài khoản và chính sách của Google; người tạo thư mục chịu trách nhiệm cấp và thu hồi quyền chia sẻ.</p>
         <ul>
-            <li>Chúng tôi không thu thập, không theo dõi và không lưu trữ bất kỳ thông tin nhạy cảm, số dư tài khoản hay sổ tiết kiệm nào của bạn trên bất kỳ hệ thống máy chủ bên thứ ba nào.</li>
-            <li>Mọi dữ liệu tính toán lãi suất, kỳ hạn gửi tiền và danh sách sổ tiết kiệm đều được xử lý và lưu trữ trực tiếp, an toàn trong bộ nhớ thiết bị của bạn.</li>
+            <li>Hồ sơ được đồng bộ dưới dạng JSON giữa các thiết bị có quyền truy cập thư mục Drive.</li>
+            <li>Tài liệu gốc chỉ được tự động xóa sau 3 năm khi hồ sơ đã có sự kiện số hóa liên kết với tài liệu đó. Hồ sơ JSON và timeline không bị xóa theo chính sách lưu giữ này.</li>
+            <li>Người dùng có thể xóa hoặc quản lý dữ liệu trực tiếp trong Google Drive. Xóa dữ liệu trên Drive có thể ảnh hưởng các thành viên khác đang dùng chung thư mục.</li>
         </ul>
 
-        <h2>2. Sử dụng Quyền truy cập Google Drive API</h2>
-        <p>Để hỗ trợ tính năng đồng bộ hóa và sao lưu dữ liệu gia đình tự động, Ứng dụng cung cấp tùy chọn liên kết với tài khoản Google Drive cá nhân của bạn. Khi bạn cấp quyền truy cập, Ứng dụng sẽ thực hiện:</p>
+        <h2>2. Google Sign-In và Google Drive</h2>
+        <p>Khi đăng nhập và cấp quyền Drive, Ứng dụng sử dụng thông tin tài khoản Google để xác thực và gọi Google Drive API nhằm đọc, tạo, cập nhật hồ sơ và tải tài liệu lên thư mục gia đình đã chọn.</p>
         <ul>
-            <li><strong>Mục đích truy cập:</strong> Đọc và ghi các tệp bảng tính Excel (`.xlsx`) hoặc tệp cấu hình (`.json`) do chính ứng dụng này tạo ra trên tài khoản Google Drive của bạn.</li>
-            <li><strong>Phạm vi quyền (Scopes):</strong> Chúng tôi chỉ sử dụng các quyền tối thiểu cần thiết như <code>https://www.googleapis.com/auth/drive.file</code> (chỉ truy cập các tệp được mở hoặc tạo bởi chính ứng dụng này) để thực hiện sao lưu và đồng bộ hóa giữa các thành viên trong gia đình bạn.</li>
-            <li><strong>Không chia sẻ dữ liệu:</strong> Dữ liệu trên Google Drive của bạn hoàn toàn thuộc sở hữu của bạn. Chúng tôi tuyệt đối không chia sẻ, bán hoặc chuyển giao thông tin này cho bất kỳ cá nhân hay tổ chức nào khác.</li>
+            <li>Ứng dụng yêu cầu scope <code>https://www.googleapis.com/auth/drive.file</code>; người dùng cần cấp quyền truy cập thư mục dùng chung cho tài khoản Google của họ.</li>
+            <li>Ứng dụng không nhận mật khẩu Google. Có thể thu hồi quyền đã cấp trong phần bảo mật của Tài khoản Google.</li>
         </ul>
 
-        <h2>3. Quyền Thông báo đẩy (Local Notifications)</h2>
-        <p>Ứng dụng yêu cầu quyền gửi thông báo cục bộ trên thiết bị của bạn để thực hiện nhiệm vụ nhắc nhở tự động ngày đáo hạn sổ tiết kiệm. Quyền thông báo này hoàn toàn chạy offline trên thiết bị của bạn, không gửi hay nhận dữ liệu từ bất kỳ máy chủ bên ngoài nào.</p>
+        <h2>3. Xử lý tài liệu bằng Gemini AI</h2>
+        <p>Tính năng AI chỉ hoạt động khi dịch vụ Gemini server-side được cấu hình. Khi người dùng yêu cầu trích xuất, tổng hợp hoặc hỏi đáp, tài liệu và phần hồ sơ liên quan sẽ được gửi đến endpoint Gemini đã cấu hình để xử lý. Endpoint, nhà cung cấp mô hình và thời hạn lưu dữ liệu cần được công bố trước khi bật tính năng này. Không gửi dữ liệu y tế nếu chưa đồng ý với việc xử lý đó.</p>
 
-        <h2>4. Bảo mật sinh trắc học (Biometric Authentication)</h2>
-        <p>Nếu bạn kích hoạt tính năng khóa bảo vệ bằng Vân tay hoặc Khuôn mặt (FaceID/TouchID), quy trình xác thực này được xử lý trực tiếp bởi hệ điều hành Android/iOS. Ứng dụng tuyệt đối không lưu giữ khóa sinh trắc học của bạn.</p>
+        <h2>4. Bảo vệ và giới hạn</h2>
+        <p>Ứng dụng chỉ lưu dữ liệu sức khỏe trên Drive gia đình đã chọn; dữ liệu không được mã hóa đầu-cuối bởi ứng dụng. Không dùng chung thiết bị đã mở khóa, bảo vệ tài khoản Google bằng xác thực mạnh và rà soát quyền thành viên. Nội dung trích xuất tự động có thể sai và không thay thế tư vấn y tế.</p>
 
         <h2>5. Thay đổi Chính sách Bảo mật</h2>
         <p>Chúng tôi có thể cập nhật chính sách bảo mật này theo thời gian để phù hợp với các nâng cấp kỹ thuật mới nhất. Mọi thay đổi sẽ được cập nhật công khai ngay tại trang này.</p>
@@ -135,13 +135,12 @@
         
         <div class="contact-box">
             <ul>
-                <li><strong>Email Hỗ trợ chính thức:</strong> <a href="mailto:sotietkiem.support@gmail.com">sotietkiem.support@gmail.com</a></li>
-                <li><strong>Trang báo lỗi GitHub Issues:</strong> <a href="https://github.com/tuanta3012/sotietkiem/issues" target="_blank">github.com/tuanta3012/sotietkiem/issues</a></li>
+                <li><strong>Trang hỗ trợ:</strong> <a href="https://github.com/tuanta3012/suckhoegiadinh/issues" target="_blank" rel="noopener noreferrer">github.com/tuanta3012/suckhoegiadinh/issues</a></li>
             </ul>
         </div>
 
         <div class="footer">
-            <p>&copy; 2026 Sổ tiết kiệm. Tất cả các quyền được bảo lưu.</p>
+            <p>&copy; 2026 Sức khỏe gia đình. Tất cả các quyền được bảo lưu.</p>
         </div>
     </div>
 </body>

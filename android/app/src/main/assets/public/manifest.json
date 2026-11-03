@@ -1,15 +1,15 @@
 {
   "id": "/",
-  "name": "Sổ tiết kiệm",
-  "short_name": "Sổ tiết kiệm",
-  "description": "Quản lý danh mục sổ tiết kiệm vợ chồng, theo dõi lịch đáo hạn gối đầu và tối ưu huy động vốn.",
+  "name": "Sức khỏe gia đình",
+  "short_name": "Sức khỏe gia đình",
+  "description": "Quản lý hồ sơ sức khỏe và tài liệu y tế của các thành viên gia đình.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0f172a",
   "theme_color": "#06b46f",
-  "categories": ["finance", "productivity", "utilities"],
+  "categories": ["health", "medical", "productivity"],
   "icons": [
     {
       "src": "/favicon-32x32.png",

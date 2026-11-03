@@ -1,92 +1,214 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getApps, getApp, initializeApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
-  User,
+  signInWithCredential,
+  signInWithPopup,
   signOut,
   setPersistence,
   browserLocalPersistence,
-  signInWithPopup,
-  signInWithCredential,
+  type User,
 } from 'firebase/auth';
 import { Capacitor } from '@capacitor/core';
 import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { AppSettings } from '../types';
+import {
+  getAuthSecureItem,
+  removeAuthSecureItem,
+  setAuthSecureItem,
+} from './secureStorage';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-
+const isNative = Capacitor.isNativePlatform();
 const provider = new GoogleAuthProvider();
 provider.addScope('https://www.googleapis.com/auth/drive.file');
 
+const ACCESS_TOKEN_KEY = 'health_google_drive_access_token';
+const ACCESS_TOKEN_EXPIRY_KEY = 'health_google_drive_access_token_expiry';
+const ACCESS_TOKEN_LIFETIME_MS = 55 * 60 * 1000;
+const REFRESH_TIMEOUT_MS = 8000;
+
 let cachedAccessToken: string | null = null;
 let cachedTokenExpiresAt: number | null = null;
+let googleAuthInitialization: Promise<void> | null = null;
+let silentRefreshInFlight: Promise<string | null> | null = null;
 
-export function getGoogleAccessToken(): string | null { return cachedAccessToken; }
+const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).catch((error: unknown) => {
+  console.error('[Firebase Auth] Could not configure local persistence.', error);
+});
+
+export function getGoogleAccessToken(): string | null {
+  return cachedAccessToken;
+}
 
 export function isGoogleTokenValid(): boolean {
-  return cachedAccessToken !== null && cachedTokenExpiresAt !== null && Date.now() < cachedTokenExpiresAt - 60_000;
+  return Boolean(
+    cachedAccessToken &&
+      cachedTokenExpiresAt &&
+      Date.now() < cachedTokenExpiresAt - 60_000,
+  );
 }
 
-export function setGoogleAccessToken(token: string | null, expiresAtMs?: number) {
-    cachedAccessToken = token;
-    cachedTokenExpiresAt = expiresAtMs || null;
-}
+async function storeAccessToken(token: string, expiresAt = Date.now() + ACCESS_TOKEN_LIFETIME_MS): Promise<void> {
+  if (!token) throw new Error('Google không trả về Drive access token.');
 
-export async function fetchWithRetry(url: string | URL, options?: RequestInit, retries = 3, delay = 1000): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
-  try {
-    const response = await fetch(url.toString(), { ...options, signal: controller.signal });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (retries > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return fetchWithRetry(url, options, retries - 1, delay * 2);
-    }
-    throw error;
+  if (isNative) {
+    await Promise.all([
+      setAuthSecureItem(ACCESS_TOKEN_KEY, token),
+      setAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt)),
+    ]);
+  } else {
+    sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
+    sessionStorage.setItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt));
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(ACCESS_TOKEN_EXPIRY_KEY);
   }
+  cachedAccessToken = token;
+  cachedTokenExpiresAt = expiresAt;
+}
+
+async function clearAccessToken(): Promise<void> {
+  cachedAccessToken = null;
+  cachedTokenExpiresAt = null;
+  if (isNative) {
+    await Promise.all([
+      removeAuthSecureItem(ACCESS_TOKEN_KEY),
+      removeAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY),
+    ]);
+  } else {
+    sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+    sessionStorage.removeItem(ACCESS_TOKEN_EXPIRY_KEY);
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(ACCESS_TOKEN_EXPIRY_KEY);
+  }
+}
+
+export async function restoreGoogleAuthSession(): Promise<boolean> {
+  try {
+    const [token, expiry] = isNative
+      ? await Promise.all([
+          getAuthSecureItem(ACCESS_TOKEN_KEY),
+          getAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY),
+        ])
+      : [
+          sessionStorage.getItem(ACCESS_TOKEN_KEY),
+          sessionStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY),
+        ];
+    const expiresAt = expiry ? Number(expiry) : NaN;
+    if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      await clearAccessToken();
+      return false;
+    }
+
+    cachedAccessToken = token;
+    cachedTokenExpiresAt = expiresAt;
+    return true;
+  } catch (error) {
+    console.error('[Google Auth] Could not restore the Drive session.', error);
+    throw new Error('Không thể khôi phục phiên Drive an toàn trên thiết bị.');
+  }
+}
+
+export async function ensureGoogleAuthInitialized(): Promise<void> {
+  if (!isNative || googleAuthInitialization) {
+    await googleAuthInitialization;
+    return;
+  }
+
+  googleAuthInitialization = GoogleAuth.initialize({
+    clientId: firebaseConfig.oAuthClientId,
+    scopes: ['profile', 'email', 'openid', 'https://www.googleapis.com/auth/drive.file'],
+    grantOfflineAccess: false,
+  }).finally(() => {
+    googleAuthInitialization = null;
+  });
+  await googleAuthInitialization;
+}
+
+export async function trySilentRefresh(force = false): Promise<string | null> {
+  if (!force && isGoogleTokenValid()) return cachedAccessToken;
+  if (!isNative) return null;
+  if (silentRefreshInFlight) return silentRefreshInFlight;
+
+  silentRefreshInFlight = (async () => {
+    try {
+      await ensureGoogleAuthInitialized();
+      const refreshed = await Promise.race([
+        GoogleAuth.refresh(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Hết thời gian gia hạn phiên Google.')), REFRESH_TIMEOUT_MS),
+        ),
+      ]);
+      if (!refreshed.accessToken) return null;
+      await storeAccessToken(refreshed.accessToken);
+      return refreshed.accessToken;
+    } catch (error) {
+      console.warn('[Google Auth] Silent token refresh failed; interactive sign-in is required.', error);
+      return null;
+    } finally {
+      silentRefreshInFlight = null;
+    }
+  })();
+  return silentRefreshInFlight;
+}
+
+export async function getValidGoogleAccessToken(): Promise<string> {
+  if (isGoogleTokenValid() && cachedAccessToken) return cachedAccessToken;
+  const refreshed = await trySilentRefresh();
+  if (refreshed) return refreshed;
+  throw new Error('Phiên Google Drive đã hết hạn. Hãy đăng nhập lại để cấp quyền Drive.');
 }
 
 export async function signOutGoogle(): Promise<void> {
-  cachedAccessToken = null;
+  await clearAccessToken();
   await signOut(auth);
-  if (Capacitor.isNativePlatform()) {
-     try { await (GoogleAuth as any).signOut(); } catch {}
+  if (isNative) {
+    await GoogleAuth.signOut();
   }
 }
 
-export const initGoogleAuth = (
+export function initGoogleAuth(
   onSuccess?: (user: User, token: string | null) => void,
-  onSignedOut?: () => void
-) => {
+  onSignedOut?: () => void,
+): () => void {
   return onAuthStateChanged(auth, (user) => {
-    if (user && onSuccess) onSuccess(user, null);
-    else if (!user && onSignedOut) onSignedOut();
+    void (async () => {
+      await firebasePersistenceReady;
+      if (!user) {
+        onSignedOut?.();
+        return;
+      }
+
+      const token = isGoogleTokenValid() ? cachedAccessToken : await trySilentRefresh();
+      onSuccess?.(user, token);
+    })().catch((error: unknown) => {
+      console.error('[Google Auth] Failed to restore authenticated session.', error);
+      if (user) onSuccess?.(user, null);
+    });
   });
-};
+}
 
 export async function signInWithGoogle(): Promise<{ user: User; accessToken: string }> {
-  let accessToken: string;
+  await firebasePersistenceReady;
   let user: User;
+  let accessToken: string | null;
 
-  if (Capacitor.isNativePlatform()) {
+  if (isNative) {
+    await ensureGoogleAuthInitialized();
     const result = await GoogleAuth.signIn();
     accessToken = result.authentication.accessToken;
+    if (!result.authentication.idToken) throw new Error('Google không trả về ID token để đăng nhập.');
     const credential = GoogleAuthProvider.credential(result.authentication.idToken);
-    const userCredential = await signInWithCredential(auth, credential);
-    user = userCredential.user;
+    user = (await signInWithCredential(auth, credential)).user;
   } else {
     const result = await signInWithPopup(auth, provider);
     user = result.user;
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    accessToken = credential?.accessToken || "";
+    accessToken = GoogleAuthProvider.credentialFromResult(result)?.accessToken || null;
   }
 
-  setGoogleAccessToken(accessToken, Date.now() + 3600 * 1000); // Assuming 1 hour expiry for now
+  if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');
+  await storeAccessToken(accessToken);
   return { user, accessToken };
 }

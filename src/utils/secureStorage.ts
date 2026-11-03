@@ -36,7 +36,8 @@ export async function setSecureItem(key: string, value: string): Promise<void> {
  */
 export async function setAuthSecureItem(key: string, value: string): Promise<void> {
   if (!isNative) {
-    localStorage.setItem(key, value);
+    sessionStorage.setItem(key, value);
+    localStorage.removeItem(key);
     return;
   }
   await SecureStoragePlugin.set({ key, value });
@@ -76,7 +77,7 @@ export async function getSecureItem(key: string): Promise<string | null> {
  * Read credentials from native encrypted storage without falling back to plaintext copies.
  */
 export async function getAuthSecureItem(key: string): Promise<string | null> {
-  if (!isNative) return getSecureItem(key);
+  if (!isNative) return sessionStorage.getItem(key);
   try {
     const result = await SecureStoragePlugin.get({ key });
     return result?.value || null;
@@ -84,6 +85,15 @@ export async function getAuthSecureItem(key: string): Promise<string | null> {
     console.warn(`[SecureStorage] Không thể đọc credential "${key}" từ vùng lưu trữ mã hóa.`, err);
     return null;
   }
+}
+
+export async function removeAuthSecureItem(key: string): Promise<void> {
+  if (!isNative) {
+    sessionStorage.removeItem(key);
+    localStorage.removeItem(key);
+    return;
+  }
+  await SecureStoragePlugin.remove({ key });
 }
 
 /**

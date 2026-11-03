@@ -175,7 +175,7 @@ const gradlePath = path.join(packageRoot, 'android', 'build.gradle');
 let gradle = fs.readFileSync(gradlePath, 'utf8');
 gradle = gradle.replace(
   /implementation\s+['"]com\.google\.android\.gms:play-services-auth:[^'"]+['"]/,
-  "implementation 'com.google.android.gms:play-services-auth:21.6.0'"
+  "implementation 'com.google.android.gms:play-services-auth:21.3.0'"
 );
 fs.writeFileSync(gradlePath, gradle);
 

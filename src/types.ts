@@ -6,26 +6,84 @@ export interface FamilyMember {
   id: string;
   name: string;
   role: 'father' | 'mother' | 'child' | 'other';
-  driveFolderId: string; // ID of the personal folder in Shared Drive
+  driveFolderId: string;
+  profileFileId: string;
   avatarUrl?: string;
-  birthDate?: string; // YYYY-MM-DD
+  birthDate?: string;
 }
 
-export interface HealthRecord {
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+export interface HealthMetric {
+  name: string;
+  value: number;
+  unit: string;
+}
+
+export interface Medication {
+  name: string;
+  dosage?: string;
+  frequency?: string;
+  duration?: string;
+}
+
+export interface HealthEvent {
   id: string;
-  memberId: string; // Links to FamilyMember
-  type: 'medical_report' | 'prescription' | 'test_result' | 'other';
+  sourceFileId: string;
+  sourceFileName: string;
+  type: 'medical_report' | 'prescription' | 'test_result' | 'vaccination' | 'discharge' | 'other';
   title: string;
-  date: string; // Document date (YYYY-MM-DD)
+  date: string;
+  facility?: string;
+  diagnoses: string[];
+  medications: Medication[];
+  metrics: HealthMetric[];
+  advice?: string;
+  nextFollowUp?: string;
+  notes?: string;
+  extractedData?: Record<string, JsonValue>;
+  recordedAt: string;
+}
+
+export interface HealthSource {
   driveFileId: string;
-  driveFileUrl: string;
-  tags?: string[];
-  summary?: string; // AI generated summary
+  fileName: string;
+  mimeType: string;
+  uploadedAt: string;
+  status: 'pending' | 'processed';
+  digitizedAt?: string;
+  rawDeletedAt?: string;
+}
+
+export interface HealthSummary {
+  latestEventDate?: string;
+  latestDiagnoses: string[];
+  latestMetrics: Record<string, HealthMetric & { date: string }>;
+  nextFollowUp?: string;
+  narrative?: string;
+}
+
+export interface HealthProfile {
+  schemaVersion: 1;
+  member: FamilyMember;
+  timeline: HealthEvent[];
+  sources: HealthSource[];
+  summary: HealthSummary;
   createdAt: string;
   updatedAt: string;
 }
 
-export type UserRole = 'ADMIN' | 'VIEWER';
+export interface HealthFamily {
+  schemaVersion: 1;
+  adminEmail?: string;
+  rawFilesFolderId: string;
+  profilesFolderId: string;
+  members: FamilyMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type UserRole = 'ADMIN' | 'EDITOR' | 'VIEWER';
 
 export interface WorkspaceMember {
   id: string;
@@ -36,14 +94,14 @@ export interface WorkspaceMember {
 }
 
 export interface AppSettings {
-  sharedFolderId?: string; // ID of the "Suc khoe gia dinh" folder
+  sharedFolderId?: string;
   members?: FamilyMember[];
   notificationsEnabled?: boolean;
   enableBiometricLogin?: boolean;
 }
 
 export function canEditData(role?: string | null): boolean {
-  return true;
+  return role === 'ADMIN' || role === 'EDITOR';
 }
 export interface AuthUser {
   email: string;

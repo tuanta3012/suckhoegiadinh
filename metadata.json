@@ -1,6 +1,6 @@
 {
-  "name": "Suc khoe gia dinh",
-  "description": "Quan ly va theo doi suc khoe cua cac thanh vien trong gia dinh.",
+  "name": "Sức khỏe gia đình",
+  "description": "Lưu trữ tài liệu y tế trên Google Drive và theo dõi hồ sơ sức khỏe gia đình theo thời gian.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

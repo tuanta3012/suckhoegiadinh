@@ -36,11 +36,15 @@ jobs:
         run: |
           BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo "1")
           PACKAGE_VERSION=$(node -p "try { require('./package.json').version || '1.0.0' } catch(e) { '1.0.0' }")
-          BUILD_AAB=$(node -p "try { Boolean(require('./package.json').buildAab) } catch(e) { false }")
+          BUILD_AAB=$(node -p "try { String(Boolean(require('./package.json').buildAab)) } catch(e) { 'false' }")
+          RELEASE_VERSION="${PACKAGE_VERSION}.${BUILD_NUMBER}"
+          RELEASE_TAG="v${RELEASE_VERSION}"
           echo "CODE=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           echo "NAME=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
           echo "BUILD_AAB=$BUILD_AAB" >> $GITHUB_OUTPUT
-          echo "Auto Generated versionCode: $BUILD_NUMBER, versionName: $PACKAGE_VERSION, buildAab: $BUILD_AAB"
+          echo "Auto Generated versionCode: $BUILD_NUMBER, versionName: $RELEASE_VERSION, buildAab: $BUILD_AAB"
 
       # 3. Tạo init.gradle cấp hệ thống giải quyết triệt để lỗi BouncyCastle (bcprov) và androidx.browser metadata
       - name: Create Gradle Init Script for Dependencies & Browser Version
@@ -74,13 +78,7 @@ jobs:
 
       # 4. Cài đặt các thư viện cần thiết (bao gồm cả Capacitor Android Core)
       - name: Install Dependencies
-        run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
-          else
-            npm install --legacy-peer-deps
-          fi
-          node scripts/patch-google-auth.cjs
+        run: npm ci --legacy-peer-deps
 
       - name: Type-check and test
         run: |
@@ -108,16 +106,16 @@ jobs:
       - name: Update Android Config, SDK, Anti-Backup Rules & Strings
         env:
           VERSION_CODE: ${{ steps.auto_version.outputs.CODE }}
-          VERSION_NAME: ${{ steps.auto_version.outputs.NAME }}
+          VERSION_NAME: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
         run: |
           mkdir -p android/app/src/main/res/values
           cat << 'EOF' > android/app/src/main/res/values/strings.xml
           <?xml version='1.0' encoding='utf-8'?>
           <resources>
-              <string name="app_name">Sổ tiết kiệm</string>
-              <string name="title_activity_main">Sổ tiết kiệm</string>
-              <string name="package_name">com.tietkiemgiadinh.app</string>
-              <string name="custom_url_scheme">com.tietkiemgiadinh.app</string>
+              <string name="app_name">Sức khỏe gia đình</string>
+              <string name="title_activity_main">Sức khỏe gia đình</string>
+              <string name="package_name">com.suckhoegiadinh.app</string>
+              <string name="custom_url_scheme">com.suckhoegiadinh.app</string>
               <string name="server_client_id">864440372329-fgoo89lqp196nvcptmfc7pquofuj8agt.apps.googleusercontent.com</string>
           </resources>
           EOF
@@ -237,50 +235,28 @@ jobs:
           npx @capacitor/assets generate --android || true
           python3 scripts/generate_app_icons.py
 
-      # 8. Khởi tạo & Sử dụng Keystore cố định trong Repo (Không bao giờ đổi SHA-1)
-      - name: Setup Permanent Fixed Keystore
+      - name: Prepare protected Android release signing key
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
-          mkdir -p keystore ~/.android android/app
-          
-          # 1. Ưu tiên giải mã Keystore vĩnh viễn từ file b64 trong Repo
-          if [ -f "keystore/debug.keystore.b64" ]; then
-            echo "Khôi phục Keystore cố định từ keystore/debug.keystore.b64..."
-            base64 -d keystore/debug.keystore.b64 > keystore/debug.keystore
-          elif [ ! -f "keystore/debug.keystore" ]; then
-            echo "Khởi tạo Keystore cố định cho Repository..."
-            keytool -genkeypair -v \
-              -keystore keystore/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug, O=Android, C=US"
-            base64 -w 0 keystore/debug.keystore > keystore/debug.keystore.b64
+          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ] || \
+             [ -z "$ANDROID_RELEASE_STORE_PASSWORD" ] || \
+             [ -z "$ANDROID_RELEASE_KEY_ALIAS" ] || \
+             [ -z "$ANDROID_RELEASE_KEY_PASSWORD" ]; then
+            echo "::error::Release builds require the four ANDROID_RELEASE_* GitHub Actions secrets."
+            exit 1
           fi
-          
-          # Đồng bộ keystore cố định vào các vị trí chuẩn của Android build
-          cp keystore/debug.keystore ~/.android/debug.keystore
-          cp keystore/debug.keystore android/app/debug.keystore
-          
-          SHA1_VAL=$(keytool -list -v -keystore keystore/debug.keystore -alias androiddebugkey -storepass android | grep "SHA1:" | head -1 | awk '{print $2}')
-          
-          echo "===================================================="
-          echo "=== PERMANENT SHA-1 FINGERPRINT FOR FIREBASE ======="
-          echo "SHA-1: $SHA1_VAL"
-          echo "===================================================="
-          
-          echo "### 🔑 Android App Fingerprints (SHA-1)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Package Name:** \`com.tietkiemgiadinh.app\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cố định SHA-1:** \`$SHA1_VAL\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Mã này được cố định vĩnh viễn trong file \`keystore/debug.keystore\`." >> $GITHUB_STEP_SUMMARY
-          echo "- Hãy đối chiếu với Firebase Console: nếu chưa có mã trên, bấm **Add fingerprint** và dán vào." >> $GITHUB_STEP_SUMMARY
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/suckhoegiadinh-release.jks"
+          chmod 600 "$RUNNER_TEMP/suckhoegiadinh-release.jks"
 
-      # 9. Biên dịch phiên bản APK Sideload (Có bật Kiểm tra cập nhật)
+      # 8. Build the signed sideload APK
       - name: Build Web Assets for APK
         env:
           VITE_APP_MODE: apk
+          VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
           VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
         run: npm run build
 
@@ -289,31 +265,28 @@ jobs:
           node scripts/patch-google-auth.cjs
           npx cap sync android
 
-      - name: Compile APK file
+      - name: Compile signed APK
+        env:
+          ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/suckhoegiadinh-release.jks
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
           cd android
-          echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" >> gradle.properties
-          chmod +x gradlew
-          set -o pipefail
-          ./gradlew assembleDebug --no-daemon 2>&1 | tee /tmp/gradle_build.log || {
-            BUILD_STATUS=$?
-            echo "=========================================================="
-            echo "=== CHI TIẾT LỖI BIÊN DỊCH Ở ĐÂY (ERROR DETAILS): ==="
-            echo "=========================================================="
-            grep -E -C 3 -i "(error:|cannot find symbol|compilation failed|FAILED)" /tmp/gradle_build.log | tail -n 40 || tail -n 30 /tmp/gradle_build.log
-            exit $BUILD_STATUS
-          }
+          ./gradlew assembleRelease --no-daemon
 
       - name: Copy & Rename APK
         run: |
           mkdir -p dist-release
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist-release/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist-release/suckhoegiadinh.apk
 
       # 10. Biên dịch phiên bản AAB cho Google Play (Chỉ chạy khi buildAab: true trong package.json)
       - name: Build Web Assets for Google Play AAB
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         env:
           VITE_APP_MODE: play
+          VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
           VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
         run: npm run build
 
@@ -337,28 +310,10 @@ jobs:
             }
           "
 
-      - name: Prepare protected Google Play signing key
-        if: steps.auto_version.outputs.BUILD_AAB == 'true'
-        env:
-          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
-          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-        run: |
-          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ] || \
-             [ -z "$ANDROID_RELEASE_STORE_PASSWORD" ] || \
-             [ -z "$ANDROID_RELEASE_KEY_ALIAS" ] || \
-             [ -z "$ANDROID_RELEASE_KEY_PASSWORD" ]; then
-            echo "::error::AAB builds require the four ANDROID_RELEASE_* GitHub Actions secrets."
-            exit 1
-          fi
-          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/sotietkiem-release.jks"
-          chmod 600 "$RUNNER_TEMP/sotietkiem-release.jks"
-
       - name: Compile AAB file
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         env:
-          ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/sotietkiem-release.jks
+          ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/suckhoegiadinh-release.jks
           ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
           ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
           ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
@@ -371,7 +326,7 @@ jobs:
         run: |
           mkdir -p dist-aab
           if [ -f "android/app/build/outputs/bundle/release/app-release.aab" ]; then
-            cp android/app/build/outputs/bundle/release/app-release.aab dist-aab/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.aab
+            cp android/app/build/outputs/bundle/release/app-release.aab dist-aab/suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}.aab
           else
             echo "::error::The signed release AAB was not produced."
             exit 1
@@ -381,32 +336,35 @@ jobs:
         if: steps.auto_version.outputs.BUILD_AAB == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sotietkiem_v${{ steps.auto_version.outputs.NAME }}_aab
+          name: suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}_aab
           path: dist-aab/*.aab
           retention-days: 30
 
-      # 11. Tự động tạo GitHub Release (CHỈ đính kèm file APK, tuyệt đối không chứa file AAB)
+      # 10. Tạo release chứa APK và AAB
       - name: Create GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.auto_version.outputs.NAME }}
-          name: Bản cập nhật v${{ steps.auto_version.outputs.NAME }}
+          tag_name: ${{ steps.auto_version.outputs.RELEASE_TAG }}
+          name: Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}
           body: |
-            Bản cập nhật tự động xuất bản từ AI Studio:
-            - **sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk**: Bản APK cài đặt trực tiếp bên ngoài (có tích hợp thông báo cập nhật tự động).
-          files: dist-release/*.apk
+            Bản phát hành Sức khỏe gia đình.
+            - APK đã ký release để cài đặt trực tiếp.
+            - AAB đã ký release để phân phối qua Google Play.
+          files: |
+            dist-release/*.apk
+            dist-aab/*.aab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 12. Tự động cập nhật file version.json trên nhánh main
       - name: Update version.json
         run: |
-          APK_URL="https://github.com/tuanta3012/sotietkiem/releases/download/v${{ steps.auto_version.outputs.NAME }}/sotietkiem_v${{ steps.auto_version.outputs.NAME }}.apk"
+          APK_URL="https://github.com/tuanta3012/suckhoegiadinh/releases/download/${{ steps.auto_version.outputs.RELEASE_TAG }}/suckhoegiadinh_v${{ steps.auto_version.outputs.RELEASE_VERSION }}.apk"
           cat <<EOF > version.json
           {
-            "version": "${{ steps.auto_version.outputs.NAME }}",
-            "notes": "Bản cập nhật tự động v${{ steps.auto_version.outputs.NAME }}",
+            "version": "${{ steps.auto_version.outputs.RELEASE_VERSION }}",
+            "notes": "Bản phát hành Sức khỏe gia đình v${{ steps.auto_version.outputs.RELEASE_VERSION }}",
             "apkUrl": "$APK_URL"
           }
           EOF

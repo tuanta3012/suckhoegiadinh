@@ -1,73 +1,100 @@
-import React, { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
-import { AuthUser, AppSettings } from './types';
-import { Navbar, NavTabType } from './components/Navbar';
-import { auth, initGoogleAuth, signOutGoogle, signInWithGoogle } from './utils/googleDriveService';
-import { useToast } from './context/ToastContext';
-import { FamilyMemberProvider } from './context/FamilyMemberContext';
-import { FamilySwitcher } from './components/FamilySwitcher';
+import type { AuthUser } from './types';
 import { HealthDashboard } from './components/HealthDashboard';
+import { RELEASE_APP_VERSION } from './version';
+import { useToast } from './context/ToastContext';
+import {
+  auth,
+  initGoogleAuth,
+  isGoogleTokenValid,
+  restoreGoogleAuthSession,
+  signInWithGoogle,
+  signOutGoogle,
+} from './utils/googleDriveService';
 
 export default function App() {
   const { showToast } = useToast();
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [settings, setSettings] = useState<AppSettings>({
-    notificationsEnabled: false,
-    enableBiometricLogin: false,
-  });
-  const [activeTab, setActiveTab] = useState<NavTabType>('health-records');
+  const [driveAuthorized, setDriveAuthorized] = useState(isGoogleTokenValid());
 
   useEffect(() => {
-    const initNativeStatusBar = async () => {
+    const initializeStatusBar = async () => {
+      if (!Capacitor.isNativePlatform()) return;
       try {
-        if (Capacitor.isNativePlatform()) {
-          await StatusBar.setOverlaysWebView({ overlay: false });
-          await StatusBar.setBackgroundColor({ color: '#0f172a' });
-          await StatusBar.setStyle({ style: Style.Dark });
-        }
-      } catch (err) {}
+        await StatusBar.setOverlaysWebView({ overlay: false });
+        await StatusBar.setBackgroundColor({ color: '#0f172a' });
+        await StatusBar.setStyle({ style: Style.Dark });
+      } catch (error) {
+        console.warn('Không thể cấu hình thanh trạng thái:', error);
+      }
     };
-    initNativeStatusBar();
+    void initializeStatusBar();
   }, []);
 
   useEffect(() => {
-    const unsubscribe = initGoogleAuth(
-      (firebaseUser, token) => {
-        if (firebaseUser && firebaseUser.email) {
-            setCurrentUser({
-                email: firebaseUser.email,
-                name: firebaseUser.displayName || 'Người dùng',
-                role: 'ADMIN',
-                title: 'Quản trị viên',
-                isOffline: false
-            });
-        }
-      },
-      () => { setCurrentUser(null); }
-    );
-    return () => unsubscribe();
-  }, []);
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    void restoreGoogleAuthSession()
+      .then(() => {
+        if (cancelled) return;
+        unsubscribe = initGoogleAuth((firebaseUser, token) => {
+          if (!firebaseUser.email) {
+            setCurrentUser(null);
+            setDriveAuthorized(false);
+            return;
+          }
+          setCurrentUser({
+            email: firebaseUser.email,
+            name: firebaseUser.displayName || 'Người dùng',
+            photoURL: firebaseUser.photoURL || undefined,
+            role: 'ADMIN',
+            title: 'Quản trị viên',
+          });
+          setDriveAuthorized(Boolean(token) || isGoogleTokenValid());
+        }, () => {
+          setCurrentUser(null);
+          setDriveAuthorized(false);
+        });
+      })
+      .catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : 'Không thể khôi phục phiên Drive.', 'error');
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [showToast]);
+
+  const connectGoogle = useCallback(async () => {
+    try {
+      const { accessToken } = await signInWithGoogle();
+      setDriveAuthorized(Boolean(accessToken));
+      if (!accessToken) showToast('Đăng nhập thành công nhưng chưa có quyền Drive. Hãy cấp quyền Google Drive.', 'error');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể đăng nhập Google.', 'error');
+    }
+  }, [showToast]);
+
+  const logOut = useCallback(async () => {
+    try {
+      await signOutGoogle();
+      setCurrentUser(null);
+      setDriveAuthorized(false);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể đăng xuất.', 'error');
+    }
+  }, [showToast]);
 
   return (
-    <FamilyMemberProvider>
-      <div className="min-h-screen bg-slate-50 flex flex-col">
-        <Navbar
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          settings={settings}
-          setSettings={setSettings}
-          isMobilePreview={false}
-          setIsMobilePreview={() => {}}
-          currentUser={currentUser}
-          onLogout={signOutGoogle}
-          onLoginGoogle={signInWithGoogle}
-        />
-        <FamilySwitcher />
-        <main className="flex-1 overflow-y-auto">
-          <HealthDashboard />
-        </main>
-      </div>
-    </FamilyMemberProvider>
+    <HealthDashboard
+      userEmail={currentUser?.email || auth.currentUser?.email || null}
+      appVersion={RELEASE_APP_VERSION}
+      driveAuthorized={driveAuthorized}
+      onConnectDrive={() => void connectGoogle()}
+      onLogout={() => void logOut()}
+      showToast={showToast}
+    />
   );
 }

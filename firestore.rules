@@ -1,67 +1,104 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /assigned_shares/{memberKey} {
-      function signedIn() {
-        return request.auth != null && request.auth.token.email is string;
-      }
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
 
+    function ownsEmail(email) {
+      return signedIn() && request.auth.token.email == email;
+    }
+
+    function workspaceAdmin(rootId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail
+          == request.auth.token.email;
+    }
+
+    function validAssignment(rootId, memberEmail) {
+      return request.resource.data.keys().hasOnly([
+          'rootFolderId', 'familyFileId', 'adminEmail', 'memberEmail', 'role', 'updatedAt'
+        ])
+        && request.resource.data.rootFolderId == rootId
+        && request.resource.data.familyFileId is string
+        && request.resource.data.familyFileId.size() > 0
+        && request.resource.data.adminEmail == request.auth.token.email
+        && request.resource.data.memberEmail == memberEmail
+        && (request.resource.data.role == 'EDITOR' || request.resource.data.role == 'VIEWER')
+        && request.resource.data.updatedAt is number;
+    }
+
+    match /assigned_shares/{memberKey} {
       function isMember() {
-        return signedIn() &&
-          memberKey == request.auth.token.email.lower() &&
-          resource.data.memberEmail == request.auth.token.email.lower();
+        return signedIn()
+          && memberKey == request.auth.token.email.lower()
+          && resource.data.memberEmail == request.auth.token.email.lower();
       }
 
       function isAdminForAssignment() {
-        return signedIn() &&
-          resource.data.adminEmail == request.auth.token.email.lower();
+        return signedIn()
+          && resource.data.adminEmail == request.auth.token.email.lower();
       }
 
-      function validAssignment() {
+      function validLegacyAssignment() {
         return request.resource.data.keys().hasOnly([
-            'assignedFileId',
-            'assignedFileName',
-            'adminEmail',
-            'memberEmail',
-            'role',
-            'status',
-            'updatedAt'
-          ]) &&
-          request.resource.data.assignedFileId is string &&
-          request.resource.data.assignedFileId.size() > 0 &&
-          request.resource.data.assignedFileName is string &&
-          request.resource.data.adminEmail is string &&
-          request.resource.data.memberEmail is string &&
-          memberKey == request.resource.data.memberEmail &&
-          request.resource.data.adminEmail == request.auth.token.email.lower() &&
-          request.resource.data.memberEmail == request.resource.data.memberEmail.lower() &&
-          request.resource.data.memberEmail != request.resource.data.adminEmail &&
-          request.resource.data.role in ['EDITOR', 'VIEWER'] &&
-          request.resource.data.status == 'active' &&
-          request.resource.data.updatedAt is number;
+            'assignedFileId', 'assignedFileName', 'adminEmail', 'memberEmail',
+            'role', 'status', 'updatedAt'
+          ])
+          && request.resource.data.assignedFileId is string
+          && request.resource.data.assignedFileId.size() > 0
+          && request.resource.data.assignedFileName is string
+          && request.resource.data.adminEmail == request.auth.token.email.lower()
+          && request.resource.data.memberEmail == memberKey
+          && request.resource.data.memberEmail == request.resource.data.memberEmail.lower()
+          && request.resource.data.memberEmail != request.resource.data.adminEmail
+          && request.resource.data.role in ['EDITOR', 'VIEWER']
+          && request.resource.data.status == 'active'
+          && request.resource.data.updatedAt is number;
       }
 
       allow get: if isMember();
       allow list: if false;
-      allow create: if signedIn() && validAssignment();
-      allow update: if signedIn() &&
-        resource.data.adminEmail == request.auth.token.email.lower() &&
-        validAssignment();
+      allow create: if signedIn() && validLegacyAssignment();
+      allow update: if isAdminForAssignment() && validLegacyAssignment();
       allow delete: if isMember() || isAdminForAssignment();
     }
 
-    match /workspaces/{workspaceId} {
-      allow read, write: if true;
+    match /health_workspace_relays/{rootId} {
+      allow get: if ownsEmail(resource.data.adminEmail);
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'rootFolderId', 'familyFileId', 'adminEmail', 'updatedAt'
+        ])
+        && request.resource.data.rootFolderId == rootId
+        && request.resource.data.familyFileId is string
+        && request.resource.data.familyFileId.size() > 0
+        && request.resource.data.adminEmail == request.auth.token.email
+        && request.resource.data.updatedAt is number;
+      allow update: if ownsEmail(resource.data.adminEmail)
+        && request.resource.data.rootFolderId == resource.data.rootFolderId
+        && request.resource.data.adminEmail == resource.data.adminEmail
+        && request.resource.data.familyFileId == resource.data.familyFileId;
+      allow delete: if false;
+
+      match /members/{memberEmail} {
+        allow get, list: if workspaceAdmin(rootId);
+        allow create, update: if workspaceAdmin(rootId)
+          && validAssignment(rootId, memberEmail);
+        allow delete: if workspaceAdmin(rootId);
+      }
     }
 
-    match /audit_logs/{logId} {
-      allow read, write: if true;
+    match /health_workspace_invites/{memberEmail}/workspaces/{rootId} {
+      allow get, list: if ownsEmail(memberEmail);
+      allow create, update: if workspaceAdmin(rootId)
+        && validAssignment(rootId, memberEmail);
+      allow delete: if ownsEmail(memberEmail) || workspaceAdmin(rootId);
     }
 
-    match /user_feedbacks/{feedbackId} {
-      allow create: if true;
-      allow read: if true;
-      allow update, delete: if false;
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

@@ -1,4 +1,4 @@
-package com.tietkiemgiadinh.app;
+package com.suckhoegiadinh.app;
 
 import com.getcapacitor.BridgeActivity;
 

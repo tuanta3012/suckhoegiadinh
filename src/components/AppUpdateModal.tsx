@@ -43,7 +43,7 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
 
     try {
       if (Capacitor.isNativePlatform()) {
-        const fileName = `sotietkiem_v${updateInfo.version}.apk`;
+        const fileName = `suckhoegiadinh_v${updateInfo.version}.apk`;
         setStatusMessage('Đang tải tệp APK trực tiếp về bộ nhớ máy...');
         setDownloadProgress(25);
 
