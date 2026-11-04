@@ -1,0 +1,228 @@
+import React, { useState } from 'react';
+import {
+  CheckCircle2,
+  FolderSync,
+  RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react';
+import type { HealthDriveWorkspace } from '../utils/healthDriveService';
+import type { HealthProfile } from '../types';
+import { cleanupWorkspaceDuplicates } from '../utils/workspaceAuditService';
+import { loadHealthProfile, saveHealthProfile, listRawFiles, deleteDriveFile } from '../utils/healthDriveService';
+
+interface WorkspaceAuditModalProps {
+  isOpen: boolean;
+  workspace: HealthDriveWorkspace | null;
+  profiles: Record<string, HealthProfile>;
+  userEmail: string | null;
+  onClose: () => void;
+  onFactoryReset: () => Promise<void>;
+  showToast: (msg: string, type: 'success' | 'error' | 'info') => void;
+}
+
+export function WorkspaceAuditModal({
+  isOpen,
+  workspace,
+  profiles,
+  userEmail,
+  onClose,
+  onFactoryReset,
+  showToast,
+}: WorkspaceAuditModalProps) {
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanResult, setCleanResult] = useState<{ deletedRawFiles: number; mergedEvents: number } | null>(null);
+  const [progressMsg, setProgressMsg] = useState('');
+  const [progressPercent, setProgressPercent] = useState(0);
+
+  const [isResetting, setIsResetting] = useState(false);
+  const [confirmResetText, setConfirmResetText] = useState('');
+
+  if (!isOpen) return null;
+
+  const handleStartCleanup = async () => {
+    if (!workspace) return;
+    setIsCleaning(true);
+    setCleanResult(null);
+    setProgressPercent(10);
+    setProgressMsg('Đang rà soát toàn bộ tệp raw trên Google Drive...');
+
+    try {
+      const result = await cleanupWorkspaceDuplicates(
+        workspace,
+        async (fileId) => loadHealthProfile(fileId),
+        async (fileId, prof) => saveHealthProfile(fileId, prof),
+        async (member) => listRawFiles(member),
+        async (fileId) => deleteDriveFile(fileId),
+        (prog) => {
+          setProgressPercent(prog.percent);
+          setProgressMsg(prog.message);
+        }
+      );
+      setCleanResult(result);
+      showToast(
+        `Đã dọn dẹp sạch sẽ: Xóa ${result.deletedRawFiles} tệp thừa & Hợp nhất ${result.mergedEvents} sự kiện!`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể dọn dẹp thư mục.', 'error');
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const executeFactoryReset = async () => {
+    if (confirmResetText.trim() !== 'XOA TAT CA') {
+      showToast('Vui lòng nhập chính xác chữ "XOA TAT CA" để xác nhận.', 'error');
+      return;
+    }
+    setIsResetting(true);
+    try {
+      await onFactoryReset();
+      showToast('Đã xóa toàn bộ dữ liệu và khởi tạo lại Workspace sạch sẽ.', 'success');
+      onClose();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể khởi tạo lại thư mục.', 'error');
+    } finally {
+      setIsResetting(false);
+      setConfirmResetText('');
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="bg-slate-900 border border-slate-700/80 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-teal-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-teal-500/20">
+              <FolderSync className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base sm:text-lg text-white">
+                Dọn dẹp & Tối ưu Thư mục
+              </h3>
+              <p className="text-xs text-slate-400">
+                Tự động quét trùng lặp và giữ lại bản duy nhất
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            aria-label="Đóng"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content Body */}
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1 text-slate-200 text-sm">
+          {/* Main Auto-Cleanup Card */}
+          <div className="bg-gradient-to-br from-teal-950/40 to-slate-800/80 border border-teal-500/30 p-5 rounded-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0 mt-0.5">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-bold text-white text-sm sm:text-base">
+                  Dọn dẹp thông minh toàn bộ Workspace
+                </h4>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Hệ thống sẽ tự động quét toàn bộ tệp thô trên Google Drive và các sự kiện y tế, tự động xóa tệp thừa và gộp các sự kiện trùng lặp về duy nhất một cách an toàn.
+                </p>
+              </div>
+            </div>
+
+            {isCleaning && (
+              <div className="space-y-2 pt-2 border-t border-teal-500/20 animate-in fade-in">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-teal-300 font-medium truncate">{progressMsg}</span>
+                  <span className="font-mono text-teal-400 font-bold">{progressPercent}%</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                  <div
+                    className="bg-teal-500 h-full transition-all duration-300 rounded-full"
+                    style={{ width: `${Math.max(5, progressPercent)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {cleanResult && !isCleaning && (
+              <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center gap-2 animate-in fade-in">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <span>
+                  Đã dọn dẹp thành công: Xóa <b>{cleanResult.deletedRawFiles}</b> tệp raw thừa & Hợp nhất <b>{cleanResult.mergedEvents}</b> sự kiện!
+                </span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => void handleStartCleanup()}
+              disabled={isCleaning}
+              className="w-full py-3 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-50 active:scale-[0.99] text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-lg"
+            >
+              <RefreshCw className={`w-4 h-4 ${isCleaning ? 'animate-spin' : ''}`} />
+              <span>{isCleaning ? 'Đang dọn dẹp...' : 'Bắt đầu Dọn dẹp & Check trùng ngay'}</span>
+            </button>
+          </div>
+
+          {/* Factory Reset Section */}
+          <div className="border border-rose-500/30 bg-rose-950/20 rounded-2xl p-4 sm:p-5 space-y-3">
+            <h4 className="font-bold text-rose-300 text-xs flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-rose-400" />
+              Khởi tạo lại Workspace (Xóa toàn bộ dữ liệu)
+            </h4>
+            <p className="text-xs text-rose-200/80 leading-relaxed">
+              Xóa vĩnh viễn toàn bộ tệp trong thư mục <code className="bg-rose-900/50 px-1 py-0.5 rounded">raw_files</code> và hồ sơ để khởi tạo mới từ đầu.
+            </p>
+
+            <div className="space-y-2 pt-1">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={confirmResetText}
+                  onChange={(e) => setConfirmResetText(e.target.value)}
+                  placeholder="Nhập XOA TAT CA"
+                  className="flex-1 bg-slate-900 border border-rose-500/40 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500"
+                />
+                <button
+                  type="button"
+                  disabled={confirmResetText.trim() !== 'XOA TAT CA' || isResetting}
+                  onClick={() => void executeFactoryReset()}
+                  className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs flex items-center gap-1 transition-all shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isResetting ? 'Đang xóa...' : 'Khởi tạo lại'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between text-xs text-slate-400">
+          <span className="flex items-center gap-1.5">
+            <RotateCcw className="w-3 h-3 text-teal-400" />
+            <span>Tự động tối ưu hóa</span>
+          </span>
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-white font-bold transition-all"
+          >
+            Đóng
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -171,10 +171,113 @@ async function replaceContent(
   );
 }
 
+export const WORKSPACE_FOLDER_NAME = 'Suc khoe gia dinh';
+export const LEGACY_WORKSPACE_FOLDER_NAMES = ['Suc khoe gia dinh', 'Sức khỏe Gia đình'];
+
+export async function renameDriveFolder(folderId: string, newName: string): Promise<DriveFile> {
+  return driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=${encodeURIComponent(FILE_FIELDS)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    },
+  );
+}
+
+export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
+  try {
+    for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
+      const existingFolders = await listFiles('root', folderName, FOLDER_MIME);
+      for (const folder of existingFolders) {
+        try {
+          const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
+          if (manifestFiles.length > 0) {
+            // Tự động chuẩn hóa đổi tên thành "Suc khoe gia dinh" nếu còn mang tên tiếng Việt có dấu
+            if (folder.name !== WORKSPACE_FOLDER_NAME) {
+              void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch(() => {});
+            }
+            return await openHealthWorkspace(folder.id);
+          }
+        } catch {
+          // Tiếp tục kiểm tra các thư mục khác nếu có
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('[Google Drive] Chưa thể tìm kiếm thư mục Suc khoe gia dinh:', error);
+  }
+  return null;
+}
+
 export async function createHealthWorkspace(adminEmail: string): Promise<HealthDriveWorkspace> {
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
   if (!cleanAdminEmail) throw new Error('Cần đăng nhập trước khi tạo Workspace gia đình.');
-  const root = await createFolder('Sức khỏe Gia đình');
+
+  // Kiểm tra xem đã có thư mục nào được tạo trước đó chưa (tránh trùng lặp / phục hồi gián đoạn)
+  try {
+    const existingFolders: DriveFile[] = [];
+    for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
+      const found = await listFiles('root', folderName, FOLDER_MIME);
+      existingFolders.push(...found);
+    }
+
+    if (existingFolders.length > 0) {
+      const existingRoot = existingFolders[0];
+      // Nếu tên thư mục là tiếng Việt có dấu cũ, tự động đổi tên thành "Suc khoe gia dinh"
+      if (existingRoot.name !== WORKSPACE_FOLDER_NAME) {
+        void renameDriveFolder(existingRoot.id, WORKSPACE_FOLDER_NAME).catch(() => {});
+      }
+
+      const manifestFiles = await listFiles(existingRoot.id, 'family.json', JSON_MIME);
+      if (manifestFiles.length > 0) {
+        // Thư mục và family.json đã hoàn chỉnh, mở trực tiếp
+        return await openHealthWorkspace(existingRoot.id);
+      }
+
+      // Thư mục đã tạo nhưng bị gián đoạn trước khi hoàn tất family.json, tiếp tục thiết lập
+      const existingChildren = await listFiles(existingRoot.id);
+      let raw = existingChildren.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME);
+      let profiles = existingChildren.find((c) => c.name === 'profiles' && c.mimeType === FOLDER_MIME);
+      if (!raw) raw = await createFolder('raw_files', existingRoot.id);
+      if (!profiles) profiles = await createFolder('profiles', existingRoot.id);
+
+      const now = new Date().toISOString();
+      const family: HealthFamily = {
+        schemaVersion: 1,
+        adminEmail: cleanAdminEmail,
+        rawFilesFolderId: raw.id,
+        profilesFolderId: profiles.id,
+        members: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const manifest = await uploadContent(
+        'family.json',
+        JSON_MIME,
+        new Blob([JSON.stringify(family, null, 2)]),
+        existingRoot.id,
+      );
+      let relayRegistrationError: string | undefined;
+      try {
+        await registerHealthWorkspaceRelay(existingRoot.id, manifest.id, cleanAdminEmail);
+      } catch (error) {
+        relayRegistrationError =
+          error instanceof Error ? error.message : 'Không đăng ký được Workspace trên Firestore.';
+      }
+      return {
+        rootFolderId: existingRoot.id,
+        familyFileId: manifest.id,
+        family,
+        relayRegistrationError,
+      };
+    }
+  } catch (findErr) {
+    console.warn('[Workspace] Kiểm tra thư mục hiện có bị lỗi, tiến hành tạo mới:', findErr);
+  }
+
+  // Khởi tạo thư mục hoàn toàn mới với tên "Suc khoe gia dinh"
+  const root = await createFolder(WORKSPACE_FOLDER_NAME);
   const raw = await createFolder('raw_files', root.id);
   const profiles = await createFolder('profiles', root.id);
   const now = new Date().toISOString();
@@ -187,12 +290,18 @@ export async function createHealthWorkspace(adminEmail: string): Promise<HealthD
     createdAt: now,
     updatedAt: now,
   };
-  const manifest = await uploadContent('family.json', JSON_MIME, new Blob([JSON.stringify(family, null, 2)]), root.id);
+  const manifest = await uploadContent(
+    'family.json',
+    JSON_MIME,
+    new Blob([JSON.stringify(family, null, 2)]),
+    root.id,
+  );
   let relayRegistrationError: string | undefined;
   try {
     await registerHealthWorkspaceRelay(root.id, manifest.id, cleanAdminEmail);
   } catch (error) {
-    relayRegistrationError = error instanceof Error ? error.message : 'Không đăng ký được Workspace trên Firestore.';
+    relayRegistrationError =
+      error instanceof Error ? error.message : 'Không đăng ký được Workspace trên Firestore.';
   }
   return { rootFolderId: root.id, familyFileId: manifest.id, family, relayRegistrationError };
 }
@@ -326,6 +435,60 @@ export async function deleteDriveFamilyMember(
 
   return { workspace: updatedWorkspace };
 }
+
+export async function factoryResetWorkspaceFolder(
+  workspace: HealthDriveWorkspace,
+  adminEmail: string
+): Promise<HealthDriveWorkspace> {
+  const cleanAdminEmail = adminEmail.trim().toLowerCase();
+  // 1. Xóa toàn bộ nội dung trong thư mục raw_files và profiles trên Google Drive
+  for (const member of workspace.family.members) {
+    if (member.driveFolderId) {
+      try {
+        const files = await listFolderContentsRecursively(member.driveFolderId);
+        for (const f of files) {
+          await deleteDriveFile(f.id).catch(() => {});
+        }
+        await deleteDriveFile(member.driveFolderId).catch(() => {});
+      } catch {}
+    }
+    if (member.profileFileId) {
+      await deleteDriveFile(member.profileFileId).catch(() => {});
+    }
+  }
+
+  // 2. Tạo lại family.json với danh sách thành viên rỗng
+  const now = new Date().toISOString();
+  const resetFamily: HealthFamily = {
+    schemaVersion: 1,
+    adminEmail: cleanAdminEmail,
+    rawFilesFolderId: workspace.family.rawFilesFolderId,
+    profilesFolderId: workspace.family.profilesFolderId,
+    members: [],
+    createdAt: workspace.family.createdAt || now,
+    updatedAt: now,
+  };
+
+  const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken()}` },
+  });
+  const etag = response.ok ? response.headers.get('etag') || undefined : undefined;
+
+  const file = await replaceContent(
+    workspace.familyFileId,
+    'family.json',
+    JSON_MIME,
+    new Blob([JSON.stringify(resetFamily, null, 2)]),
+    etag
+  );
+
+  return {
+    rootFolderId: workspace.rootFolderId,
+    familyFileId: file.id,
+    family: resetFamily,
+  };
+}
+
 
 async function removeFamilyMemberFromManifest(
   workspace: HealthDriveWorkspace,

@@ -18,9 +18,6 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
-    define: {
-      'import.meta.env.GEMINI_API_KEYS': JSON.stringify(process.env.GEMINI_API_KEYS || ''),
-    },
     build: {
       chunkSizeWarningLimit: 1200,
       rollupOptions: {

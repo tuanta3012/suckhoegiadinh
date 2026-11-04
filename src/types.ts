@@ -5,11 +5,12 @@
 export interface FamilyMember {
   id: string;
   name: string;
-  role: 'father' | 'mother' | 'child' | 'other';
+  gender?: 'male' | 'female' | 'other';
+  birthDate?: string;
+  role?: 'father' | 'mother' | 'child' | 'other' | string;
   driveFolderId: string;
   profileFileId: string;
   avatarUrl?: string;
-  birthDate?: string;
 }
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -41,6 +42,9 @@ export interface HealthEvent {
   advice?: string;
   nextFollowUp?: string;
   notes?: string;
+  patientName?: string;
+  patientBirthDate?: string;
+  patientGender?: 'male' | 'female' | 'other' | string;
   extractedData?: Record<string, JsonValue>;
   recordedAt: string;
 }
@@ -53,6 +57,8 @@ export interface HealthSource {
   status: 'pending' | 'processed';
   digitizedAt?: string;
   rawDeletedAt?: string;
+  fileSize?: number;
+  fileHash?: string;
 }
 
 export interface HealthSummary {

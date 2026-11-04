@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
   Bot,
   Calendar,
@@ -16,6 +17,7 @@ import {
   FileText,
   FileUp,
   FolderHeart,
+  FolderSync,
   Heart,
   HeartPulse,
   History,
@@ -67,6 +69,8 @@ import {
   cleanupExpiredRawFiles,
   createHealthWorkspace,
   deleteDriveFamilyMember,
+  factoryResetWorkspaceFolder,
+  findExistingHealthWorkspace,
   type HealthDriveWorkspace,
   openHealthWorkspace,
   loadHealthProfile,
@@ -79,15 +83,30 @@ import {
   createHealthProfile,
   digitizeHealthSource,
   parseHealthProfile,
+  summarizeTimeline,
 } from '../utils/healthProfile';
 import {
   analyzeComprehensiveHealth,
   askHealthAssistant,
   extractHealthEvent,
+  extractHealthEventWithProgress,
   refineAndOrganizeMemberData,
   summarizeHealthProfile,
 } from '../utils/geminiService';
+import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
 import { GeminiPoolModal } from './GeminiPoolModal';
+import { WorkspaceAuditModal } from './WorkspaceAuditModal';
+import {
+  computeFileFingerprint,
+  detectDuplicateFile,
+  detectCrossMemberDuplicateFile,
+  detectDuplicateEvent,
+  cleanAndDeduplicateEventData,
+  mergeHealthEvents,
+  type FileDuplicateMatch,
+  type EventDuplicateMatch,
+} from '../utils/deduplicationService';
+import { DuplicateDocumentModal } from './DuplicateDocumentModal';
 import {
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
@@ -140,13 +159,6 @@ const EVENT_TYPE_OPTIONS: Array<{
   { value: 'other', label: 'Khác', color: 'slate', icon: FileText },
 ];
 
-const MEMBER_ROLES: Array<{ value: FamilyMember['role']; label: string; icon: string }> = [
-  { value: 'father', label: 'Bố', icon: '👨' },
-  { value: 'mother', label: 'Mẹ', icon: '👩' },
-  { value: 'child', label: 'Con', icon: '🧒' },
-  { value: 'other', label: 'Người thân', icon: '🧓' },
-];
-
 export function HealthDashboard({
   userEmail,
   appVersion,
@@ -166,12 +178,34 @@ export function HealthDashboard({
   const [isAddingMember, setIsAddingMember] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [newMemberName, setNewMemberName] = useState('');
-  const [newMemberRole, setNewMemberRole] = useState<FamilyMember['role']>('father');
+  const [newMemberBirthDate, setNewMemberBirthDate] = useState('');
+  const [newMemberGender, setNewMemberGender] = useState<'male' | 'female' | 'other'>('male');
   const [workspaceAssignments, setWorkspaceAssignments] = useState<HealthWorkspaceAssignment[]>([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<WorkspaceAccessRole>('EDITOR');
   const [digitizationDraft, setDigitizationDraft] = useState<DigitizationDraft | null>(null);
   const [digitizationError, setDigitizationError] = useState('');
+  const [trackerState, setTrackerState] = useState<{
+    isOpen: boolean;
+    file: File | null;
+    step: TrackerStep;
+    progressPercent: number;
+    progressMessage: string;
+    driveFile: DriveFile | null;
+    modelUsed: string;
+    partialExtracted: Partial<HealthEvent>;
+    error: string | null;
+  }>({
+    isOpen: false,
+    file: null,
+    step: 'uploading_drive',
+    progressPercent: 0,
+    progressMessage: '',
+    driveFile: null,
+    modelUsed: 'gemini-3.5-flash-lite',
+    partialExtracted: {},
+    error: null,
+  });
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState(false);
@@ -181,7 +215,42 @@ export function HealthDashboard({
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showQuickActionModal, setShowQuickActionModal] = useState(false);
   const [showGeminiPoolModal, setShowGeminiPoolModal] = useState(false);
+  const [showWorkspaceAuditModal, setShowWorkspaceAuditModal] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
+  const [fileDuplicateCandidate, setFileDuplicateCandidate] = useState<{
+    file: File;
+    match: FileDuplicateMatch;
+  } | null>(null);
+  const [uploadQueue, setUploadQueue] = useState<File[]>([]);
+  const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
+
+  function processNextInQueue() {
+    if (uploadQueue.length > 0) {
+      const nextFile = uploadQueue[0];
+      const remaining = uploadQueue.slice(1);
+      const nextCurrent = (queueStatus?.current || 1) + 1;
+      const total = queueStatus?.total || (remaining.length + nextCurrent);
+      setUploadQueue(remaining);
+      setQueueStatus({ current: nextCurrent, total });
+      showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${total} (${nextFile.name})...`, 'info');
+      void beginDigitization(nextFile);
+    } else {
+      if (queueStatus) {
+        showToast(`Đã hoàn tất xử lý hàng đợi ${queueStatus.total} tệp tài liệu y tế!`, 'success');
+      }
+      setQueueStatus(null);
+    }
+  }
+
+  async function handleFactoryReset() {
+    if (!workspace || !userEmail) return;
+    const fresh = await factoryResetWorkspaceFolder(workspace, userEmail);
+    setWorkspace(fresh);
+    setProfiles({});
+    setSelectedMemberId('');
+    setDigitizationDraft(null);
+    setFileDuplicateCandidate(null);
+  }
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cleanupInFlight = useRef(false);
@@ -372,8 +441,32 @@ export function HealthDashboard({
     }
 
     void readHealthWorkspaceAssignment(userEmail)
-      .then((assignment) => {
-        if (!cancelled && assignment) void openWorkspace(assignment.rootFolderId);
+      .then(async (assignment) => {
+        if (cancelled) return;
+        if (assignment) {
+          void openWorkspace(assignment.rootFolderId);
+          return;
+        }
+
+        // Tự động tìm kiếm thư mục Sức khỏe Gia đình đã có trên Drive của tài khoản
+        try {
+          const discovered = await findExistingHealthWorkspace();
+          if (!cancelled && discovered) {
+            if (userEmail) {
+              localStorage.setItem(
+                `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
+                discovered.rootFolderId
+              );
+            }
+            localStorage.setItem(PROFILE_ROOT_KEY, discovered.rootFolderId);
+            setWorkspace(discovered);
+            setRootIdInput(discovered.rootFolderId);
+            await reloadProfiles(discovered);
+            showToast('Đã tự động kết nối thư mục Suc khoe gia dinh trên Google Drive.', 'success');
+          }
+        } catch {
+          // Bỏ qua nếu chưa thể truy cập hoặc chưa có thư mục
+        }
       })
       .catch((error: unknown) => {
         // Tự động bỏ qua lỗi khi chưa có bản ghi chuyển tiếp từ admin khác.
@@ -383,7 +476,7 @@ export function HealthDashboard({
     return () => {
       cancelled = true;
     };
-  }, [driveAuthorized, openWorkspace, userEmail, workspace]);
+  }, [driveAuthorized, openWorkspace, reloadProfiles, showToast, userEmail, workspace]);
 
   // Clean expired raw files (>3 years) automatically
   useEffect(() => {
@@ -438,7 +531,7 @@ export function HealthDashboard({
       localStorage.setItem(PROFILE_ROOT_KEY, created.rootFolderId);
       setWorkspace(created);
       setRootIdInput(created.rootFolderId);
-      showToast('Đã tạo thư mục Hồ sơ Sức khỏe Gia đình trên Google Drive!', 'success');
+      showToast('Đã tạo thư mục Suc khoe gia dinh trên Google Drive!', 'success');
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Không thể tạo thư mục gia đình.'
@@ -458,10 +551,14 @@ export function HealthDashboard({
       const next = await addDriveFamilyMember(workspace, {
         id: memberId,
         name: newMemberName.trim(),
-        role: newMemberRole,
+        birthDate: newMemberBirthDate || undefined,
+        gender: newMemberGender,
+        role: 'other',
       });
       setWorkspace(next);
       setNewMemberName('');
+      setNewMemberBirthDate('');
+      setNewMemberGender('male');
       await reloadProfiles(next);
       setSelectedMemberId(memberId);
       setActiveTab('timeline');
@@ -510,7 +607,7 @@ export function HealthDashboard({
     }
   }
 
-  async function beginDigitization(file: File) {
+  async function beginDigitization(file: File, options?: { forceUpload?: boolean }) {
     if (!workspace || !selectedMember) {
       showToast('Hãy chọn hoặc tạo hồ sơ thành viên trước khi tải tài liệu.', 'error');
       return;
@@ -519,14 +616,53 @@ export function HealthDashboard({
       showToast('Tệp vượt quá giới hạn cho phép 25 MB.', 'error');
       return;
     }
+
+    // Kiểm tra trùng lặp tài liệu trước khi tải lên Drive (tránh tốn dung lượng và hạn ngạch AI)
+    if (!options?.forceUpload) {
+      try {
+        const { hash, size } = await computeFileFingerprint(file);
+        const currentProfile = profiles[selectedMember.id] || createHealthProfile(selectedMember);
+        const fileDup = detectDuplicateFile({ name: file.name, size }, hash, currentProfile, selectedMember);
+        if (fileDup) {
+          setFileDuplicateCandidate({ file, match: fileDup });
+          return;
+        }
+
+        const crossDup = detectCrossMemberDuplicateFile({ name: file.name, size }, hash, profiles, selectedMember.id);
+        if (crossDup) {
+          setFileDuplicateCandidate({ file, match: crossDup });
+          return;
+        }
+      } catch (err) {
+        console.warn('[Deduplication Pre-check Failed]:', err);
+      }
+    }
+
     setIsUploading(true);
     setDigitizationError('');
     setShowQuickActionModal(false);
+
+    // Mở ngay modal theo dõi tiến trình và nội dung đang nhận dạng trực quan
+    setTrackerState({
+      isOpen: true,
+      file,
+      step: 'uploading_drive',
+      progressPercent: 20,
+      progressMessage: 'Đang tải tệp lên thư mục "Suc khoe gia dinh" trên Google Drive...',
+      driveFile: null,
+      modelUsed: 'gemini-3.5-flash-lite',
+      partialExtracted: {},
+      error: null,
+    });
+
     try {
       const uploaded = await uploadRawHealthFile(selectedMember, file);
+      const { hash } = await computeFileFingerprint(file);
       const source: HealthSource = {
         driveFileId: uploaded.id,
         fileName: uploaded.name,
+        fileSize: file.size,
+        fileHash: hash,
         mimeType: uploaded.mimeType || file.type || 'application/octet-stream',
         uploadedAt: uploaded.createdTime || new Date().toISOString(),
         status: 'pending',
@@ -538,22 +674,72 @@ export function HealthDashboard({
         stagedProfile
       );
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: savedStagedProfile }));
-      setDigitizationDraft({ source: uploaded, extracted: {} });
+
+      setTrackerState((prev) => ({
+        ...prev,
+        driveFile: uploaded,
+        step: 'reading_document',
+        progressPercent: 42,
+        progressMessage: 'Đã lưu tệp vào Google Drive. Khởi động AI Vision đọc tài liệu...',
+      }));
 
       try {
-        const extracted = await extractHealthEvent(file, selectedMember);
-        setDigitizationDraft({ source: uploaded, extracted });
-        showToast('Đã tải tài liệu lên Drive và AI trích xuất xong thông tin.', 'success');
+        const result = await extractHealthEventWithProgress(file, selectedMember, (update) => {
+          setTrackerState((prev) => {
+            const nextStep: TrackerStep =
+              update.stage === 'reading_document'
+                ? 'reading_document'
+                : update.stage === 'extracting_content'
+                ? 'extracting_content'
+                : update.stage === 'matching_patient'
+                ? 'matching_patient'
+                : update.stage === 'completed'
+                ? 'completed'
+                : prev.step;
+
+            return {
+              ...prev,
+              step: nextStep,
+              progressPercent: Math.max(prev.progressPercent, update.progressPercent),
+              progressMessage: update.message,
+              modelUsed: update.modelUsed || prev.modelUsed,
+              partialExtracted: update.partialEvent
+                ? { ...prev.partialExtracted, ...update.partialEvent }
+                : prev.partialExtracted,
+            };
+          });
+        });
+
+        setTrackerState((prev) => ({
+          ...prev,
+          step: 'completed',
+          progressPercent: 100,
+          progressMessage: 'AI đã bóc tách xong toàn bộ dữ liệu y khoa từ tài liệu!',
+          partialExtracted: result.extracted,
+          modelUsed: result.modelUsed || prev.modelUsed,
+        }));
+
+        showToast('AI đã trích xuất xong thông tin từ tài liệu.', 'success');
       } catch (error) {
-        setDigitizationError(
-          error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.'
-        );
-        showToast('Tài liệu đã lưu trên Drive. Bạn có thể nhập thông tin thủ công.', 'info');
+        const msg = error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.';
+        setDigitizationError(msg);
+        setTrackerState((prev) => ({
+          ...prev,
+          step: 'error',
+          progressMessage: 'Lỗi nhận dạng tài liệu',
+          error: msg,
+        }));
+        showToast('Tài liệu đã lưu trên Drive. Bạn có thể bấm "Nhập thủ công" để tiếp tục.', 'info');
       }
     } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : 'Không tải được tài liệu lên Google Drive.'
-      );
+      const msg = error instanceof Error ? error.message : 'Không tải được tài liệu lên Google Drive.';
+      setErrorMessage(msg);
+      setTrackerState((prev) => ({
+        ...prev,
+        step: 'error',
+        progressMessage: 'Lỗi tải tệp lên Google Drive',
+        error: msg,
+      }));
     } finally {
       setIsUploading(false);
     }
@@ -583,14 +769,26 @@ export function HealthDashboard({
     }
   }
 
-  async function handleSaveDigitization(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSaveDigitization(
+    event: React.FormEvent<HTMLFormElement>,
+    targetMemberId?: string
+  ) {
     event.preventDefault();
-    if (!digitizationDraft || !selectedMember || !selectedProfile) return;
+    const effectiveMember =
+      (targetMemberId && members.find((m) => m.id === targetMemberId)) || selectedMember;
+    const effectiveProfile = effectiveMember ? profiles[effectiveMember.id] : selectedProfile;
+    if (!digitizationDraft || !effectiveMember || !effectiveProfile) return;
     const form = new FormData(event.currentTarget);
     const date = String(form.get('date') || '');
     const title = String(form.get('title') || '').trim();
     const extracted = digitizationDraft.extracted;
-    const nextEvent: HealthEvent = {
+    const duplicateResolution = String(form.get('duplicateResolution') || 'create_new') as
+      | 'merge'
+      | 'replace'
+      | 'create_new';
+    const matchedEventId = String(form.get('matchedEventId') || '');
+
+    const rawEvent: HealthEvent = {
       id: `event_${crypto.randomUUID()}`,
       sourceFileId: digitizationDraft.source.id,
       sourceFileName: digitizationDraft.source.name,
@@ -604,20 +802,95 @@ export function HealthDashboard({
       advice: String(form.get('advice') || '').trim() || undefined,
       nextFollowUp: String(form.get('nextFollowUp') || '').trim() || undefined,
       notes: String(form.get('notes') || '').trim() || undefined,
+      patientName: extracted.patientName,
+      patientBirthDate: extracted.patientBirthDate,
+      patientGender: extracted.patientGender,
       extractedData: isRecord(extracted.extractedData)
         ? (extracted.extractedData as Record<string, JsonValue>)
         : undefined,
       recordedAt: new Date().toISOString(),
     };
 
+    // Khử trùng lặp nội dung bên trong (chẩn đoán, thuốc, chỉ số đo)
+    const nextEvent = cleanAndDeduplicateEventData(rawEvent);
+
     try {
-      const nextProfile = digitizeHealthSource(selectedProfile, nextEvent);
-      const merged = await saveHealthProfile(selectedMember.profileFileId, nextProfile);
-      setProfiles((prev) => ({ ...prev, [selectedMember.id]: merged }));
-      setDigitizationDraft(null);
-      setDigitizationError('');
-      showToast('Đã lưu hồ sơ sức khỏe thành công vào Google Drive.', 'success');
-      setActiveTab('timeline');
+      const existingMatch = matchedEventId
+        ? effectiveProfile.timeline.find((item) => item.id === matchedEventId)
+        : null;
+
+      if (duplicateResolution === 'merge' && existingMatch) {
+        // 1. Hợp nhất thông minh sự kiện cũ và mới (giữ lại chỉ số, thuốc, bổ sung cái mới)
+        const mergedEvent = mergeHealthEvents(existingMatch, nextEvent);
+        const updatedTimeline = effectiveProfile.timeline.map((item) =>
+          item.id === matchedEventId ? mergedEvent : item
+        );
+        const updatedSources = effectiveProfile.sources.map((item) =>
+          item.driveFileId === digitizationDraft.source.id
+            ? { ...item, status: 'processed' as const, digitizedAt: new Date().toISOString() }
+            : item
+        );
+        const nextProfile: HealthProfile = {
+          ...effectiveProfile,
+          timeline: updatedTimeline,
+          sources: updatedSources,
+          summary: summarizeTimeline(updatedTimeline, effectiveProfile.summary.narrative),
+          updatedAt: new Date().toISOString(),
+        };
+        const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
+        setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        setSelectedMemberId(effectiveMember.id);
+        setDigitizationDraft(null);
+        setDigitizationError('');
+        showToast(
+          `Đã hợp nhất dữ liệu vào hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
+          'success'
+        );
+        setActiveTab('timeline');
+        processNextInQueue();
+        return;
+      } else if (duplicateResolution === 'replace' && existingMatch) {
+        // 2. Ghi đè toàn bộ sự kiện cũ bằng dữ liệu mới nhất
+        const replacedEvent: HealthEvent = { ...nextEvent, id: matchedEventId };
+        const updatedTimeline = effectiveProfile.timeline.map((item) =>
+          item.id === matchedEventId ? replacedEvent : item
+        );
+        const updatedSources = effectiveProfile.sources.map((item) =>
+          item.driveFileId === digitizationDraft.source.id
+            ? { ...item, status: 'processed' as const, digitizedAt: new Date().toISOString() }
+            : item
+        );
+        const nextProfile: HealthProfile = {
+          ...effectiveProfile,
+          timeline: updatedTimeline,
+          sources: updatedSources,
+          summary: summarizeTimeline(updatedTimeline, effectiveProfile.summary.narrative),
+          updatedAt: new Date().toISOString(),
+        };
+        const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
+        setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        setSelectedMemberId(effectiveMember.id);
+        setDigitizationDraft(null);
+        setDigitizationError('');
+        showToast(
+          `Đã cập nhật ghi đè hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
+          'success'
+        );
+        setActiveTab('timeline');
+        processNextInQueue();
+        return;
+      } else {
+        // 3. Tạo sự kiện mới độc lập
+        const nextProfile = digitizeHealthSource(effectiveProfile, nextEvent);
+        const merged = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
+        setProfiles((prev) => ({ ...prev, [effectiveMember.id]: merged }));
+        setSelectedMemberId(effectiveMember.id);
+        setDigitizationDraft(null);
+        setDigitizationError('');
+        showToast(`Đã lưu hồ sơ sức khỏe cho ${effectiveMember.name} lên Google Drive.`, 'success');
+        setActiveTab('timeline');
+        processNextInQueue();
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể lưu hồ sơ.', 'error');
     }
@@ -852,8 +1125,16 @@ export function HealthDashboard({
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
+              onClick={() => setShowWorkspaceAuditModal(true)}
+              title="Kiểm tra trùng lặp thư mục Drive & Khởi tạo lại"
+              className="p-2 rounded-xl text-slate-600 hover:text-teal-600 hover:bg-teal-50 active:scale-95 transition-all"
+            >
+              <FolderSync className="w-4 h-4 text-teal-600" />
+            </button>
+            <button
+              type="button"
               onClick={() => setShowGeminiPoolModal(true)}
-              title="Quản lý kho 6 API Key Gemini (Đa luồng & Failover)"
+              title="Trạng thái Hệ thống AI Gemini Server (Tự động cân bằng tải & phân luồng)"
               className="p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition-all relative"
             >
               <Cpu className="w-4 h-4 text-indigo-600" />
@@ -893,25 +1174,65 @@ export function HealthDashboard({
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-28">
-        {errorMessage && (
-          <div
-            role="alert"
-            className="mb-4 flex items-start gap-3 p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-sm animate-in fade-in"
-          >
-            <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="font-bold text-rose-950">Thông báo hệ thống</p>
-              <p className="text-xs text-rose-800 mt-0.5">{errorMessage}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setErrorMessage('')}
-              className="p-1 rounded-lg text-rose-500 hover:bg-rose-100"
+        {errorMessage && (() => {
+          const isDriveApiDisabled =
+            errorMessage.includes('drive.googleapis.com') ||
+            errorMessage.includes('Google Drive API has not been used') ||
+            errorMessage.includes('has not been used in project') ||
+            errorMessage.includes('SERVICE_DISABLED') ||
+            errorMessage.includes('accessNotConfigured');
+          const consoleUrlMatch = errorMessage.match(/https:\/\/[^\s]+/);
+          const consoleUrl =
+            consoleUrlMatch?.[0] ||
+            'https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=637661729068';
+
+          return (
+            <div
+              role="alert"
+              className="mb-4 flex flex-col gap-2 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-sm animate-in fade-in"
             >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-rose-950">
+                    {isDriveApiDisabled
+                      ? 'Dịch vụ Google Drive API chưa được kích hoạt'
+                      : 'Thông báo hệ thống'}
+                  </p>
+                  <p className="text-xs text-rose-800 mt-1 leading-relaxed">
+                    {isDriveApiDisabled
+                      ? 'Dự án Google Cloud (637661729068) của ứng dụng chưa bật quyền Google Drive API. Bạn cần bật API này trên Google Cloud Console để ứng dụng có thể tạo thư mục lưu trữ.'
+                      : errorMessage}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setErrorMessage('')}
+                  className="p-1 rounded-lg text-rose-500 hover:bg-rose-100 shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {isDriveApiDisabled && (
+                <div className="mt-2 pt-2 border-t border-rose-200/60 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                  <span className="text-[11px] text-rose-700">
+                    Nhấn nút bên cạnh để mở Google Cloud Console, bấm <b>BẬT (ENABLE)</b> rồi quay lại thử lại:
+                  </span>
+                  <a
+                    href={consoleUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs shadow-xs transition-all shrink-0"
+                  >
+                    <span>Mở Google Cloud Console</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Setup Screen if no workspace is opened */}
         {!workspace ? (
@@ -972,7 +1293,7 @@ export function HealthDashboard({
                   ) : (
                     <Plus className="w-4 h-4" />
                   )}
-                  <span>Khởi tạo Thư mục “Sức Khỏe Gia Đình” mới</span>
+                  <span>Khởi tạo Thư mục “Suc khoe gia dinh” mới</span>
                 </button>
 
                 <div className="flex items-center gap-3 text-xs text-slate-400">
@@ -1021,59 +1342,6 @@ export function HealthDashboard({
             {/* VIEW 1: TỔNG QUAN (OVERVIEW) */}
             {activeTab === 'overview' && (
               <div className="space-y-6 animate-in fade-in duration-150">
-                {/* Hero Greeting & Quick Health Pulse Banner */}
-                <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-950 text-white p-5 sm:p-7 shadow-lg shadow-slate-900/10">
-                  <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-5">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[11px] font-bold border border-emerald-500/30">
-                          Gia đình an tâm
-                        </span>
-                        <span className="text-slate-400 text-xs">
-                          {new Date().toLocaleDateString('vi-VN', {
-                            weekday: 'long',
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric',
-                          })}
-                        </span>
-                      </div>
-                      <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                        Hồ Sơ Sức Khỏe Gia Đình
-                      </h2>
-                      <p className="text-xs sm:text-sm text-slate-300 max-w-lg leading-relaxed">
-                        Đang bảo vệ {members.length} người thân. Tất cả đơn thuốc, xét nghiệm được AI số hóa và lưu trữ an toàn trên Google Drive.
-                      </p>
-                    </div>
-
-                    {/* Quick CTA Actions */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={handleCameraCapture}
-                        disabled={!driveAuthorized || isUploading || !members.length}
-                        className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-slate-950 font-extrabold text-xs sm:text-sm shadow-md shadow-emerald-500/20 transition-all disabled:opacity-50"
-                      >
-                        <Camera className="w-4 h-4" />
-                        <span>Chụp bệnh án</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={!driveAuthorized || isUploading || !members.length}
-                        className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs sm:text-sm border border-white/20 transition-all disabled:opacity-50"
-                      >
-                        {isUploading ? (
-                          <LoaderCircle className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <FileUp className="w-4 h-4" />
-                        )}
-                        <span>Tải ảnh / PDF</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
                 {/* Upcoming Follow-ups Alert Strip */}
                 {upcomingFollowUps.length > 0 && (
                   <div className="rounded-2xl border border-amber-200/90 bg-amber-50/80 p-4">
@@ -1143,14 +1411,14 @@ export function HealthDashboard({
                       <Users className="w-10 h-10 text-slate-300 mx-auto mb-2" />
                       <p className="font-bold text-slate-700">Chưa có hồ sơ thành viên nào</p>
                       <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                        Thêm Bố, Mẹ, Con hoặc người thân trong gia đình để bắt đầu theo dõi sức khỏe.
+                        Thêm thành viên trong gia đình để bắt đầu theo dõi và đồng bộ hồ sơ sức khỏe.
                       </p>
                       <button
                         type="button"
                         onClick={() => setActiveTab('family')}
                         className="mt-4 px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold text-xs"
                       >
-                        Thêm người thân ngay
+                        Thêm thành viên ngay
                       </button>
                     </div>
                   ) : (
@@ -1159,7 +1427,9 @@ export function HealthDashboard({
                         const prof = profiles[m.id];
                         const eventCount = prof?.timeline?.length || 0;
                         const isChosen = m.id === selectedMember?.id;
-                        const roleObj = MEMBER_ROLES.find((r) => r.value === m.role);
+                        const genderLabel = m.gender === 'male' ? 'Nam' : m.gender === 'female' ? 'Nữ' : m.gender === 'other' ? 'Khác' : '';
+                        const birthDateStr = m.birthDate ? new Date(m.birthDate).toLocaleDateString('vi-VN') : '';
+                        const subInfo = [genderLabel, birthDateStr ? `Sinh ${birthDateStr}` : ''].filter(Boolean).join(' · ');
 
                         return (
                           <div
@@ -1184,7 +1454,7 @@ export function HealthDashboard({
                                     {m.name}
                                   </h4>
                                   <span className="text-xs text-slate-500">
-                                    {roleObj?.icon} {roleObj?.label || 'Người thân'}
+                                    {subInfo || 'Thành viên'}
                                   </span>
                                 </div>
                               </div>
@@ -1264,9 +1534,14 @@ export function HealthDashboard({
                         <h3 className="font-extrabold text-slate-900 text-base">
                           {selectedMember?.name}
                         </h3>
-                        <span className="text-xs text-slate-500">
-                          ({MEMBER_ROLES.find((r) => r.value === selectedMember?.role)?.label})
-                        </span>
+                        {selectedMember && (
+                          <span className="text-xs text-slate-500 font-normal">
+                            {[
+                              selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
+                              selectedMember.birthDate ? `Sinh ${selectedMember.birthDate}` : '',
+                            ].filter(Boolean).join(' · ')}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-slate-500">
                         Hồ sơ: {selectedProfile?.timeline.length || 0} tài liệu · Cập nhật gần nhất:{' '}
@@ -1764,7 +2039,15 @@ export function HealthDashboard({
                     <div className="divide-y divide-slate-100">
                       {members.map((m) => {
                         const prof = profiles[m.id];
-                        const roleObj = MEMBER_ROLES.find((r) => r.value === m.role);
+                        const genderLabel = m.gender === 'male' ? 'Nam' : m.gender === 'female' ? 'Nữ' : m.gender === 'other' ? 'Khác' : '';
+                        const birthDateStr = m.birthDate ? new Date(m.birthDate).toLocaleDateString('vi-VN') : '';
+                        const age = m.birthDate ? Math.max(0, new Date().getFullYear() - new Date(m.birthDate).getFullYear()) : null;
+                        const subInfo = [
+                          genderLabel,
+                          birthDateStr ? `Sinh ${birthDateStr}${age !== null ? ` (${age} tuổi)` : ''}` : '',
+                          `${prof?.timeline?.length || 0} hồ sơ`,
+                        ].filter(Boolean).join(' · ');
+
                         return (
                           <div
                             key={m.id}
@@ -1777,8 +2060,7 @@ export function HealthDashboard({
                               <div>
                                 <p className="font-bold text-slate-900 text-sm">{m.name}</p>
                                 <p className="text-slate-500">
-                                  {roleObj?.icon} {roleObj?.label} ·{' '}
-                                  {prof?.timeline?.length || 0} hồ sơ
+                                  {subInfo}
                                 </p>
                               </div>
                             </div>
@@ -1820,28 +2102,47 @@ export function HealthDashboard({
                         <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide">
                           Thêm thành viên mới
                         </h4>
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          <input
-                            type="text"
-                            required
-                            value={newMemberName}
-                            onChange={(e) => setNewMemberName(e.target.value)}
-                            placeholder="Họ và tên..."
-                            className="px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900"
-                          />
-                          <select
-                            value={newMemberRole}
-                            onChange={(e) =>
-                              setNewMemberRole(e.target.value as FamilyMember['role'])
-                            }
-                            className="px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white"
-                          >
-                            {MEMBER_ROLES.map((r) => (
-                              <option key={r.value} value={r.value}>
-                                {r.icon} {r.label}
-                              </option>
-                            ))}
-                          </select>
+                        <div className="grid gap-2.5 sm:grid-cols-3">
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                              Họ và tên *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={newMemberName}
+                              onChange={(e) => setNewMemberName(e.target.value)}
+                              placeholder="Họ và tên..."
+                              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                              Ngày tháng năm sinh
+                            </label>
+                            <input
+                              type="date"
+                              value={newMemberBirthDate}
+                              onChange={(e) => setNewMemberBirthDate(e.target.value)}
+                              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                              Giới tính
+                            </label>
+                            <select
+                              value={newMemberGender}
+                              onChange={(e) =>
+                                setNewMemberGender(e.target.value as 'male' | 'female' | 'other')
+                              }
+                              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white font-medium"
+                            >
+                              <option value="male">Nam</option>
+                              <option value="female">Nữ</option>
+                              <option value="other">Khác</option>
+                            </select>
+                          </div>
                         </div>
                         <button
                           type="submit"
@@ -1994,13 +2295,54 @@ export function HealthDashboard({
           ref={fileInputRef}
           type="file"
           accept="image/*,.pdf"
+          multiple
           className="hidden"
           onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void beginDigitization(file);
+            const files = Array.from(event.target.files || []);
+            if (files.length === 0) return;
+            if (files.length === 1) {
+              setUploadQueue([]);
+              setQueueStatus(null);
+              void beginDigitization(files[0]);
+            } else {
+              setUploadQueue(files.slice(1));
+              setQueueStatus({ current: 1, total: files.length });
+              showToast(`Đã chọn ${files.length} tệp. Đang xử lý tệp 1/${files.length} (${files[0].name})...`, 'info');
+              void beginDigitization(files[0]);
+            }
             event.currentTarget.value = '';
           }}
         />
+
+        {/* Upload Queue Floating Status Banner */}
+        {queueStatus && (
+          <div className="fixed bottom-20 left-4 right-4 z-40 max-w-md mx-auto bg-slate-900/95 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700 flex items-center justify-between gap-3 animate-in slide-in-from-bottom-4">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              </div>
+              <div>
+                <span className="font-bold text-xs block">
+                  Đang xử lý hàng đợi tải lên ({queueStatus.current}/{queueStatus.total})
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  Tự động xử lý tuần tự từng tệp tài liệu y tế
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setUploadQueue([]);
+                setQueueStatus(null);
+                showToast('Đã hủy hàng đợi tải lên.', 'info');
+              }}
+              className="text-xs text-rose-400 hover:text-rose-300 font-bold px-2 py-1"
+            >
+              Hủy
+            </button>
+          </div>
+        )}
       </main>
 
       {/* 2. FIXED BOTTOM TAB BAR (Thumb navigation, Mobile Pattern 1) */}
@@ -2143,15 +2485,100 @@ export function HealthDashboard({
         </div>
       )}
 
+      {/* Digitization Progress Tracker Modal */}
+      {selectedMember && (
+        <DigitizationProgressTrackerModal
+          isOpen={trackerState.isOpen}
+          file={trackerState.file}
+          member={selectedMember}
+          members={members}
+          step={trackerState.step}
+          progressPercent={trackerState.progressPercent}
+          progressMessage={trackerState.progressMessage}
+          driveFile={trackerState.driveFile}
+          modelUsed={trackerState.modelUsed}
+          partialExtracted={trackerState.partialExtracted}
+          error={trackerState.error}
+          onReview={() => {
+            if (trackerState.driveFile) {
+              setDigitizationDraft({
+                source: trackerState.driveFile,
+                extracted: trackerState.partialExtracted,
+              });
+            }
+            setTrackerState((prev) => ({ ...prev, isOpen: false }));
+          }}
+          onRetry={() => {
+            if (trackerState.file) {
+              void beginDigitization(trackerState.file);
+            }
+          }}
+          onManualEntry={() => {
+            if (trackerState.driveFile) {
+              setDigitizationDraft({
+                source: trackerState.driveFile,
+                extracted: trackerState.partialExtracted,
+              });
+            }
+            setTrackerState((prev) => ({ ...prev, isOpen: false }));
+          }}
+          onClose={() => {
+            setTrackerState((prev) => ({ ...prev, isOpen: false }));
+          }}
+        />
+      )}
+
       {/* Digitization Review Modal */}
       {digitizationDraft && (
         <DigitizationReviewModal
           draft={digitizationDraft}
           error={digitizationError}
-          onClose={() => setDigitizationDraft(null)}
-          onSave={(e) => void handleSaveDigitization(e)}
+          members={members}
+          profiles={profiles}
+          selectedMemberId={selectedMemberId}
+          onClose={() => {
+            setDigitizationDraft(null);
+            processNextInQueue();
+          }}
+          onSave={(e, targetMemberId) => void handleSaveDigitization(e, targetMemberId)}
         />
       )}
+
+      {/* Duplicate Document Pre-Upload Modal */}
+      <DuplicateDocumentModal
+        isOpen={Boolean(fileDuplicateCandidate)}
+        file={fileDuplicateCandidate?.file || null}
+        match={fileDuplicateCandidate?.match || null}
+        currentMemberName={selectedMember?.name || ''}
+        onViewExisting={(linkedEvent, memberId) => {
+          if (memberId && memberId !== selectedMember?.id) {
+            setSelectedMemberId(memberId);
+          }
+          setFileDuplicateCandidate(null);
+          setActiveTab('timeline');
+          showToast(`Đã chuyển tới hồ sơ: ${linkedEvent.title}`, 'info');
+          processNextInQueue();
+        }}
+        onProceedReScan={() => {
+          if (fileDuplicateCandidate) {
+            const targetFile = fileDuplicateCandidate.file;
+            setFileDuplicateCandidate(null);
+            void beginDigitization(targetFile, { forceUpload: true });
+          }
+        }}
+        onProceedForceNew={() => {
+          if (fileDuplicateCandidate) {
+            const targetFile = fileDuplicateCandidate.file;
+            setFileDuplicateCandidate(null);
+            void beginDigitization(targetFile, { forceUpload: true });
+          }
+        }}
+        onCancel={() => {
+          setFileDuplicateCandidate(null);
+          if (fileInputRef.current) fileInputRef.current.value = '';
+          processNextInQueue();
+        }}
+      />
 
       {/* App Update Modal */}
       <AppUpdateModal
@@ -2166,6 +2593,17 @@ export function HealthDashboard({
         isOpen={showGeminiPoolModal}
         onClose={() => setShowGeminiPoolModal(false)}
       />
+
+      {/* Workspace Audit & Factory Reset Modal */}
+      <WorkspaceAuditModal
+        isOpen={showWorkspaceAuditModal}
+        workspace={workspace}
+        profiles={profiles}
+        userEmail={userEmail}
+        onClose={() => setShowWorkspaceAuditModal(false)}
+        onFactoryReset={handleFactoryReset}
+        showToast={showToast}
+      />
     </div>
   );
 }
@@ -2176,12 +2614,69 @@ export function HealthDashboard({
 interface DigitizationModalProps {
   draft: DigitizationDraft;
   error: string;
+  members: FamilyMember[];
+  profiles: Record<string, HealthProfile>;
+  selectedMemberId: string;
   onClose: () => void;
-  onSave: (event: React.FormEvent<HTMLFormElement>) => void;
+  onSave: (event: React.FormEvent<HTMLFormElement>, targetMemberId: string) => void;
 }
 
-function DigitizationReviewModal({ draft, error, onClose, onSave }: DigitizationModalProps) {
+function findBestMemberMatch(
+  extracted: Partial<HealthEvent>,
+  members: FamilyMember[],
+  currentSelectedId: string
+): string {
+  if (!members.length) return '';
+  const patientName = extracted.patientName?.trim().toLowerCase();
+  const patientGender = extracted.patientGender?.trim().toLowerCase();
+  const patientBirth = extracted.patientBirthDate?.trim();
+
+  if (patientName) {
+    const matched = members.find((m) => {
+      const mName = m.name.trim().toLowerCase();
+      return mName === patientName || patientName.includes(mName) || mName.includes(patientName);
+    });
+    if (matched) return matched.id;
+  }
+
+  if (patientBirth) {
+    const isMale = patientGender ? (patientGender.includes('nam') || patientGender === 'male') : false;
+    const isFemale = patientGender ? (patientGender.includes('nữ') || patientGender === 'female') : false;
+    const matched = members.find((m) => {
+      const birthMatch = m.birthDate && (m.birthDate === patientBirth || patientBirth.startsWith(m.birthDate.slice(0, 4)));
+      const genderMatch = isMale ? m.gender === 'male' : isFemale ? m.gender === 'female' : true;
+      return Boolean(birthMatch && genderMatch);
+    });
+    if (matched) return matched.id;
+  }
+
+  return currentSelectedId || members[0]?.id || '';
+}
+
+function DigitizationReviewModal({
+  draft,
+  error,
+  members,
+  profiles,
+  selectedMemberId,
+  onClose,
+  onSave,
+}: DigitizationModalProps) {
   const extracted = draft.extracted;
+  const [targetMemberId, setTargetMemberId] = useState(() =>
+    findBestMemberMatch(extracted, members, selectedMemberId)
+  );
+  const [duplicateResolution, setDuplicateResolution] = useState<'merge' | 'replace' | 'create_new'>('merge');
+
+  // Kiểm tra trùng lặp sự kiện trong timeline của thành viên mục tiêu
+  const targetTimeline = profiles[targetMemberId]?.timeline || [];
+  const duplicateMatch = useMemo(() => {
+    return detectDuplicateEvent(targetTimeline, {
+      ...extracted,
+      sourceFileId: draft.source.id,
+    });
+  }, [targetTimeline, extracted, draft.source.id]);
+
   const [metricsText, setMetricsText] = useState(
     (extracted.metrics || [])
       .map((metric) => `${metric.name} | ${metric.value} | ${metric.unit}`)
@@ -2229,10 +2724,167 @@ function DigitizationReviewModal({ draft, error, onClose, onSave }: Digitization
         )}
 
         <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-100 text-[11px] text-emerald-900">
-          AI đã tự động điền các thông tin tìm thấy từ tài liệu. Bạn có thể kiểm tra và chỉnh sửa trước khi lưu vào hồ sơ gia đình.
+          AI đã tự động trích xuất thông tin từ tài liệu. Bạn có thể kiểm tra họ tên, ngày sinh, giới tính đối chiếu với thành viên gia đình trước khi lưu.
         </div>
 
-        <form onSubmit={onSave} className="grid gap-3.5 sm:grid-cols-2 text-xs">
+        {/* Đối chiếu & Ghép thông tin bệnh nhân với thành viên gia đình */}
+        <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-800">
+              Đối chiếu thông tin nhận dạng trên tài liệu:
+            </span>
+            {targetMemberId && (
+              <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-bold flex items-center gap-1">
+                <Check className="w-3 h-3 text-emerald-600" />
+                <span>Khớp với: {members.find((m) => m.id === targetMemberId)?.name}</span>
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-white p-2 rounded-xl border border-slate-200">
+              <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Họ tên trên hồ sơ</span>
+              <span className="font-bold text-slate-900 truncate block mt-0.5">
+                {extracted.patientName || 'Chưa nhận dạng'}
+              </span>
+            </div>
+            <div className="bg-white p-2 rounded-xl border border-slate-200">
+              <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Ngày/Năm sinh</span>
+              <span className="font-bold text-slate-900 truncate block mt-0.5">
+                {extracted.patientBirthDate || 'Chưa nhận dạng'}
+              </span>
+            </div>
+            <div className="bg-white p-2 rounded-xl border border-slate-200">
+              <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Giới tính</span>
+              <span className="font-bold text-slate-900 truncate block mt-0.5">
+                {extracted.patientGender || 'Chưa nhận dạng'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <label htmlFor="target-member-select" className="text-xs font-bold text-slate-700 shrink-0">
+              Gán vào hồ sơ của:
+            </label>
+            <select
+              id="target-member-select"
+              value={targetMemberId}
+              onChange={(e) => setTargetMemberId(e.target.value)}
+              className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-bold text-slate-900 bg-white"
+            >
+              {members.map((m) => {
+                const gLabel = m.gender === 'male' ? 'Nam' : m.gender === 'female' ? 'Nữ' : 'Khác';
+                return (
+                  <option key={m.id} value={m.id}>
+                    {m.name} ({gLabel}{m.birthDate ? ` · Sinh ${m.birthDate}` : ''})
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        </div>
+
+        {/* Cảnh báo sự kiện tương tự / Trùng lặp & Lựa chọn giải pháp thông minh */}
+        {duplicateMatch && (
+          <div className="p-3.5 rounded-2xl bg-amber-50/90 border-2 border-amber-300 space-y-3 animate-in fade-in">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <span className="font-extrabold text-amber-950 block text-xs sm:text-sm">
+                  Phát hiện sự kiện tương tự đã có trong hồ sơ
+                </span>
+                <span className="text-[11px] text-amber-900 block mt-0.5">
+                  Sự kiện cũ: <b>{duplicateMatch.matchedEvent.title}</b> ({duplicateMatch.matchedEvent.date})
+                  {duplicateMatch.matchedEvent.facility && ` tại ${duplicateMatch.matchedEvent.facility}`}
+                </span>
+                <div className="flex flex-wrap gap-1 mt-1 text-[10px] text-amber-800 font-medium">
+                  {duplicateMatch.reasons.map((r, i) => (
+                    <span key={i} className="bg-amber-100/90 px-2 py-0.5 rounded-md">
+                      • {r}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-amber-200/80 space-y-2">
+              <span className="text-[11px] font-bold text-slate-800 block">
+                Chọn phương án lưu để tránh trùng lặp dòng thời gian:
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <label
+                  className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                    duplicateResolution === 'merge'
+                      ? 'bg-emerald-50 border-emerald-500 font-bold text-emerald-950 shadow-xs'
+                      : 'bg-white border-slate-200 text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modal_dup_res"
+                    checked={duplicateResolution === 'merge'}
+                    onChange={() => setDuplicateResolution('merge')}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <div className="text-[11px]">
+                    <span className="block font-bold">Hợp nhất (Khuyên dùng)</span>
+                    <span className="text-[10px] text-slate-500 block font-normal mt-0.5 leading-snug">
+                      Gộp bổ sung thuốc & chỉ số mới vào hồ sơ cũ
+                    </span>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                    duplicateResolution === 'replace'
+                      ? 'bg-amber-50 border-amber-500 font-bold text-amber-950 shadow-xs'
+                      : 'bg-white border-slate-200 text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modal_dup_res"
+                    checked={duplicateResolution === 'replace'}
+                    onChange={() => setDuplicateResolution('replace')}
+                    className="mt-0.5 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="text-[11px]">
+                    <span className="block font-bold">Ghi đè sự kiện cũ</span>
+                    <span className="text-[10px] text-slate-500 block font-normal mt-0.5 leading-snug">
+                      Thay thế hoàn toàn bằng dữ liệu mới nhất
+                    </span>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                    duplicateResolution === 'create_new'
+                      ? 'bg-slate-100 border-slate-400 font-bold text-slate-900 shadow-xs'
+                      : 'bg-white border-slate-200 text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modal_dup_res"
+                    checked={duplicateResolution === 'create_new'}
+                    onChange={() => setDuplicateResolution('create_new')}
+                    className="mt-0.5 text-slate-600 focus:ring-slate-500"
+                  />
+                  <div className="text-[11px]">
+                    <span className="block font-bold">Lưu sự kiện riêng</span>
+                    <span className="text-[10px] text-slate-500 block font-normal mt-0.5 leading-snug">
+                      Tạo thành 2 sự kiện riêng biệt (cùng ngày)
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <form onSubmit={(e) => onSave(e, targetMemberId)} className="grid gap-3.5 sm:grid-cols-2 text-xs">
+          <input type="hidden" name="duplicateResolution" value={duplicateResolution} />
+          <input type="hidden" name="matchedEventId" value={duplicateMatch?.matchedEvent.id || ''} />
           <label className="font-bold text-slate-700 sm:col-span-2">
             Tiêu đề hồ sơ *
             <input

@@ -13,7 +13,8 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const databaseId = firebaseConfig.firestoreDatabaseId;
+const config = firebaseConfig as unknown as { firestoreDatabaseId?: string };
+const databaseId = config.firestoreDatabaseId;
 const db = (!databaseId || databaseId === '(default)') ? getFirestore(app) : getFirestore(app, databaseId);
 const RELAY_COLLECTION = 'health_workspace_relays';
 const MEMBER_COLLECTION = 'members';

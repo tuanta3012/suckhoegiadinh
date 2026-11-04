@@ -171,6 +171,10 @@ class GeminiPoolManager {
     return [...this.keys];
   }
 
+  public getAllKeys(): string[] {
+    return [...this.keys];
+  }
+
   private registerKey(key: string, index: number) {
     const masked = key.length > 10
       ? `${key.slice(0, 6)}...${key.slice(-4)}`
