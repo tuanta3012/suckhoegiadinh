@@ -14,9 +14,8 @@ import {
 
 interface GeminiServerStatus {
   status: string;
-  hasDefaultServerKey?: boolean;
-  hasEnvPoolKeys?: boolean;
-  totalServerKeys: number;
+  configuredProjects: number;
+  hasProjectConfig?: boolean;
   supportedTasks?: string[];
   taskModels?: {
     digitization: string[];
@@ -58,8 +57,8 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
 
   if (!isOpen) return null;
 
-  const totalKeys = serverStatus?.totalServerKeys ?? 0;
-  const isHealthy = Boolean(serverStatus && totalKeys > 0);
+  const totalProjects = serverStatus?.configuredProjects ?? 0;
+  const isHealthy = Boolean(serverStatus && totalProjects > 0);
 
   return (
     <div
@@ -119,7 +118,7 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
                 </div>
                 <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
                   {isHealthy
-                    ? `Đã nạp thành công ${totalKeys} khóa API từ biến môi trường máy chủ (GEMINI_API_KEYS).`
+                    ? `Đã nạp ${totalProjects} project Gemini độc lập từ cấu hình bảo mật của máy chủ.`
                     : 'Chưa tìm thấy khóa API trên máy chủ. Đang chờ kết nối.'}
                 </p>
               </div>
@@ -147,13 +146,13 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
             <div className="bg-slate-800/50 border border-slate-700/60 p-3.5 rounded-2xl">
               <span className="text-xs text-slate-400 block mb-1 flex items-center gap-1">
                 <Server className="w-3.5 h-3.5 text-indigo-400" />
-                Khóa API Máy chủ
+                Project Gemini
               </span>
               <div className="text-xl font-bold text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4" />
-                {totalKeys} khóa hoạt động
+                {totalProjects} project
               </div>
-              <span className="text-[10px] text-slate-500 block mt-1">Từ GEMINI_API_KEYS</span>
+              <span className="text-[10px] text-slate-500 block mt-1">Quota theo project và model</span>
             </div>
 
             <div className="bg-slate-800/50 border border-slate-700/60 p-3.5 rounded-2xl">
@@ -173,9 +172,9 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
                 Cơ chế Chống nghẽn
               </span>
               <div className="text-base font-bold text-amber-300">
-                Tự động Failover
+                Quota-aware routing
               </div>
-              <span className="text-[10px] text-slate-500 block mt-1">Luân phiên tài khoản & model</span>
+              <span className="text-[10px] text-slate-500 block mt-1">Cùng model qua các project trước</span>
             </div>
           </div>
 
@@ -227,7 +226,7 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
                 </div>
 
                 <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80">
-                  ⚡ Điều phối qua <b className="text-emerald-400">{totalKeys}</b> khóa API (ước tính tối đa ~{totalKeys * 15} lượt/phút).
+                  ⚡ Mỗi model: <b className="text-emerald-400">{totalProjects * 15} RPM / {totalProjects * 500} RPD</b> tối đa theo cấu hình.
                 </div>
               </div>
 
@@ -274,7 +273,7 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
                 </div>
 
                 <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80">
-                  🧠 Khả năng suy luận lâm sàng nâng cao với ngữ cảnh toàn diện.
+                  🧠 Mỗi model: <b className="text-indigo-300">{totalProjects * 5} RPM / {totalProjects * 20} RPD</b> tối đa theo cấu hình.
                 </div>
               </div>
             </div>
@@ -287,7 +286,7 @@ export function GeminiPoolModal({ isOpen, onClose }: GeminiPoolModalProps) {
               Tại sao bạn không cần nhập API Key ở đây nữa?
             </div>
             <p className="text-slate-400 leading-relaxed">
-              Tất cả các khóa API đã được cấu hình trực tiếp trong biến môi trường bí mật <code className="text-emerald-400 bg-slate-900 px-1.5 py-0.5 rounded font-mono">GEMINI_API_KEYS</code> của máy chủ backend. Máy chủ tự động xoay vòng và bảo vệ các khóa này an toàn tuyệt đối, bạn và gia đình chỉ cần an tâm tải tài liệu lên sử dụng mà không cần thao tác kỹ thuật nào thêm!
+              Cấu hình <b>mỗi project độc lập cùng API key riêng</b> trong biến môi trường server-side <code className="text-emerald-400 bg-slate-900 px-1.5 py-0.5 rounded font-mono">GEMINI_PROJECTS</code>. Bộ điều phối kiểm quota theo từng project-model, dùng project khác trước khi hạ model. Không nhập key ở trình duyệt.
             </p>
           </div>
         </div>

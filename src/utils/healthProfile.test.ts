@@ -6,6 +6,7 @@ import {
   createHealthProfile,
   digitizeHealthSource,
   mergeHealthProfiles,
+  parseHealthProfile,
 } from './healthProfile';
 
 const member: FamilyMember = {
@@ -122,5 +123,22 @@ describe('health profile', () => {
       status: 'pending',
     });
     expect(() => digitizeHealthSource(staged, { ...event, title: ' ' })).toThrow('Cần nhập tiêu đề');
+  });
+
+  it('rejects malformed health events instead of loading partial data as a valid profile', () => {
+    const profile = createHealthProfile(member);
+    expect(() =>
+      parseHealthProfile(
+        { ...profile, timeline: [{ ...event, metrics: 'not-an-array' }] },
+        member,
+      ),
+    ).toThrow('sự kiện thiếu trường bắt buộc');
+  });
+
+  it('rejects malformed source records', () => {
+    const profile = createHealthProfile(member);
+    expect(() =>
+      parseHealthProfile({ ...profile, sources: [{ driveFileId: 'source-1' }] }, member),
+    ).toThrow('tài liệu nguồn thiếu trường bắt buộc');
   });
 });

@@ -6,6 +6,79 @@ import type {
   HealthSource,
 } from '../types';
 
+const EVENT_TYPES = new Set<HealthEvent['type']>([
+  'medical_report',
+  'prescription',
+  'test_result',
+  'vaccination',
+  'discharge',
+  'other',
+]);
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isHealthMetric(value: unknown): value is HealthMetric {
+  return Boolean(
+    isJsonRecord(value) &&
+      isNonEmptyString(value.name) &&
+      typeof value.value === 'number' &&
+      Number.isFinite(value.value) &&
+      typeof value.unit === 'string',
+  );
+}
+
+function isMedication(value: unknown): boolean {
+  return Boolean(
+    isJsonRecord(value) &&
+      isNonEmptyString(value.name) &&
+      ['dosage', 'frequency', 'duration'].every(
+        (key) => value[key] === undefined || typeof value[key] === 'string',
+      ),
+  );
+}
+
+function isHealthEvent(value: unknown): value is HealthEvent {
+  if (!isJsonRecord(value)) return false;
+  return Boolean(
+    isNonEmptyString(value.id) &&
+      isNonEmptyString(value.sourceFileId) &&
+      typeof value.sourceFileName === 'string' &&
+      typeof value.type === 'string' &&
+      EVENT_TYPES.has(value.type as HealthEvent['type']) &&
+      isNonEmptyString(value.title) &&
+      isNonEmptyString(value.date) &&
+      Array.isArray(value.diagnoses) &&
+      value.diagnoses.every((item) => typeof item === 'string') &&
+      Array.isArray(value.medications) &&
+      value.medications.every(isMedication) &&
+      Array.isArray(value.metrics) &&
+      value.metrics.every(isHealthMetric) &&
+      isNonEmptyString(value.recordedAt) &&
+      ['facility', 'advice', 'nextFollowUp', 'notes', 'patientName', 'patientBirthDate', 'patientGender'].every(
+        (key) => value[key] === undefined || typeof value[key] === 'string',
+      ) &&
+      (value.extractedData === undefined || isJsonRecord(value.extractedData)),
+  );
+}
+
+function isHealthSource(value: unknown): value is HealthSource {
+  return Boolean(
+    isJsonRecord(value) &&
+      isNonEmptyString(value.driveFileId) &&
+      typeof value.fileName === 'string' &&
+      typeof value.mimeType === 'string' &&
+      isNonEmptyString(value.uploadedAt) &&
+      (value.status === 'pending' || value.status === 'processed') &&
+      (value.digitizedAt === undefined || typeof value.digitizedAt === 'string') &&
+      (value.rawDeletedAt === undefined || typeof value.rawDeletedAt === 'string') &&
+      (value.fileSize === undefined ||
+        (typeof value.fileSize === 'number' && Number.isFinite(value.fileSize))) &&
+      (value.fileHash === undefined || typeof value.fileHash === 'string'),
+  );
+}
+
 export function createHealthProfile(member: FamilyMember, now = new Date().toISOString()): HealthProfile {
   return {
     schemaVersion: 1,
@@ -145,8 +218,21 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
   if (data.schemaVersion !== 1 || !Array.isArray(data.timeline) || !Array.isArray(data.sources)) {
     throw new Error('Phiên bản hoặc cấu trúc hồ sơ sức khỏe không được hỗ trợ.');
   }
-  if (data.timeline.some((event) => !event || typeof event.id !== 'string' || typeof event.date !== 'string')) {
-    throw new Error('Hồ sơ có sự kiện thiếu mã hoặc ngày ghi nhận.');
+  if (!data.timeline.every(isHealthEvent)) {
+    throw new Error('Hồ sơ có sự kiện thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+  }
+  if (!data.sources.every(isHealthSource)) {
+    throw new Error('Hồ sơ có tài liệu nguồn thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+  }
+  if (data.summary !== undefined && !isJsonRecord(data.summary)) {
+    throw new Error('Phần tổng hợp hồ sơ sức khỏe không hợp lệ.');
+  }
+  if (
+    data.summary &&
+    data.summary.narrative !== undefined &&
+    typeof data.summary.narrative !== 'string'
+  ) {
+    throw new Error('Phần tóm tắt hồ sơ sức khỏe không hợp lệ.');
   }
 
   const normalized: HealthProfile = {

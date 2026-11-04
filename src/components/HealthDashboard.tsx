@@ -69,6 +69,7 @@ import {
   cleanupExpiredRawFiles,
   createHealthWorkspace,
   deleteDriveFamilyMember,
+  downloadDriveFile,
   factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
   type HealthDriveWorkspace,
@@ -92,6 +93,7 @@ import {
   extractHealthEventWithProgress,
   refineAndOrganizeMemberData,
   summarizeHealthProfile,
+  type ExtractionProgressUpdate,
 } from '../utils/geminiService';
 import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
 import { GeminiPoolModal } from './GeminiPoolModal';
@@ -107,6 +109,13 @@ import {
   type EventDuplicateMatch,
 } from '../utils/deduplicationService';
 import { DuplicateDocumentModal } from './DuplicateDocumentModal';
+import {
+  clearOcrRecoveryJobs,
+  readOcrRecoveryJobs,
+  removeOcrRecoveryJob,
+  upsertOcrRecoveryJob,
+  type OcrRecoveryJob,
+} from '../utils/ocrRecoveryStorage';
 import {
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
@@ -188,6 +197,7 @@ export function HealthDashboard({
   const [trackerState, setTrackerState] = useState<{
     isOpen: boolean;
     file: File | null;
+    memberId: string;
     step: TrackerStep;
     progressPercent: number;
     progressMessage: string;
@@ -198,6 +208,7 @@ export function HealthDashboard({
   }>({
     isOpen: false,
     file: null,
+    memberId: '',
     step: 'uploading_drive',
     progressPercent: 0,
     progressMessage: '',
@@ -223,6 +234,36 @@ export function HealthDashboard({
   } | null>(null);
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
+  const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
+
+  function persistOcrRecoveryJob(
+    driveFileId: string,
+    status: OcrRecoveryJob['status'],
+    progressPercent: number,
+  ) {
+    if (!workspace) return;
+    try {
+      setOcrRecoveryJobs(upsertOcrRecoveryJob(workspace.rootFolderId, {
+        driveFileId,
+        status,
+        progressPercent,
+        updatedAt: Date.now(),
+      }));
+    } catch (error) {
+      console.error('[OCR recovery] Could not persist local recovery metadata.', error);
+      showToast('Không lưu được trạng thái khôi phục OCR trên thiết bị này.', 'error');
+    }
+  }
+
+  function forgetOcrRecoveryJob(driveFileId: string) {
+    if (!workspace) return;
+    try {
+      setOcrRecoveryJobs(removeOcrRecoveryJob(workspace.rootFolderId, driveFileId));
+    } catch (error) {
+      console.error('[OCR recovery] Could not remove local recovery metadata.', error);
+      showToast('Không thể xóa trạng thái khôi phục OCR khỏi thiết bị.', 'error');
+    }
+  }
 
   function processNextInQueue() {
     if (uploadQueue.length > 0) {
@@ -245,6 +286,13 @@ export function HealthDashboard({
   async function handleFactoryReset() {
     if (!workspace || !userEmail) return;
     const fresh = await factoryResetWorkspaceFolder(workspace, userEmail);
+    try {
+      clearOcrRecoveryJobs(workspace.rootFolderId);
+      setOcrRecoveryJobs([]);
+    } catch (error) {
+      console.error('[OCR recovery] Could not clear local recovery metadata after reset.', error);
+      showToast('Đã xóa Drive nhưng không thể dọn trạng thái OCR cục bộ.', 'error');
+    }
     setWorkspace(fresh);
     setProfiles({});
     setSelectedMemberId('');
@@ -278,6 +326,8 @@ export function HealthDashboard({
 
   const selectedMember = members.find((m) => m.id === selectedMemberId) || members[0] || null;
   const selectedProfile = selectedMember ? profiles[selectedMember.id] : null;
+  const trackerMember =
+    members.find((member) => member.id === trackerState.memberId) || selectedMember;
 
   // Extract all available vital metrics from selected member's timeline
   const metricNames = useMemo(() => {
@@ -368,6 +418,19 @@ export function HealthDashboard({
     }
   }, []);
 
+  useEffect(() => {
+    if (!workspace) {
+      setOcrRecoveryJobs([]);
+      return;
+    }
+    try {
+      setOcrRecoveryJobs(readOcrRecoveryJobs(workspace.rootFolderId));
+    } catch (error) {
+      console.error('[OCR recovery] Could not read local recovery metadata.', error);
+      setErrorMessage(error instanceof Error ? error.message : 'Không thể khôi phục trạng thái OCR trên thiết bị.');
+    }
+  }, [workspace?.rootFolderId]);
+
   const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
     const entries = await Promise.all(
       nextWorkspace.family.members.map(async (member) => {
@@ -377,7 +440,7 @@ export function HealthDashboard({
         } catch (error) {
           return [
             member.id,
-            createHealthProfile(member),
+            null,
             error instanceof Error ? error.message : 'Không tải được hồ sơ.',
           ] as const;
         }
@@ -386,7 +449,7 @@ export function HealthDashboard({
     const nextProfiles: Record<string, HealthProfile> = {};
     const nextErrors: Record<string, string> = {};
     for (const [memberId, profile, error] of entries) {
-      nextProfiles[memberId] = profile;
+      if (profile) nextProfiles[memberId] = profile;
       if (error) nextErrors[memberId] = error;
     }
     setProfiles(nextProfiles);
@@ -582,7 +645,10 @@ export function HealthDashboard({
     setIsLoading(true);
     setErrorMessage('');
     try {
-      const { workspace: next, cleanupError } = await deleteDriveFamilyMember(workspace, member.id);
+      const { workspace: next } = await deleteDriveFamilyMember(workspace, member.id);
+      for (const source of profiles[member.id]?.sources || []) {
+        forgetOcrRecoveryJob(source.driveFileId);
+      }
       setWorkspace(next);
       setProfiles((previous) => {
         const { [member.id]: _deletedProfile, ...remaining } = previous;
@@ -595,11 +661,7 @@ export function HealthDashboard({
       setSelectedMemberId(next.family.members[0]?.id || '');
       setChatMessages([]);
       setActiveTab(next.family.members.length ? 'family' : 'overview');
-      if (cleanupError) {
-        setErrorMessage(cleanupError);
-      } else {
-        showToast(`Đã xóa vĩnh viễn thành viên ${member.name} và hồ sơ Drive liên quan.`, 'success');
-      }
+      showToast(`Đã xóa vĩnh viễn thành viên ${member.name} và hồ sơ Drive liên quan.`, 'success');
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Không thể xóa thành viên.');
     } finally {
@@ -610,6 +672,15 @@ export function HealthDashboard({
   async function beginDigitization(file: File, options?: { forceUpload?: boolean }) {
     if (!workspace || !selectedMember) {
       showToast('Hãy chọn hoặc tạo hồ sơ thành viên trước khi tải tài liệu.', 'error');
+      return;
+    }
+    if (!profiles[selectedMember.id]) {
+      showToast(
+        profileErrors[selectedMember.id]
+          ? 'Không tải được hồ sơ thành viên. Hãy tải lại hồ sơ trước khi thêm tài liệu.'
+          : 'Đang tải hồ sơ thành viên. Vui lòng thử lại sau.',
+        'error',
+      );
       return;
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -646,6 +717,7 @@ export function HealthDashboard({
     setTrackerState({
       isOpen: true,
       file,
+      memberId: selectedMember.id,
       step: 'uploading_drive',
       progressPercent: 20,
       progressMessage: 'Đang tải tệp lên thư mục "Suc khoe gia dinh" trên Google Drive...',
@@ -657,6 +729,7 @@ export function HealthDashboard({
 
     try {
       const uploaded = await uploadRawHealthFile(selectedMember, file);
+      setTrackerState((prev) => ({ ...prev, driveFile: uploaded }));
       const { hash } = await computeFileFingerprint(file);
       const source: HealthSource = {
         driveFileId: uploaded.id,
@@ -674,72 +747,191 @@ export function HealthDashboard({
         stagedProfile
       );
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: savedStagedProfile }));
+      persistOcrRecoveryJob(uploaded.id, 'processing', 45);
 
       setTrackerState((prev) => ({
         ...prev,
-        driveFile: uploaded,
         step: 'reading_document',
         progressPercent: 42,
         progressMessage: 'Đã lưu tệp vào Google Drive. Khởi động AI Vision đọc tài liệu...',
       }));
 
-      try {
-        const result = await extractHealthEventWithProgress(file, selectedMember, (update) => {
-          setTrackerState((prev) => {
-            const nextStep: TrackerStep =
-              update.stage === 'reading_document'
-                ? 'reading_document'
-                : update.stage === 'extracting_content'
-                ? 'extracting_content'
-                : update.stage === 'matching_patient'
-                ? 'matching_patient'
-                : update.stage === 'completed'
-                ? 'completed'
-                : prev.step;
-
-            return {
-              ...prev,
-              step: nextStep,
-              progressPercent: Math.max(prev.progressPercent, update.progressPercent),
-              progressMessage: update.message,
-              modelUsed: update.modelUsed || prev.modelUsed,
-              partialExtracted: update.partialEvent
-                ? { ...prev.partialExtracted, ...update.partialEvent }
-                : prev.partialExtracted,
-            };
-          });
-        });
-
-        setTrackerState((prev) => ({
-          ...prev,
-          step: 'completed',
-          progressPercent: 100,
-          progressMessage: 'AI đã bóc tách xong toàn bộ dữ liệu y khoa từ tài liệu!',
-          partialExtracted: result.extracted,
-          modelUsed: result.modelUsed || prev.modelUsed,
-        }));
-
-        showToast('AI đã trích xuất xong thông tin từ tài liệu.', 'success');
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.';
-        setDigitizationError(msg);
-        setTrackerState((prev) => ({
-          ...prev,
-          step: 'error',
-          progressMessage: 'Lỗi nhận dạng tài liệu',
-          error: msg,
-        }));
-        showToast('Tài liệu đã lưu trên Drive. Bạn có thể bấm "Nhập thủ công" để tiếp tục.', 'info');
-      }
+      await runDocumentExtraction(file, selectedMember, uploaded.id);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Không tải được tài liệu lên Google Drive.';
+      const msg = error instanceof Error
+        ? error.message
+        : 'Không thể hoàn tất lưu tài liệu vào Google Drive hoặc hồ sơ thành viên.';
       setErrorMessage(msg);
       setTrackerState((prev) => ({
         ...prev,
         step: 'error',
-        progressMessage: 'Lỗi tải tệp lên Google Drive',
+        progressMessage: 'Không thể hoàn tất lưu tài liệu',
         error: msg,
       }));
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  function applyExtractionProgress(update: ExtractionProgressUpdate) {
+    setTrackerState((prev) => {
+      const nextStep: TrackerStep =
+        update.stage === 'extracting_content'
+          ? 'extracting_content'
+          : update.stage === 'matching_patient'
+          ? 'matching_patient'
+          : update.stage === 'completed'
+          ? 'completed'
+          : 'reading_document';
+
+      return {
+        ...prev,
+        step: nextStep,
+        progressPercent: Math.max(prev.progressPercent, update.progressPercent),
+        progressMessage: update.message,
+        modelUsed: update.modelUsed || prev.modelUsed,
+        partialExtracted: update.partialEvent
+          ? { ...prev.partialExtracted, ...update.partialEvent }
+          : prev.partialExtracted,
+      };
+    });
+  }
+
+  async function runDocumentExtraction(file: File, member: FamilyMember, driveFileId?: string) {
+    let latestProgress = 45;
+    try {
+      const reportProgress = (update: ExtractionProgressUpdate) => {
+        applyExtractionProgress(update);
+        latestProgress = update.progressPercent;
+        if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress);
+      };
+      const result = await extractHealthEventWithProgress(file, member, reportProgress);
+      if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100);
+      setTrackerState((prev) => ({
+        ...prev,
+        step: 'completed',
+        progressPercent: 100,
+        progressMessage: 'AI đã bóc tách xong toàn bộ dữ liệu y khoa từ tài liệu!',
+        partialExtracted: result.extracted,
+        modelUsed: result.modelUsed || prev.modelUsed,
+      }));
+      showToast('AI đã trích xuất xong thông tin từ tài liệu.', 'success');
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.';
+      if (driveFileId) persistOcrRecoveryJob(driveFileId, 'interrupted', latestProgress);
+      setDigitizationError(msg);
+      setTrackerState((prev) => ({
+        ...prev,
+        step: 'error',
+        progressMessage: 'Lỗi nhận dạng tài liệu',
+        error: msg,
+      }));
+      showToast('Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.', 'info');
+    }
+  }
+
+  async function retryDigitization() {
+    const file = trackerState.file;
+    const member = members.find((item) => item.id === trackerState.memberId);
+    if (!file || !member) return;
+
+    if (!trackerState.driveFile) {
+      void beginDigitization(file, { forceUpload: true });
+      return;
+    }
+
+    setIsUploading(true);
+    setDigitizationError('');
+    setTrackerState((prev) => ({
+      ...prev,
+      isOpen: true,
+      step: 'reading_document',
+      progressPercent: 45,
+      progressMessage: 'Đang thử lại OCR với tài liệu đã lưu trên Drive...',
+      partialExtracted: {},
+      error: null,
+    }));
+    try {
+      const profile = profiles[member.id];
+      if (!profile) {
+        throw new Error('Không tải được hồ sơ thành viên. Hãy tải lại hồ sơ trước khi thử OCR.');
+      }
+      if (!profile.sources.some((source) => source.driveFileId === trackerState.driveFile?.id)) {
+        const { hash } = await computeFileFingerprint(file);
+        const source: HealthSource = {
+          driveFileId: trackerState.driveFile.id,
+          fileName: trackerState.driveFile.name,
+          fileSize: file.size,
+          fileHash: hash,
+          mimeType: trackerState.driveFile.mimeType || file.type || 'application/octet-stream',
+          uploadedAt: trackerState.driveFile.createdTime || new Date().toISOString(),
+          status: 'pending',
+        };
+        const savedProfile = await saveHealthProfile(
+          member.profileFileId,
+          addHealthSource(profile, source),
+        );
+        setProfiles((prev) => ({ ...prev, [member.id]: savedProfile }));
+      }
+      await runDocumentExtraction(file, member, trackerState.driveFile.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Không thể chuẩn bị tài liệu để thử OCR.';
+      setDigitizationError(message);
+      setTrackerState((prev) => ({
+        ...prev,
+        step: 'error',
+        progressMessage: 'Không thể chuẩn bị tài liệu để thử lại',
+        error: message,
+      }));
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  async function resumeInterruptedOcr(job: OcrRecoveryJob) {
+    const member = members.find((candidate) =>
+      profiles[candidate.id]?.sources.some((source) => source.driveFileId === job.driveFileId),
+    );
+    const source = member
+      ? profiles[member.id]?.sources.find((item) => item.driveFileId === job.driveFileId)
+      : undefined;
+    if (!member || !source) {
+      showToast('Không tìm thấy nguồn tài liệu trong hồ sơ Drive. Hãy tải lại hồ sơ gia đình rồi thử lại.', 'error');
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const blob = await downloadDriveFile(job.driveFileId);
+      if (blob.size > MAX_UPLOAD_BYTES) {
+        throw new Error('Tài liệu trên Drive vượt quá giới hạn 25 MB.');
+      }
+      const file = new File([blob], source.fileName, { type: source.mimeType });
+      const driveFile: DriveFile = {
+        id: source.driveFileId,
+        name: source.fileName,
+        mimeType: source.mimeType,
+        createdTime: source.uploadedAt,
+        size: String(source.fileSize || blob.size),
+      };
+      setSelectedMemberId(member.id);
+      setTrackerState({
+        isOpen: true,
+        file,
+        memberId: member.id,
+        step: 'reading_document',
+        progressPercent: 45,
+        progressMessage: 'Đã khôi phục từ Google Drive. Đang chạy lại OCR theo từng phần...',
+        driveFile,
+        modelUsed: 'gemini-3.5-flash-lite',
+        partialExtracted: {},
+        error: null,
+      });
+      persistOcrRecoveryJob(job.driveFileId, 'processing', 45);
+      await runDocumentExtraction(file, member, job.driveFileId);
+    } catch (error) {
+      persistOcrRecoveryJob(job.driveFileId, 'interrupted', job.progressPercent);
+      showToast(error instanceof Error ? error.message : 'Không thể khôi phục OCR từ Google Drive.', 'error');
     } finally {
       setIsUploading(false);
     }
@@ -839,6 +1031,7 @@ export function HealthDashboard({
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        forgetOcrRecoveryJob(digitizationDraft.source.id);
         setSelectedMemberId(effectiveMember.id);
         setDigitizationDraft(null);
         setDigitizationError('');
@@ -869,6 +1062,7 @@ export function HealthDashboard({
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        forgetOcrRecoveryJob(digitizationDraft.source.id);
         setSelectedMemberId(effectiveMember.id);
         setDigitizationDraft(null);
         setDigitizationError('');
@@ -884,6 +1078,7 @@ export function HealthDashboard({
         const nextProfile = digitizeHealthSource(effectiveProfile, nextEvent);
         const merged = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: merged }));
+        forgetOcrRecoveryJob(digitizationDraft.source.id);
         setSelectedMemberId(effectiveMember.id);
         setDigitizationDraft(null);
         setDigitizationError('');
@@ -965,17 +1160,27 @@ export function HealthDashboard({
         selectedMember,
         selectedProfile.timeline
       );
-      const updated: HealthProfile = {
-        ...selectedProfile,
-        timeline: organizedTimeline,
-        updatedAt: new Date().toISOString(),
-      };
-      const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
-      setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      showToast(
-        `Đã dùng AI Flash-Lite chuẩn hóa & sắp xếp dữ liệu (${refinementNotes[0] || 'Hoàn tất'})`,
-        'success'
+      const currentEvents = new Map(selectedProfile.timeline.map((event) => [event.id, event]));
+      const proposedIds = organizedTimeline.map((event) => event.id);
+      if (
+        organizedTimeline.length !== currentEvents.size ||
+        new Set(proposedIds).size !== currentEvents.size ||
+        proposedIds.some((id) => !currentEvents.has(id))
+      ) {
+        throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc. Không có dữ liệu nào được thay đổi.');
+      }
+
+      const hasEdits = organizedTimeline.some(
+        (event) => stableSerialize(event) !== stableSerialize(currentEvents.get(event.id)),
       );
+      if (hasEdits) {
+        showToast(
+          `AI đề xuất chỉnh sửa nhưng ứng dụng chưa tự ghi đè hồ sơ gốc để tránh làm sai lệch dữ liệu y tế. Hãy kiểm tra thủ công. ${refinementNotes[0] || ''}`.trim(),
+          'info',
+        );
+        return;
+      }
+      showToast('AI không đề xuất thay đổi nội dung hồ sơ; dữ liệu gốc được giữ nguyên.', 'info');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Lỗi khi hiệu chỉnh dữ liệu.', 'error');
     } finally {
@@ -1233,6 +1438,26 @@ export function HealthDashboard({
             </div>
           );
         })()}
+        {selectedMember && profileErrors[selectedMember.id] && (
+          <div
+            role="alert"
+            className="mb-4 flex flex-col gap-2 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="text-sm">
+              <p className="font-bold">Chưa tải được hồ sơ của {selectedMember.name}</p>
+              <p className="mt-1 text-xs">{profileErrors[selectedMember.id]}</p>
+              <p className="mt-1 text-xs">Để tránh ghi đè nhầm bằng hồ sơ rỗng, thao tác số hóa và AI đang bị khóa.</p>
+            </div>
+            <button
+              type="button"
+              disabled={isLoading || !workspace}
+              onClick={() => workspace && void reloadProfiles(workspace)}
+              className="shrink-0 rounded-xl bg-amber-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+            >
+              Tải lại hồ sơ
+            </button>
+          </div>
+        )}
 
         {/* Setup Screen if no workspace is opened */}
         {!workspace ? (
@@ -2326,7 +2551,7 @@ export function HealthDashboard({
                   Đang xử lý hàng đợi tải lên ({queueStatus.current}/{queueStatus.total})
                 </span>
                 <span className="text-[10px] text-slate-400">
-                  Tự động xử lý tuần tự từng tệp tài liệu y tế
+                  Xử lý tuần tự; lưu hoặc bỏ qua bản xem xét để sang tệp tiếp theo
                 </span>
               </div>
             </div>
@@ -2341,6 +2566,55 @@ export function HealthDashboard({
             >
               Hủy
             </button>
+          </div>
+        )}
+        {!trackerState.isOpen && ocrRecoveryJobs.some((job) => job.status !== 'processing') && (
+          <div
+            className={`fixed ${queueStatus ? 'bottom-40' : 'bottom-20'} left-4 right-4 z-40 max-w-md mx-auto rounded-2xl border border-amber-200 bg-amber-50/95 p-3 shadow-xl`}
+          >
+            <div className="mb-2 flex items-center gap-2 text-xs font-bold text-amber-900">
+              <AlertCircle className="h-4 w-4" />
+              Có tài liệu OCR cần tiếp tục ({ocrRecoveryJobs.filter((job) => job.status !== 'processing').length})
+            </div>
+            <div className="max-h-36 space-y-2 overflow-y-auto">
+              {ocrRecoveryJobs.filter((job) => job.status !== 'processing').map((job) => {
+                const member = members.find((candidate) =>
+                  profiles[candidate.id]?.sources.some((source) => source.driveFileId === job.driveFileId),
+                );
+                return (
+                  <div key={job.driveFileId} className="flex items-center justify-between gap-2 rounded-xl bg-white/80 p-2">
+                    <div className="min-w-0">
+                      <span className="block truncate text-[11px] font-semibold text-slate-800">
+                        {member ? `Hồ sơ ${member.name}` : 'Tài liệu trong Google Drive'}
+                      </span>
+                      <span className="block text-[10px] text-slate-500">
+                        Tiến độ trước đó {job.progressPercent}%. Kết quả OCR không lưu trên thiết bị; chạy lại từ Drive để tiếp tục.
+                      </span>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!member || isUploading}
+                        onClick={() => void resumeInterruptedOcr(job)}
+                        className="rounded-lg bg-emerald-700 px-2.5 py-1.5 text-[10px] font-bold text-white disabled:opacity-50"
+                      >
+                        Chạy lại OCR
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => forgetOcrRecoveryJob(job.driveFileId)}
+                        className="text-[10px] font-semibold text-slate-500 hover:text-rose-600"
+                      >
+                        Ẩn
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[9px] text-amber-800">
+              Chỉ trạng thái và ID tệp được lưu cục bộ; không lưu nội dung PDF, kết quả y tế hay API key.
+            </p>
           </div>
         )}
       </main>
@@ -2486,11 +2760,11 @@ export function HealthDashboard({
       )}
 
       {/* Digitization Progress Tracker Modal */}
-      {selectedMember && (
+      {trackerMember && (
         <DigitizationProgressTrackerModal
           isOpen={trackerState.isOpen}
           file={trackerState.file}
-          member={selectedMember}
+          member={trackerMember}
           members={members}
           step={trackerState.step}
           progressPercent={trackerState.progressPercent}
@@ -2509,9 +2783,7 @@ export function HealthDashboard({
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
           }}
           onRetry={() => {
-            if (trackerState.file) {
-              void beginDigitization(trackerState.file);
-            }
+            void retryDigitization();
           }}
           onManualEntry={() => {
             if (trackerState.driveFile) {
@@ -2523,7 +2795,15 @@ export function HealthDashboard({
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
           }}
           onClose={() => {
+            if (trackerState.step !== 'completed' && trackerState.step !== 'error') {
+              showToast('Tài liệu vẫn đang được xử lý. Hãy đợi hoàn tất hoặc hủy các tệp còn trong hàng đợi.', 'info');
+              return;
+            }
+            if (trackerState.step === 'completed' && trackerState.driveFile) {
+              forgetOcrRecoveryJob(trackerState.driveFile.id);
+            }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
+            if (queueStatus) processNextInQueue();
           }}
         />
       )}
@@ -2537,6 +2817,7 @@ export function HealthDashboard({
           profiles={profiles}
           selectedMemberId={selectedMemberId}
           onClose={() => {
+            if (digitizationDraft) forgetOcrRecoveryJob(digitizationDraft.source.id);
             setDigitizationDraft(null);
             processNextInQueue();
           }}
@@ -3070,4 +3351,17 @@ function validEventType(value?: string): HealthEvent['type'] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableSerialize).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }

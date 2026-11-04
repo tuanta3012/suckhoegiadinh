@@ -1,8 +1,23 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import firebaseConfig from './firebase-applet-config.json';
+import { parseGeminiApiKeys } from './src/utils/geminiApiKeys.ts';
+import {
+  GeminiQuotaScheduler,
+  parseGeminiProjects,
+  type GeminiProject,
+  type GeminiQuota,
+  type GeminiTask,
+} from './src/utils/geminiQuotaScheduler.ts';
+import {
+  PdfPageBatchError,
+  splitPdfIntoBatches,
+  type PdfPageBatch,
+} from './src/utils/pdfPageBatches.ts';
+import { cleanExtractedJson, mergeExtractedBatches } from './src/utils/healthDocumentExtraction.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,37 +32,139 @@ function getPort(): number {
   return Number(process.env.PORT) || 3000;
 }
 
-const PORT = getPort();
+function getAttemptTimeout(task: GeminiTask): number {
+  return task === 'digitization'
+    ? GEMINI_DIGITIZATION_ATTEMPT_TIMEOUT_MS
+    : GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS;
+}
 
-// 2 nhóm tác vụ được chia lần lượt theo thứ tự ưu tiên của mô hình:
-// 1. Số hóa, OCR: gemini-3.5-flash-lite => gemini-3.1-flash-lite
-// 2. Phân tích chuyên sâu, trợ lý sức khỏe: gemini-3.8-flash => gemini-3.6-flash => gemini-3-flash => gemini-flash-latest
+const PORT = getPort();
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+const MAX_BASE64_CHARS = Math.ceil(MAX_DOCUMENT_BYTES / 3) * 4;
+const GEMINI_RATE_LIMIT_PER_MINUTE = 20;
+const rateLimitWindows = new Map<string, { startedAt: number; count: number }>();
+const GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS = 18_000;
+const GEMINI_DIGITIZATION_ATTEMPT_TIMEOUT_MS = 45_000;
+const GEMINI_ANALYSIS_TIMEOUT_MS = 110_000;
+const GEMINI_OCR_TIMEOUT_MS = 300_000;
+const OCR_BATCH_PAGES = 3;
+const OCR_BATCH_CONCURRENCY = 3;
+let quotaScheduler: GeminiQuotaScheduler | null = null;
+
+// Quotas are tracked independently for each configured project and model.
 const TASK_MODELS = {
   digitization: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'],
-  analysis: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash', 'gemini-flash-latest'],
+  analysis: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash'],
 };
 
-function getAvailableKeys(clientKeys?: string[]): string[] {
-  const keys: string[] = [];
+function getConfiguredProjects(): GeminiProject[] {
+  return parseGeminiProjects(
+    process.env.GEMINI_PROJECTS,
+    parseGeminiApiKeys(process.env.GEMINI_API_KEYS),
+    parseGeminiApiKeys(process.env.GEMINI_API_KEY)[0],
+  );
+}
 
-  // 1. Check single GEMINI_API_KEY from environment
-  const singleKey = process.env.GEMINI_API_KEY;
-  if (singleKey && singleKey.trim().length > 10) {
-    keys.push(singleKey.trim());
+function getQuotaScheduler(): GeminiQuotaScheduler {
+  if (!quotaScheduler) throw new Error('Gemini quota scheduler has not been initialized.');
+  return quotaScheduler;
+}
+
+function getTaskQuota(task: GeminiTask): GeminiQuota {
+  return task === 'digitization'
+    ? { rpm: 15, rpd: 500, maxConcurrent: 3 }
+    : { rpm: 5, rpd: 20, maxConcurrent: 2 };
+}
+
+function describeGeminiError(error: unknown): { status?: number; message: string } {
+  const candidate = error && typeof error === 'object' ? error as { status?: unknown; message?: unknown; error?: { status?: unknown; message?: unknown } } : {};
+  const statusValue = candidate.status ?? candidate.error?.status;
+  const message = typeof candidate.message === 'string'
+    ? candidate.message
+    : typeof candidate.error?.message === 'string'
+    ? candidate.error.message
+    : String(error);
+  return { status: typeof statusValue === 'number' ? statusValue : undefined, message };
+}
+
+function parseRetryAfterMs(error: unknown): number {
+  const { message } = describeGeminiError(error);
+  const seconds = message.match(/retry(?:\s+in)?\s+(\d+(?:\.\d+)?)\s*s/i);
+  return seconds ? Math.min(60_000, Math.max(1_000, Number(seconds[1]) * 1_000)) : 60_000;
+}
+
+function isDailyQuotaError(error: unknown): boolean {
+  const { message } = describeGeminiError(error);
+  return /per.?day|daily|requests per day|quota.*day/i.test(message);
+}
+
+function recordProjectFailure(
+  scheduler: GeminiQuotaScheduler,
+  projectId: string,
+  model: string,
+  error: unknown,
+): boolean {
+  const { status, message } = describeGeminiError(error);
+  if (status === 429) {
+    if (isDailyQuotaError(error)) scheduler.markDailyQuotaExhausted(projectId, model);
+    else scheduler.markRateLimited(projectId, model, parseRetryAfterMs(error));
+    return true;
   }
-
-  // 2. Check multi-key GEMINI_API_KEYS from environment
-  const envKeys = process.env.GEMINI_API_KEYS;
-  if (envKeys) {
-    keys.push(...envKeys.split(/[,;\n]+/).map((k) => k.trim()).filter((k) => k.length > 10));
+  if (
+    status === 401 ||
+    status === 403 ||
+    /api key.{0,30}(invalid|not valid)|invalid api key|api_key_invalid/i.test(message)
+  ) {
+    scheduler.markProjectUnavailable(projectId);
+    return true;
   }
-
-  // 3. Fallback client-provided custom keys
-  if (Array.isArray(clientKeys) && clientKeys.length > 0) {
-    keys.push(...clientKeys.filter((k) => typeof k === 'string' && k.trim().length > 10));
+  if (status === 404 || /model.{0,40}(not found|unsupported|not available)/i.test(message)) {
+    scheduler.markModelUnavailable(projectId, model);
+    return true;
   }
+  return status !== 400;
+}
 
-  return Array.from(new Set(keys));
+async function verifyFirebaseIdToken(idToken: string): Promise<string | null> {
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (response.status === 400 || response.status === 401 || response.status === 403) return null;
+  if (!response.ok) throw new Error(`Firebase token verification returned ${response.status}.`);
+  const result = await response.json() as {
+    users?: Array<{ localId?: string; disabled?: boolean }>;
+  };
+  const user = result.users?.[0];
+  return user?.localId && !user.disabled ? user.localId : null;
+}
+
+function isWithinRateLimit(uid: string): boolean {
+  const now = Date.now();
+  const window = rateLimitWindows.get(uid);
+  if (!window || now - window.startedAt >= 60_000) {
+    rateLimitWindows.set(uid, { startedAt: now, count: 1 });
+    if (rateLimitWindows.size > 10_000) {
+      for (const [key, value] of rateLimitWindows) {
+        if (now - value.startedAt >= 60_000) rateLimitWindows.delete(key);
+      }
+    }
+    return true;
+  }
+  if (window.count >= GEMINI_RATE_LIMIT_PER_MINUTE) return false;
+  window.count++;
+  return true;
+}
+
+function writeSse(res: Response, data: Record<string, unknown>): void {
+  if (!res.destroyed && !res.writableEnded) {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  }
 }
 
 function cleanJsonOutput(text: string): string {
@@ -73,99 +190,68 @@ function parseJsonSafely(text: string): Record<string, unknown> {
   }
 }
 
-function cleanExtractedJson(obj: any): any {
-  if (!obj || typeof obj !== 'object') return obj;
-
-  // 1. Khử trùng lặp chẩn đoán
-  if (Array.isArray(obj.diagnoses)) {
-    const seen = new Set<string>();
-    obj.diagnoses = obj.diagnoses.filter((d: any) => {
-      if (typeof d !== 'string') return false;
-      const norm = d.trim().toLowerCase().replace(/[.,;]$/, '');
-      if (!norm || seen.has(norm)) return false;
-      seen.add(norm);
-      return true;
-    });
-  }
-
-  // 2. Khử trùng lặp đơn thuốc
-  if (Array.isArray(obj.medications)) {
-    const medMap = new Map<string, any>();
-    for (const m of obj.medications) {
-      if (!m || typeof m.name !== 'string' || !m.name.trim()) continue;
-      const key = m.name
-        .trim()
-        .toLowerCase()
-        .replace(/\b\d+(\.\d+)?\s*(mg|g|mcg|ml|l|iu|ui|viên|ống|gói|chai)\b/gi, '')
-        .trim();
-      const existing = medMap.get(key);
-      if (!existing) {
-        medMap.set(key, m);
-      } else {
-        medMap.set(key, {
-          name: existing.name.length >= m.name.length ? existing.name : m.name,
-          dosage: existing.dosage || m.dosage,
-          frequency: existing.frequency || m.frequency,
-          duration: existing.duration || m.duration,
-        });
-      }
-    }
-    obj.medications = Array.from(medMap.values());
-  }
-
-  // 3. Khử trùng lặp chỉ số đo
-  if (Array.isArray(obj.metrics)) {
-    const metricMap = new Map<string, any>();
-    for (const metric of obj.metrics) {
-      if (!metric || typeof metric.name !== 'string' || !metric.name.trim()) continue;
-      const key = metric.name.trim().toLowerCase();
-      metricMap.set(key, metric);
-    }
-    obj.metrics = Array.from(metricMap.values());
-  }
-
-  return obj;
-}
-
 interface ExecuteOptions {
-  task: 'digitization' | 'analysis';
-  clientKeys?: string[];
+  task: GeminiTask;
   contents: unknown;
   systemInstruction?: string;
   responseMimeType?: string;
   temperature?: number;
+  timeoutMs?: number;
+  onProgress?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ text: string; modelUsed: string }> {
-  const keys = getAvailableKeys(options.clientKeys);
-  if (keys.length === 0) {
-    throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ. Hãy thiết lập biến môi trường GEMINI_API_KEY hoặc bổ sung kho API Key.');
+  const scheduler = getQuotaScheduler();
+  const projects = scheduler.getProjects();
+  if (projects.length === 0) {
+    throw new Error('Chưa cấu hình GEMINI_PROJECTS hoặc GEMINI_API_KEYS trên máy chủ.');
   }
 
   const models = TASK_MODELS[options.task];
+  const deadline = Date.now() + (options.timeoutMs || GEMINI_ANALYSIS_TIMEOUT_MS);
+  const quota = getTaskQuota(options.task);
   let lastError: Error | null = null;
 
-  for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
-    const key = keys[keyIdx];
-    const ai = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-
-    for (const model of models) {
+  for (const model of models) {
+    const attemptedProjectIds = new Set<string>();
+    while (attemptedProjectIds.size < projects.length && Date.now() < deadline) {
+      if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
+      let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
       try {
-        const config: Record<string, unknown> = {};
-        if (options.systemInstruction) {
-          config.systemInstruction = options.systemInstruction;
-        }
-        if (options.responseMimeType) {
-          config.responseMimeType = options.responseMimeType;
-        }
-        // Only set temperature for models that support it (do not pass to gemini-3.8-flash)
+        lease = await scheduler.acquire(
+          options.task,
+          model,
+          quota,
+          attemptedProjectIds,
+          Math.min(20_000, deadline - Date.now()),
+        );
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        break;
+      }
+
+      const { project } = lease;
+      attemptedProjectIds.add(project.id);
+      const attemptController = new AbortController();
+      const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
+      options.signal?.addEventListener('abort', cancelAttempt, { once: true });
+      const attemptTimeout = setTimeout(
+        () => attemptController.abort(new Error('Gemini attempt timed out.')),
+        Math.min(getAttemptTimeout(options.task), deadline - Date.now()),
+      );
+      options.onProgress?.(`Đang xử lý bằng ${model} trên một trong ${projects.length} project độc lập.`);
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: project.apiKey,
+          httpOptions: {
+            timeout: Math.min(getAttemptTimeout(options.task), deadline - Date.now()),
+            headers: { 'User-Agent': 'aistudio-build' },
+          },
+        });
+        const config: Record<string, unknown> = { abortSignal: attemptController.signal };
+        if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
+        if (options.responseMimeType) config.responseMimeType = options.responseMimeType;
         if (model.includes('flash-lite') && typeof options.temperature === 'number') {
           config.temperature = options.temperature;
         }
@@ -175,54 +261,121 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
           contents: options.contents as any,
           config,
         });
-
         const text = response.text || '';
-        if (text) {
-          return { text, modelUsed: model };
-        }
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        console.warn(`[Gemini Server] Thử nghiệm model ${model} với key #${keyIdx + 1} không thành công:`, lastError.message);
+        if (!text) throw new Error('Gemini returned an empty response.');
+        return { text, modelUsed: model };
+      } catch (error) {
+        const details = describeGeminiError(error);
+        lastError = error instanceof Error ? error : new Error(String(error));
+        const shouldRetry = recordProjectFailure(scheduler, project.id, model, error);
+        console.warn(
+          `[Gemini ${options.task}] ${model} failed for configured project ${project.id} (${details.status || 'network'}): ${details.message}`,
+        );
+        if (!shouldRetry) throw lastError;
+      } finally {
+        clearTimeout(attemptTimeout);
+        options.signal?.removeEventListener('abort', cancelAttempt);
+        lease.release();
       }
     }
   }
 
-  throw lastError || new Error('Tất cả các tài khoản Gemini và model đều không phản hồi.');
+  throw lastError || new Error('Đã hết quota hoặc thời gian chờ cho các model Gemini đã cấu hình.');
 }
 
 async function startServer() {
+  quotaScheduler = new GeminiQuotaScheduler(getConfiguredProjects());
   const app = express();
-
-  // Allow up to 50MB for high-resolution medical PDFs / multi-page photos
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // Status check endpoint
   app.get('/api/gemini/status', (_req: Request, res: Response) => {
-    const serverKeys = getAvailableKeys();
+    const projects = getQuotaScheduler().getProjects();
     res.json({
       status: 'ok',
-      hasDefaultServerKey: Boolean(process.env.GEMINI_API_KEY),
-      hasEnvPoolKeys: Boolean(process.env.GEMINI_API_KEYS),
-      totalServerKeys: serverKeys.length,
+      configuredProjects: projects.length,
+      hasProjectConfig: Boolean(process.env.GEMINI_PROJECTS),
       supportedTasks: Object.keys(TASK_MODELS),
       taskModels: TASK_MODELS,
+      quotasPerProject: {
+        digitization: { rpm: 15, rpd: 500, maxConcurrent: 3 },
+        analysis: { rpm: 5, rpd: 20, maxConcurrent: 2 },
+      },
       architecture: 'server-side-secure',
     });
   });
 
+  app.use('/api/gemini', async (req: Request, res: Response, next) => {
+    const authorization = req.header('Authorization') || '';
+    const match = authorization.match(/^Bearer\s+(\S+)$/i);
+    if (!match) {
+      res.status(401).json({ error: 'Đăng nhập để sử dụng dịch vụ Gemini.' });
+      return;
+    }
+
+    try {
+      const uid = await verifyFirebaseIdToken(match[1]);
+      if (!uid) {
+        res.status(401).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' });
+        return;
+      }
+      if (!isWithinRateLimit(uid)) {
+        res.setHeader('Retry-After', '60');
+        res.status(429).json({ error: 'Bạn đã dùng hết lượt yêu cầu tạm thời. Hãy thử lại sau một phút.' });
+        return;
+      }
+      res.locals.firebaseUid = uid;
+      next();
+    } catch (error) {
+      console.error('[Gemini Auth] Token verification service unavailable.', error);
+      res.status(503).json({ error: 'Chưa thể xác minh phiên đăng nhập. Vui lòng thử lại.' });
+    }
+  });
+
+  app.use(express.json({ limit: '36mb' }));
+
   // 1. Trích xuất tài liệu (OCR PDF / ảnh chụp khám bệnh)
   app.post('/api/gemini/extract-health-event', async (req: Request, res: Response) => {
+    let extractionTimeout: ReturnType<typeof setTimeout> | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let modelAbortController: AbortController | undefined;
     try {
-      const { base64Data, mimeType, member, customKeys } = req.body;
-      if (!base64Data) {
+      const { base64Data, mimeType, member } = req.body;
+      if (typeof base64Data !== 'string' || base64Data.length === 0) {
         res.status(400).json({ error: 'Thiếu dữ liệu tệp đính kèm (base64).' });
+        return;
+      }
+      if (
+        base64Data.length > MAX_BASE64_CHARS ||
+        base64Data.length % 4 !== 0 ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(base64Data) ||
+        Buffer.byteLength(base64Data, 'base64') > MAX_DOCUMENT_BYTES
+      ) {
+        res.status(413).json({ error: 'Tệp vượt quá giới hạn 25 MB hoặc có dữ liệu mã hóa không hợp lệ.' });
+        return;
+      }
+      if (
+        mimeType !== 'application/pdf' &&
+        !(typeof mimeType === 'string' && /^image\/(jpeg|png|webp|gif|heic|heif)$/i.test(mimeType))
+      ) {
+        res.status(415).json({ error: 'Chỉ hỗ trợ tài liệu PDF hoặc ảnh JPEG, PNG, WebP, GIF, HEIC, HEIF.' });
         return;
       }
 
       const effectiveMime = mimeType || 'application/pdf';
       const memberName = member?.name || 'Thành viên gia đình';
       const memberBirth = member?.birthDate ? `sinh ngày ${member.birthDate}` : '';
+      let pageBatches: PdfPageBatch[];
+      try {
+        pageBatches = effectiveMime === 'application/pdf'
+          ? await splitPdfIntoBatches(base64Data, OCR_BATCH_PAGES)
+          : [{ firstPage: 1, lastPage: 1, base64Data }];
+      } catch (error) {
+        if (error instanceof PdfPageBatchError) {
+          res.status(400).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
 
       const systemInstruction = `Bạn là trợ lý y tế chuyên số hóa, OCR nhận dạng tài liệu y khoa Việt Nam (đơn thuốc, kết quả xét nghiệm, phiếu khám bệnh, giấy ra viện, sổ tiêm chủng).
 Nhiệm vụ: Trích xuất và chuẩn hóa thông tin từ tài liệu đính kèm. Đồng thời phát hiện Họ và tên người bệnh, Ngày sinh/Năm sinh và Giới tính trên tài liệu để hệ thống đối chiếu ghép với thành viên gia đình (${memberName} ${memberBirth}).
@@ -249,134 +402,152 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
   "notes": "Ghi chú bổ sung quan trọng"
 }`;
 
-      // 1.1 Hỗ trợ Streaming SSE để truyền tiến trình & bóc tách dữ liệu tức thì cho client
-      if (req.body.stream) {
-        const keys = getAvailableKeys(customKeys);
-        if (keys.length === 0) {
-          throw new Error('Chưa cấu hình API Key trên máy chủ.');
-        }
+      const extractDocument = async (
+        onBatchComplete?: (
+          completed: number,
+          extracted: Record<string, unknown>,
+          modelUsed: string,
+          batch: PdfPageBatch,
+        ) => void,
+        onModelProgress?: (message: string) => void,
+        signal?: AbortSignal,
+      ) => {
+        const results: Array<{
+          firstPage: number;
+          lastPage: number;
+          extracted: Record<string, unknown>;
+          modelUsed: string;
+        } | undefined> = new Array(pageBatches.length);
+        let nextBatchIndex = 0;
+        let completedBatches = 0;
+        const workers = Array.from(
+          { length: Math.min(OCR_BATCH_CONCURRENCY, pageBatches.length) },
+          async () => {
+            while (nextBatchIndex < pageBatches.length) {
+              if (signal?.aborted) throw new Error('OCR was cancelled.');
+              const batchIndex = nextBatchIndex++;
+              const batch = pageBatches[batchIndex];
+              try {
+                const { text, modelUsed } = await executeGeminiWithFailover({
+                  task: 'digitization',
+                  contents: [
+                    { inlineData: { mimeType: effectiveMime, data: batch.base64Data } },
+                    {
+                      text: `Đọc các trang ${batch.firstPage}-${batch.lastPage} trong phần tài liệu này của hồ sơ ${memberName}. Trích xuất đúng nội dung có trên các trang này, không suy đoán, không tự thêm dữ liệu từ trang khác. Nếu phần này không có trường nào thì trả JSON với các mảng rỗng. Trả về JSON chuẩn.`,
+                    },
+                  ],
+                  systemInstruction,
+                  responseMimeType: 'application/json',
+                  timeoutMs: 90_000,
+                  signal,
+                  onProgress: onModelProgress,
+                });
+                results[batchIndex] = {
+                  firstPage: batch.firstPage,
+                  lastPage: batch.lastPage,
+                  extracted: parseJsonSafely(text),
+                  modelUsed,
+                };
+                completedBatches++;
+                const availableResults = results.filter(
+                  (result): result is NonNullable<typeof result> => Boolean(result),
+                );
+                onBatchComplete?.(
+                  completedBatches,
+                  mergeExtractedBatches(availableResults),
+                  Array.from(new Set(availableResults.map((result) => result.modelUsed))).join(', '),
+                  batch,
+                );
+              } catch (error) {
+                if (!signal?.aborted) modelAbortController?.abort(error);
+                throw error;
+              }
+            }
+          },
+        );
+        await Promise.all(workers);
+        const completeResults = results.filter(
+          (result): result is NonNullable<typeof result> => Boolean(result),
+        );
+        return {
+          extracted: mergeExtractedBatches(completeResults),
+          modelUsed: Array.from(new Set(completeResults.map((result) => result.modelUsed))).join(', '),
+        };
+      };
 
+      if (req.body.stream) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-
-        let streamResult = null;
-        let activeModel = '';
-
-        for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
-          const key = keys[keyIdx];
-          const ai = new GoogleGenAI({
-            apiKey: key,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build',
-              },
-            },
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        modelAbortController = new AbortController();
+        writeSse(res, {
+          type: 'progress',
+          progressPercent: 46,
+          message: effectiveMime === 'application/pdf'
+            ? `Đã chia PDF ${pageBatches.length} phần, tối đa ${OCR_BATCH_PAGES} trang/phần. Bắt đầu xử lý có giới hạn song song.`
+            : 'Đã nhận tài liệu. Đang xếp lượt theo quota Gemini còn khả dụng.',
+        });
+        heartbeat = setInterval(() => {
+          writeSse(res, {
+            type: 'progress',
+            message: 'Các phần tài liệu vẫn đang được xử lý; tiến độ sẽ cập nhật khi mỗi phần hoàn tất.',
           });
-
-          for (const model of TASK_MODELS.digitization) {
-            try {
-              streamResult = await ai.models.generateContentStream({
-                model,
-                contents: [
-                  {
-                    inlineData: {
-                      mimeType: effectiveMime,
-                      data: base64Data,
-                    },
-                  },
-                  {
-                    text: `Hãy trích xuất và số hóa toàn bộ thông tin từ tài liệu đính kèm này cho thành viên ${memberName}. Trả về JSON chuẩn.`,
-                  },
-                ],
-                config: {
-                  systemInstruction,
-                  responseMimeType: 'application/json',
-                },
-              });
-              activeModel = model;
-              break;
-            } catch (err) {
-              console.warn(
-                `[Gemini Stream Extract] Model ${model} với key #${keyIdx + 1} không thành công:`,
-                err instanceof Error ? err.message : err
-              );
-            }
-          }
-          if (streamResult) break;
-        }
-
-        if (!streamResult) {
-          throw new Error('Tất cả các model số hóa và khóa API đều không thể tạo luồng phản hồi.');
-        }
-
-        let accumulated = '';
-        for await (const chunk of streamResult) {
-          if (chunk.text) {
-            accumulated += chunk.text;
-            res.write(
-              `data: ${JSON.stringify({
-                type: 'chunk',
-                text: chunk.text,
-                accumulated,
-                modelUsed: activeModel,
-              })}\n\n`
-            );
-          }
-        }
-
-        let parsed: Record<string, unknown> = {};
-        try {
-          parsed = parseJsonSafely(accumulated);
-        } catch {
-          // Fallback empty if malformed
-        }
-
-        res.write(
-          `data: ${JSON.stringify({
-            type: 'complete',
-            extracted: parsed,
-            modelUsed: activeModel,
-          })}\n\n`
+        }, 15_000);
+        res.on('close', () => {
+          if (!res.writableEnded) modelAbortController?.abort(new Error('Client disconnected.'));
+          if (heartbeat) clearInterval(heartbeat);
+        });
+        extractionTimeout = setTimeout(
+          () => modelAbortController?.abort(new Error('Tài liệu vượt quá thời gian OCR tối đa 5 phút.')),
+          GEMINI_OCR_TIMEOUT_MS,
         );
-        res.write('data: [DONE]\n\n');
+
+        const result = await extractDocument(
+          (completed, extracted, modelUsed, batch) => {
+            writeSse(res, {
+              type: 'progress',
+              progressPercent: Math.min(92, 48 + Math.floor((completed / pageBatches.length) * 42)),
+              message: `Đã đọc xong ${completed}/${pageBatches.length} phần; hoàn tất trang ${batch.firstPage}-${batch.lastPage}.`,
+              extracted,
+              modelUsed,
+            });
+          },
+          (message) => writeSse(res, { type: 'progress', message }),
+          modelAbortController.signal,
+        );
+        writeSse(res, {
+          type: 'complete',
+          extracted: result.extracted,
+          modelUsed: result.modelUsed,
+        });
+        if (heartbeat) clearInterval(heartbeat);
+        if (extractionTimeout) clearTimeout(extractionTimeout);
         res.end();
         return;
       }
 
-      // 1.2 Phản hồi tiêu chuẩn dạng JSON
-      const { text, modelUsed } = await executeGeminiWithFailover({
-        task: 'digitization',
-        clientKeys: customKeys,
-        contents: [
-          {
-            inlineData: {
-              mimeType: effectiveMime,
-              data: base64Data,
-            },
-          },
-          {
-            text: `Hãy trích xuất và số hóa toàn bộ thông tin từ tài liệu đính kèm này cho thành viên ${memberName}. Trả về JSON chuẩn.`,
-          },
-        ],
-        systemInstruction,
-        responseMimeType: 'application/json',
-      });
-
-      const parsed = parseJsonSafely(text);
-      res.json({ success: true, extracted: parsed, modelUsed });
+      const result = await extractDocument();
+      res.json({ success: true, ...result });
     } catch (error) {
+      if (heartbeat) clearInterval(heartbeat);
+      if (extractionTimeout) clearTimeout(extractionTimeout);
       console.error('[Gemini Server Extract Error]:', error);
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Lỗi khi số hóa tài liệu y tế qua server Gemini API.',
-      });
+      const message = error instanceof Error ? error.message : 'Lỗi khi số hóa tài liệu y tế qua server Gemini API.';
+      if (res.headersSent) {
+        writeSse(res, { type: 'error', error: message });
+        res.end();
+      } else {
+        res.status(500).json({ error: message });
+      }
     }
   });
 
-  // 2. Chuẩn hóa & sắp xếp thông minh (Tier flash-lite / flash)
+  // 2. Chuẩn hóa & sắp xếp thông minh (analysis quota)
   app.post('/api/gemini/refine-and-organize', async (req: Request, res: Response) => {
     try {
-      const { member, events, customKeys } = req.body;
+      const { member, events } = req.body;
       if (!Array.isArray(events) || events.length === 0) {
         res.json({
           success: true,
@@ -402,8 +573,7 @@ Hãy:
 }`;
 
       const { text, modelUsed } = await executeGeminiWithFailover({
-        task: 'digitization',
-        clientKeys: customKeys,
+        task: 'analysis',
         contents: [{ text: prompt }],
         responseMimeType: 'application/json',
       });
@@ -429,7 +599,7 @@ Hãy:
   // 3. Tóm tắt hồ sơ sức khỏe (Tier 3.8 flash)
   app.post('/api/gemini/summarize', async (req: Request, res: Response) => {
     try {
-      const { member, profile, customKeys } = req.body;
+      const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
       const eventsCount = profile?.timeline?.length || 0;
 
@@ -451,7 +621,6 @@ Trình bày bằng tiếng Việt rõ ràng, ân cần, chia theo các mục ti�
 
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'analysis',
-        clientKeys: customKeys,
         contents: [{ text: prompt }],
       });
 
@@ -467,7 +636,7 @@ Trình bày bằng tiếng Việt rõ ràng, ân cần, chia theo các mục ti�
   // 4. Phân tích chuyên sâu đa chiều & điểm sức khỏe
   app.post('/api/gemini/analyze-comprehensive', async (req: Request, res: Response) => {
     try {
-      const { member, profile, customKeys } = req.body;
+      const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
 
       const prompt = `Bạn là hội đồng chuyên gia y khoa gia đình.
@@ -476,7 +645,7 @@ Hãy phân tích sâu toàn diện hồ sơ y tế của thành viên ${memberNa
 - Toàn bộ hồ sơ tóm tắt: ${JSON.stringify(profile?.summary || {})}
 - Diễn tiến các sự kiện y tế: ${JSON.stringify(profile?.timeline || [])}
 
-Hãy tính điểm sức khỏe ước lượng (0-100), đánh giá tổng quan, các rủi ro chính, lời khuyên hành động và phân tích xu hướng chỉ số sinh tồn.
+Đây chỉ là thông tin tham khảo, không chẩn đoán hoặc thay thế bác sĩ. Chỉ đưa ra nhận định có căn cứ trong hồ sơ; nếu thiếu dữ liệu thì nói rõ chưa đủ dữ liệu, không mặc định tình trạng an toàn, không suy đoán tương tác thuốc. Điểm sức khỏe (0-100) chỉ được đưa ra nếu dữ liệu đủ; điểm này không phải thang đo lâm sàng đã kiểm chứng.
 Trả về DUY NHẤT một JSON theo cấu trúc:
 {
   "healthScore": 85,
@@ -488,7 +657,6 @@ Trả về DUY NHẤT một JSON theo cấu trúc:
 
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'analysis',
-        clientKeys: customKeys,
         contents: [{ text: prompt }],
         responseMimeType: 'application/json',
       });
@@ -500,15 +668,31 @@ Trả về DUY NHẤT một JSON theo cấu trúc:
         recommendations?: string[];
         vitalTrendAnalysis?: string;
       };
+      if (
+        typeof parsed.healthScore !== 'number' ||
+        !Number.isFinite(parsed.healthScore) ||
+        parsed.healthScore < 0 ||
+        parsed.healthScore > 100 ||
+        typeof parsed.overallAssessment !== 'string' ||
+        !parsed.overallAssessment.trim() ||
+        !Array.isArray(parsed.keyRisks) ||
+        !parsed.keyRisks.every((item) => typeof item === 'string') ||
+        !Array.isArray(parsed.recommendations) ||
+        !parsed.recommendations.every((item) => typeof item === 'string') ||
+        typeof parsed.vitalTrendAnalysis !== 'string' ||
+        !parsed.vitalTrendAnalysis.trim()
+      ) {
+        throw new Error('Phản hồi phân tích thiếu trường hợp lệ hoặc không đủ căn cứ. Không tạo kết luận thay thế.');
+      }
 
       res.json({
         success: true,
         result: {
-          healthScore: typeof parsed.healthScore === 'number' ? parsed.healthScore : 80,
-          overallAssessment: parsed.overallAssessment || 'Tình trạng sức khỏe ổn định.',
-          keyRisks: Array.isArray(parsed.keyRisks) ? parsed.keyRisks : [],
-          recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations : [],
-          vitalTrendAnalysis: parsed.vitalTrendAnalysis || 'Các chỉ số duy trì trong ngưỡng an toàn.',
+          healthScore: parsed.healthScore,
+          overallAssessment: parsed.overallAssessment,
+          keyRisks: parsed.keyRisks,
+          recommendations: parsed.recommendations,
+          vitalTrendAnalysis: parsed.vitalTrendAnalysis,
         },
         modelUsed,
       });
@@ -523,7 +707,7 @@ Trả về DUY NHẤT một JSON theo cấu trúc:
   // 5. Trợ lý AI Hỏi đáp sức khỏe (Hỗ trợ cả Streaming SSE và Non-streaming)
   app.post('/api/gemini/ask-assistant', async (req: Request, res: Response) => {
     try {
-      const { question, member, profile, stream, customKeys } = req.body;
+      const { question, member, profile, stream } = req.body;
       if (!question) {
         res.status(400).json({ error: 'Chưa có nội dung câu hỏi.' });
         return;
@@ -543,72 +727,150 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
 
       // Streaming SSE
       if (stream) {
-        const keys = getAvailableKeys(customKeys);
-        if (keys.length === 0) {
-          throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ.');
-        }
-
+        const scheduler = getQuotaScheduler();
+        const projects = scheduler.getProjects();
+        if (projects.length === 0) throw new Error('Chưa cấu hình GEMINI_PROJECTS hoặc GEMINI_API_KEYS.');
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        const controller = new AbortController();
+        const timeout = setTimeout(
+          () => controller.abort(new Error('Câu hỏi vượt quá thời gian chờ tối đa.')),
+          GEMINI_ANALYSIS_TIMEOUT_MS,
+        );
+        const heartbeat = setInterval(
+          () => writeSse(res, { type: 'progress', message: 'Trợ lý vẫn đang xử lý câu hỏi.' }),
+          15_000,
+        );
+        res.on('close', () => {
+          if (!res.writableEnded) controller.abort(new Error('Client disconnected.'));
+          clearTimeout(timeout);
+          clearInterval(heartbeat);
+        });
 
-        let streamResult = null;
-        let activeModel = '';
-
-        for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
-          const key = keys[keyIdx];
-          const ai = new GoogleGenAI({
-            apiKey: key,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build',
-              },
-            },
-          });
-
+        let streamed = false;
+        let lastError: Error | null = null;
+        try {
           for (const model of TASK_MODELS.analysis) {
-            try {
-              streamResult = await ai.models.generateContentStream({
-                model,
-                contents: prompt,
-              });
-              activeModel = model;
-              break;
-            } catch (err) {
-              console.warn(`[Gemini Server Stream] Model ${model} với key #${keyIdx + 1} không thành công, thử model tiếp theo:`, err instanceof Error ? err.message : err);
+            const attemptedProjectIds = new Set<string>();
+            while (attemptedProjectIds.size < projects.length && !controller.signal.aborted) {
+              let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
+              try {
+                lease = await scheduler.acquire(
+                  'analysis',
+                  model,
+                  getTaskQuota('analysis'),
+                  attemptedProjectIds,
+                  2_000,
+                );
+              } catch (error) {
+                lastError = error instanceof Error ? error : new Error(String(error));
+                break;
+              }
+              attemptedProjectIds.add(lease.project.id);
+              const attemptController = new AbortController();
+              const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
+              controller.signal.addEventListener('abort', cancelAttempt, { once: true });
+              const attemptTimeout = setTimeout(
+                () => attemptController.abort(new Error('Gemini stream timed out.')),
+                GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS,
+              );
+              let hasOutput = false;
+              try {
+                const ai = new GoogleGenAI({
+                  apiKey: lease.project.apiKey,
+                  httpOptions: {
+                    timeout: GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS,
+                    headers: { 'User-Agent': 'aistudio-build' },
+                  },
+                });
+                const streamResult = await ai.models.generateContentStream({
+                  model,
+                  contents: prompt,
+                  config: { abortSignal: attemptController.signal },
+                });
+                for await (const chunk of streamResult) {
+                  if (attemptController.signal.aborted) throw new Error('Gemini stream was cancelled.');
+                  if (chunk.text) {
+                    hasOutput = true;
+                    writeSse(res, { text: chunk.text, modelUsed: model });
+                  }
+                }
+                if (!hasOutput) throw new Error('Gemini returned an empty stream.');
+                streamed = true;
+                break;
+              } catch (error) {
+                const details = describeGeminiError(error);
+                lastError = error instanceof Error ? error : new Error(String(error));
+                const shouldRetry = recordProjectFailure(scheduler, lease.project.id, model, error);
+                if (hasOutput || controller.signal.aborted) throw lastError;
+                console.warn(
+                  `[Gemini assistant] ${model} failed for configured project ${lease.project.id} (${details.status || 'network'}): ${details.message}`,
+                );
+                if (!shouldRetry) throw lastError;
+              } finally {
+                clearTimeout(attemptTimeout);
+                controller.signal.removeEventListener('abort', cancelAttempt);
+                lease.release();
+              }
             }
+            if (streamed || controller.signal.aborted) break;
           }
-          if (streamResult) break;
+          if (!streamed) throw lastError || new Error('Không còn quota khả dụng cho trợ lý Gemini.');
+          writeSse(res, { type: 'done' });
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý Gemini.';
+          writeSse(res, { type: 'error', error: message });
+          res.end();
+        } finally {
+          clearTimeout(timeout);
+          clearInterval(heartbeat);
         }
-
-        if (!streamResult) {
-          throw new Error('Tất cả các model phân tích và khóa API đều không thể tạo luồng phản hồi.');
-        }
-
-        for await (const chunk of streamResult) {
-          if (chunk.text) {
-            res.write(`data: ${JSON.stringify({ text: chunk.text, modelUsed: activeModel })}\n\n`);
-          }
-        }
-        res.write('data: [DONE]\n\n');
-        res.end();
         return;
       }
 
       // Non-streaming response
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'analysis',
-        clientKeys: customKeys,
         contents: [{ text: prompt }],
       });
 
       res.json({ success: true, answer: text, modelUsed });
     } catch (error) {
       console.error('[Gemini Server Assistant Error]:', error);
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
-      });
+      if (res.headersSent) {
+        writeSse(res, {
+          type: 'error',
+          error: error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
+        });
+        res.end();
+      } else {
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
+        });
+      }
     }
+  });
+
+  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const status =
+      typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number'
+        ? error.status
+        : 500;
+    if (status === 413) {
+      res.status(413).json({ error: 'Yêu cầu vượt giới hạn kích thước. Tệp PDF tối đa 25 MB.' });
+      return;
+    }
+    if (status === 400) {
+      res.status(400).json({ error: 'Dữ liệu yêu cầu không phải JSON hợp lệ.' });
+      return;
+    }
+    console.error('[HTTP] Unhandled server error.', error);
+    res.status(500).json({ error: 'Máy chủ chưa thể xử lý yêu cầu.' });
   });
 
   // Front-end handling
