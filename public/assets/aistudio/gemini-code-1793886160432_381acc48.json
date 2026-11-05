@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "member": {
+    "id": "member_beb2204c-3ac",
+    "name": "Truong Anh Tuan",
+    "birthYear": 1980,
+    "gender": "Nam",
+    "chronicConditions": [
+      "Đã cắt một phần tuyến giáp",
+      "Đa polyp túi mật",
+      "Nang giáp keo / Phình giáp hạt hai thùy (TI-RADS 1)"
+    ]
+  },
+  "timeline": [
+    {
+      "id": "event_20260608_tongquat",
+      "sourceFileId": "1pM8dXwpgpCYtu92gC_pyhs_dzCC2RDZX",
+      "sourceFileName": "Xet nghiem mau 2026 tuanta.pdf",
+      "type": "comprehensive_exam",
+      "title": "Khám sức khỏe định kỳ & Xét nghiệm",
+      "date": "2026-06-08",
+      "facility": "Bệnh viện Đại học Y Dược TP.HCM - Phòng khám Bệnh viện Đại học Y Dược 1",
+      "diagnoses": [
+        "Z00.0 - Khám sức khỏe tổng quát",
+        "Tăng acid uric máu",
+        "Đạm niệu (+)",
+        "Đa polyp túi mật",
+        "Nang giáp keo hai thùy TI-RADS 1"
+      ],
+      "metrics": [
+        { "name": "WBC", "standardKey": "WBC", "value": 5.47, "unit": "G/L", "status": "normal" },
+        { "name": "RBC", "standardKey": "RBC", "value": 4.66, "unit": "T/L", "status": "normal" },
+        { "name": "HGB", "standardKey": "HGB", "value": 136, "unit": "g/L", "status": "normal" },
+        { "name": "HbA1c", "standardKey": "HbA1c", "value": 5.4, "unit": "%", "status": "normal" },
+        { "name": "Glucose", "standardKey": "GLUCOSE", "value": 4.85, "unit": "mmol/L", "status": "normal" },
+        { "name": "Creatinin", "standardKey": "CREATININ", "value": 90.46, "unit": "µmol/L", "status": "normal" },
+        { "name": "eGFR", "standardKey": "EGFR", "value": 91.44, "unit": "ml/ph/1.73m2", "status": "optimal" },
+        { "name": "Acid Uric", "standardKey": "ACID_URIC", "value": 933.88, "unit": "µmol/L", "status": "critical_high" },
+        { "name": "Cholesterol", "standardKey": "CHOLESTEROL", "value": 4.08, "unit": "mmol/L", "status": "normal" },
+        { "name": "Triglycerid", "standardKey": "TRIGLYCERID", "value": 1.46, "unit": "mmol/L", "status": "normal" },
+        { "name": "AST", "standardKey": "AST", "value": 21.75, "unit": "U/L", "status": "normal" },
+        { "name": "ALT", "standardKey": "ALT", "value": 13.41, "unit": "U/L", "status": "normal" }
+      ],
+      "imagingResults": [
+        { "modality": "Siêu âm ổ bụng", "findings": "Thành túi mật có nhiều cấu trúc echo dày, không bóng lưng, dmax# 5 mm.", "conclusion": "Đa polyp túi mật." },
+        { "modality": "Siêu âm tuyến giáp", "findings": "Thùy phải đã phẫu thuật 1 phần. Thùy trái có cấu trúc nang keo, TIRADS 1.", "conclusion": "Nang giáp keo hai thùy, TIRADS 1 / Đã cắt một phần thùy phải." }
+      ]
+    }
+  ],
+  "aiAnalysis": {
+    "lastAnalyzedDate": "2026-11-05",
+    "overviewSummary": "Tình trạng sức khỏe chung ổn định, chuyển hóa đường, mỡ và chức năng gan thận duy trì tốt qua các năm. Tuy nhiên, phát hiện điểm bất thường nghiêm trọng ở chỉ số Acid Uric tăng vọt.",
+    "criticalAlerts": [
+      "Chỉ số Acid Uric đạt 933.88 µmol/L (vượt gấp đôi mức bình thường), nguy cơ cao mắc bệnh gút hoặc lắng đọng tinh thể urat."
+    ],
+    "chronicConditionsTracking": [
+      "Đa polyp túi mật: Kích thước ổn định qua các năm (5mm), cần tiếp tục theo dõi định kỳ.",
+      "Tuyến giáp: Cấu trúc thùy còn lại ổn định, lành tính (TI-RADS 1)."
+    ],
+    "actionRoadmap": {
+      "specialistConsultation": ["Nội tiết - Xương khớp", "Nội thận"],
+      "dietaryModifications": [
+        "Kiêng tuyệt đối thực phẩm giàu purin (thịt đỏ, hải sản, nội tạng).",
+        "Tuyệt đối không sử dụng rượu bia.",
+        "Uống nhiều nước (trên 2.5 - 3 lít/ngày)."
+      ],
+      "followUpSchedule": "Tái khám kiểm tra lại Acid Uric và chức năng thận sau 3 tháng."
+    }
+  }
+}

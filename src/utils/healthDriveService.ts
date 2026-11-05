@@ -387,6 +387,18 @@ export async function addDriveFamilyMember(
   return saveHealthFamily(workspace, family);
 }
 
+export async function updateDriveFamilyMember(
+  workspace: HealthDriveWorkspace,
+  memberId: string,
+  updates: Partial<FamilyMember>,
+): Promise<HealthDriveWorkspace> {
+  const members = workspace.family.members.map((m) =>
+    m.id === memberId ? { ...m, ...updates } : m
+  );
+  const family = { ...workspace.family, members };
+  return saveHealthFamily(workspace, family);
+}
+
 export async function deleteDriveFamilyMember(
   workspace: HealthDriveWorkspace,
   memberId: string,
@@ -635,8 +647,72 @@ export async function cleanupExpiredRawFiles(
       profile.updatedAt = now.toISOString();
       const saved = await saveHealthProfile(member.profileFileId, profile);
       Object.assign(profile, saved);
-      deleted++;
     }
   }
   return { deleted, retained };
+}
+
+export interface DriveDuplicateCleanupResult {
+  deletedFilesCount: number;
+  freedSpaceBytes: number;
+  cleanedFilesDetails: Array<{ fileName: string; memberName: string; deletedId: string }>;
+}
+
+/**
+ * Tự động quét và xóa sạch các tệp trùng lặp (duplicate files) trong thư mục raw_files của từng thành viên trên Google Drive
+ */
+export async function cleanupDuplicateRawFilesOnDrive(
+  workspace: HealthDriveWorkspace,
+): Promise<DriveDuplicateCleanupResult> {
+  let deletedFilesCount = 0;
+  let freedSpaceBytes = 0;
+  const cleanedFilesDetails: Array<{ fileName: string; memberName: string; deletedId: string }> = [];
+
+  for (const member of workspace.family.members) {
+    try {
+      const rawFiles = await listRawFiles(member);
+      if (!rawFiles || rawFiles.length <= 1) continue;
+
+      // Gom nhóm theo tên tệp đã chuẩn hóa
+      const groups = new Map<string, DriveFile[]>();
+      for (const file of rawFiles) {
+        const normName = file.name.trim().toLowerCase();
+        if (!groups.has(normName)) groups.set(normName, []);
+        groups.get(normName)!.push(file);
+      }
+
+      const filesToDelete = new Set<DriveFile>();
+
+      for (const files of groups.values()) {
+        if (files.length > 1) {
+          // Sắp xếp theo ngày tạo tăng dần (giữ lại tệp gốc cũ nhất)
+          files.sort((a, b) => new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime());
+          // Đánh dấu các tệp duplicate đến sau để xóa
+          for (let i = 1; i < files.length; i++) {
+            filesToDelete.add(files[i]);
+          }
+        }
+      }
+
+      // Xóa thực tế các tệp trùng lặp trên Google Drive
+      for (const file of filesToDelete) {
+        try {
+          await deleteDriveFile(file.id);
+          deletedFilesCount++;
+          freedSpaceBytes += Number(file.size || 0);
+          cleanedFilesDetails.push({
+            fileName: file.name,
+            memberName: member.name,
+            deletedId: file.id,
+          });
+        } catch (delErr) {
+          console.warn(`[Drive Duplicate Cleanup] Không thể xóa tệp trùng ${file.name} (${file.id}):`, delErr);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Drive Duplicate Cleanup Error for ${member.name}]:`, err);
+    }
+  }
+
+  return { deletedFilesCount, freedSpaceBytes, cleanedFilesDetails };
 }

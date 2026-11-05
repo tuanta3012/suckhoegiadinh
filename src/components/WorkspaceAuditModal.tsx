@@ -39,7 +39,7 @@ export function WorkspaceAuditModal({
   const [progressPercent, setProgressPercent] = useState(0);
 
   const [isResetting, setIsResetting] = useState(false);
-  const [confirmResetText, setConfirmResetText] = useState('');
+  const [isConfirmingReset, setIsConfirmingReset] = useState(false);
 
   if (!isOpen) return null;
 
@@ -75,10 +75,6 @@ export function WorkspaceAuditModal({
   };
 
   const executeFactoryReset = async () => {
-    if (confirmResetText.trim() !== 'XOA TAT CA') {
-      showToast('Vui lòng nhập chính xác chữ "XOA TAT CA" để xác nhận.', 'error');
-      return;
-    }
     setIsResetting(true);
     try {
       await onFactoryReset();
@@ -88,7 +84,7 @@ export function WorkspaceAuditModal({
       showToast(err instanceof Error ? err.message : 'Không thể khởi tạo lại thư mục.', 'error');
     } finally {
       setIsResetting(false);
-      setConfirmResetText('');
+      setIsConfirmingReset(false);
     }
   };
 
@@ -177,34 +173,47 @@ export function WorkspaceAuditModal({
           </div>
 
           {/* Factory Reset Section */}
-          <div className="border border-rose-500/30 bg-rose-950/20 rounded-2xl p-4 sm:p-5 space-y-3">
-            <h4 className="font-bold text-rose-300 text-xs flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-rose-400" />
-              Khởi tạo lại Workspace (Xóa toàn bộ dữ liệu)
-            </h4>
-            <p className="text-xs text-rose-200/80 leading-relaxed">
-              Xóa vĩnh viễn toàn bộ tệp trong thư mục <code className="bg-rose-900/50 px-1 py-0.5 rounded">raw_files</code> và hồ sơ để khởi tạo mới từ đầu.
+          <div className="border border-rose-500/20 bg-rose-500/5 rounded-2xl p-4 sm:p-5 space-y-3">
+            <div className="flex items-center gap-2 text-rose-400">
+              <ShieldAlert className="w-5 h-5 shrink-0" />
+              <h4 className="font-bold text-sm">Xóa toàn bộ dữ liệu & Khởi tạo lại</h4>
+            </div>
+            
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Thao tác này sẽ xóa vĩnh viễn tất cả hồ sơ và tệp gốc trên Google Drive để bạn bắt đầu lại từ đầu. Hãy cẩn thận, không thể hoàn tác.
             </p>
 
-            <div className="space-y-2 pt-1">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={confirmResetText}
-                  onChange={(e) => setConfirmResetText(e.target.value)}
-                  placeholder="Nhập XOA TAT CA"
-                  className="flex-1 bg-slate-900 border border-rose-500/40 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500"
-                />
+            <div className="pt-1">
+              {!isConfirmingReset ? (
                 <button
                   type="button"
-                  disabled={confirmResetText.trim() !== 'XOA TAT CA' || isResetting}
-                  onClick={() => void executeFactoryReset()}
-                  className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs flex items-center gap-1 transition-all shrink-0"
+                  onClick={() => setIsConfirmingReset(true)}
+                  className="w-full py-2.5 px-4 rounded-xl border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>{isResetting ? 'Đang xóa...' : 'Khởi tạo lại'}</span>
+                  <Trash2 className="w-4 h-4" />
+                  <span>Yêu cầu khởi tạo lại Workspace</span>
                 </button>
-              </div>
+              ) : (
+                <div className="space-y-2 animate-in zoom-in-95 duration-200">
+                  <button
+                    type="button"
+                    disabled={isResetting}
+                    onClick={() => void executeFactoryReset()}
+                    className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-2 transition-all shadow-lg shadow-rose-600/20"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>{isResetting ? 'Đang thực hiện xóa...' : 'XÁC NHẬN XÓA VĨNH VIỄN'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isResetting}
+                    onClick={() => setIsConfirmingReset(false)}
+                    className="w-full py-2 rounded-xl text-slate-500 hover:text-slate-300 font-bold text-[11px] transition-all"
+                  >
+                    Tôi đã đổi ý, đừng xóa
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

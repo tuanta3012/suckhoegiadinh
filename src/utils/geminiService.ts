@@ -1,9 +1,20 @@
-import type { FamilyMember, HealthEvent, HealthMetric, HealthProfile, JsonValue, Medication } from '../types';
+import type {
+  AiAnalysisBlock,
+  AiDeepAnalysisResult,
+  FamilyMember,
+  HealthEvent,
+  HealthMetric,
+  HealthProfile,
+  ImagingResult,
+  JsonValue,
+  Medication,
+} from '../types';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './googleDriveService';
 
 const GEMINI_REQUEST_TIMEOUT_MS = 180_000;
 const OCR_REQUEST_TIMEOUT_MS = 300_000;
-const OCR_IDLE_TIMEOUT_MS = 90_000;
+const OCR_IDLE_TIMEOUT_MS = 120_000;
 const ASSISTANT_REQUEST_TIMEOUT_MS = 115_000;
 
 const EVENT_TYPES = new Set<HealthEvent['type']>([
@@ -31,12 +42,31 @@ export interface ExtractionProgressUpdate {
   rawChunk?: string;
 }
 
+async function getAuthenticatedUserToken(): Promise<string> {
+  let user = auth.currentUser;
+  if (!user) {
+    user = await new Promise((resolve) => {
+      const unsub = onAuthStateChanged(auth, (u) => {
+        unsub();
+        resolve(u);
+      });
+      setTimeout(() => {
+        unsub();
+        resolve(auth.currentUser);
+      }, 2500);
+    });
+  }
+  if (!user) {
+    throw new Error('Vui lòng đăng nhập tài khoản Google để sử dụng tính năng AI Gemini.');
+  }
+  return user.getIdToken();
+}
+
 /**
  * Server-side Gemini API invocation helper
  */
 async function callServerGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Đăng nhập Google trước khi sử dụng trợ lý Gemini.');
+  const token = await getAuthenticatedUserToken();
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
   let response: Response;
@@ -45,7 +75,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${await user.getIdToken()}`,
+        Authorization: `Bearer ${token}`,
       },
       signal: controller.signal,
       body: JSON.stringify(body),
@@ -448,13 +478,12 @@ export async function streamHealthAssistant(
   profile: HealthProfile,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Đăng nhập Google trước khi sử dụng trợ lý Gemini.');
+  const token = await getAuthenticatedUserToken();
   const response = await fetch('/api/gemini/ask-assistant', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${await user.getIdToken()}`,
+      Authorization: `Bearer ${token}`,
     },
     signal: AbortSignal.timeout(ASSISTANT_REQUEST_TIMEOUT_MS),
     body: JSON.stringify({ question, member, profile, stream: true }),
@@ -506,28 +535,38 @@ export async function streamHealthAssistant(
 export async function analyzeComprehensiveHealth(
   member: FamilyMember,
   profile: HealthProfile
-): Promise<{
-  healthScore: number;
-  overallAssessment: string;
-  keyRisks: string[];
-  recommendations: string[];
-  vitalTrendAnalysis: string;
-}> {
+): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock }> {
   const data = await callServerGemini<{
     success: boolean;
-    result: {
-      healthScore: number;
-      overallAssessment: string;
-      keyRisks: string[];
-      recommendations: string[];
-      vitalTrendAnalysis: string;
-    };
+    result: AiDeepAnalysisResult;
+    aiAnalysis?: AiAnalysisBlock;
   }>('analyze-comprehensive', {
     member,
     profile,
   });
 
-  return data.result;
+  const aiAnalysisFallback: AiAnalysisBlock = {
+    lastAnalyzedDate: new Date().toISOString().slice(0, 10),
+    overviewSummary: data.result.overallAssessment,
+    criticalAlerts: data.result.roadmap.criticalAlerts,
+    chronicConditionsTracking: data.result.chronicSurveillance.map(
+      (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`
+    ),
+    actionRoadmap: {
+      specialistConsultation: data.result.roadmap.specialistReferrals.map((s) => s.specialty),
+      dietaryModifications: data.result.roadmap.timeBoundPlan.next3Months.filter((i) =>
+        /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i)
+      ),
+      followUpSchedule: data.result.roadmap.timeBoundPlan.next3Months.find((i) =>
+        /tái khám|kiểm tra lại|xét nghiệm/i.test(i)
+      ) || 'Tái khám kiểm tra lại sau 3 tháng.',
+    },
+  };
+
+  return {
+    result: data.result,
+    aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
+  };
 }
 
 // ============================================================================
@@ -570,7 +609,26 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
         if (!isRecord(item) || typeof item.name !== 'string' || !item.name.trim()) return [];
         const numericValue = typeof item.value === 'number' ? item.value : Number(item.value);
         if (!Number.isFinite(numericValue)) return [];
-        return [{ name: item.name.trim(), value: numericValue, unit: optionalString(item.unit) || '' }];
+        return [
+          {
+            name: item.name.trim(),
+            standardKey: optionalString(item.standardKey),
+            value: numericValue,
+            unit: optionalString(item.unit) || '',
+            status: optionalString(item.status),
+          },
+        ];
+      })
+    : [];
+
+  const imagingResults: ImagingResult[] = Array.isArray(value.imagingResults)
+    ? value.imagingResults.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const modality = optionalString(item.modality) || '';
+        const findings = optionalString(item.findings) || '';
+        const conclusion = optionalString(item.conclusion) || '';
+        if (!modality && !findings && !conclusion) return [];
+        return [{ modality, findings, conclusion }];
       })
     : [];
 
@@ -589,6 +647,7 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
       : [],
     medications,
     metrics,
+    imagingResults,
     advice: optionalString(value.advice),
     nextFollowUp: isIsoDate(value.nextFollowUp) ? value.nextFollowUp : undefined,
     notes: optionalString(value.notes),

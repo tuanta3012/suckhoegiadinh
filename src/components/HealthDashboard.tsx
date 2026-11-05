@@ -7,11 +7,11 @@ import {
   Calendar,
   Camera,
   Check,
+  CheckCircle2,
   ChevronDown,
   Clock,
   Cloud,
   Copy,
-  Cpu,
   ExternalLink,
   FileHeart,
   FileText,
@@ -27,6 +27,7 @@ import {
   LogIn,
   LogOut,
   MessageSquare,
+  MoreVertical,
   Pill,
   Plus,
   RefreshCw,
@@ -48,6 +49,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppUpdateModal } from './AppUpdateModal';
 import { useAppUpdate } from '../hooks/useAppUpdate';
 import { AppLogo } from './AppLogo';
+import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
 import {
   Area,
   AreaChart,
@@ -66,6 +68,7 @@ import type {
 } from '../types';
 import {
   addDriveFamilyMember,
+  cleanupDuplicateRawFilesOnDrive,
   cleanupExpiredRawFiles,
   createHealthWorkspace,
   deleteDriveFamilyMember,
@@ -76,6 +79,7 @@ import {
   openHealthWorkspace,
   loadHealthProfile,
   saveHealthProfile,
+  updateDriveFamilyMember,
   uploadRawHealthFile,
   type DriveFile,
 } from '../utils/healthDriveService';
@@ -96,7 +100,6 @@ import {
   type ExtractionProgressUpdate,
 } from '../utils/geminiService';
 import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
-import { GeminiPoolModal } from './GeminiPoolModal';
 import { WorkspaceAuditModal } from './WorkspaceAuditModal';
 import {
   computeFileFingerprint,
@@ -108,7 +111,7 @@ import {
   type FileDuplicateMatch,
   type EventDuplicateMatch,
 } from '../utils/deduplicationService';
-import { DuplicateDocumentModal } from './DuplicateDocumentModal';
+
 import {
   clearOcrRecoveryJobs,
   readOcrRecoveryJobs,
@@ -126,6 +129,9 @@ import {
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
 import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
+import { compressImageIfNeeded } from '../utils/imageCompressor';
+import { auth } from '../utils/googleDriveService';
+import { isSamePersonName } from '../utils/formatters';
 
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
@@ -205,6 +211,8 @@ export function HealthDashboard({
     modelUsed: string;
     partialExtracted: Partial<HealthEvent>;
     error: string | null;
+    detectedMemberMatch: FamilyMember | null;
+    isRoutingDecisionRequired: boolean;
   }>({
     isOpen: false,
     file: null,
@@ -216,6 +224,8 @@ export function HealthDashboard({
     modelUsed: 'gemini-3.5-flash-lite',
     partialExtracted: {},
     error: null,
+    detectedMemberMatch: null,
+    isRoutingDecisionRequired: false,
   });
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -224,17 +234,51 @@ export function HealthDashboard({
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const memberMenuRef = useRef<HTMLDivElement>(null);
+  const settingsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (memberMenuRef.current && !memberMenuRef.current.contains(target)) {
+        setShowMemberDropdown(false);
+      }
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(target)) {
+        setShowSettingsDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
   const [showQuickActionModal, setShowQuickActionModal] = useState(false);
-  const [showGeminiPoolModal, setShowGeminiPoolModal] = useState(false);
   const [showWorkspaceAuditModal, setShowWorkspaceAuditModal] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
-  const [fileDuplicateCandidate, setFileDuplicateCandidate] = useState<{
-    file: File;
-    match: FileDuplicateMatch;
-  } | null>(null);
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
   const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
+
+  // Refs to maintain fresh data in async queue closure
+  const workspaceRef = useRef<HealthDriveWorkspace | null>(null);
+  const profilesRef = useRef<Record<string, HealthProfile>>({});
+  const selectedMemberIdRef = useRef<string>(selectedMemberId);
+  const uploadQueueRef = useRef<File[]>([]);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
+
+  useEffect(() => {
+    selectedMemberIdRef.current = selectedMemberId;
+  }, [selectedMemberId]);
+
+  useEffect(() => {
+    uploadQueueRef.current = uploadQueue;
+  }, [uploadQueue]);
 
   function persistOcrRecoveryJob(
     driveFileId: string,
@@ -265,21 +309,75 @@ export function HealthDashboard({
     }
   }
 
+  async function runFamilyDoctorSummaryAfterQueue() {
+    const targetMemberId = selectedMemberIdRef.current || selectedMemberId;
+    const targetMember = workspaceRef.current?.family.members.find(m => m.id === targetMemberId) || selectedMember;
+    if (!targetMember) return;
+
+    let currentProfile = profilesRef.current[targetMember.id] || profiles[targetMember.id];
+    if (!currentProfile || !currentProfile.timeline || currentProfile.timeline.length === 0) return;
+
+    showToast(
+      `Đang tự động chuẩn hóa danh pháp & phân tích y khoa 4 lớp cho ${targetMember.name}...`,
+      'info',
+    );
+    setIsSummarizing(true);
+    try {
+      // 1. Tự động Chuẩn hóa & Sắp xếp toàn bộ dữ liệu mới (Batch Refinement)
+      const { organizedTimeline } = await refineAndOrganizeMemberData(
+        targetMember,
+        currentProfile.timeline,
+      );
+      
+      const refinedProfile: HealthProfile = {
+        ...currentProfile,
+        timeline: organizedTimeline,
+      };
+
+      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu (AI 4-Layer Assessment & Schema v2)
+      const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
+      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile);
+      
+      const updated: HealthProfile = {
+        ...refinedProfile,
+        summary: { ...refinedProfile.summary, narrative },
+        aiDeepAnalysis: deepRes.result,
+        aiAnalysis: deepRes.aiAnalysis,
+        updatedAt: new Date().toISOString(),
+      };
+      
+      const saved = await saveHealthProfile(targetMember.profileFileId, updated);
+      profilesRef.current = { ...profilesRef.current, [targetMember.id]: saved };
+      setProfiles((prev) => ({ ...prev, [targetMember.id]: saved }));
+      showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp lên trang chính của ${targetMember.name}!`, 'success');
+    } catch (error) {
+      console.warn('[Auto Family Doctor Summary Warning]:', error);
+      showToast('Lỗi khi tự động phân tích chuyên sâu.', 'error');
+    } finally {
+      setIsSummarizing(false);
+    }
+  }
+
   function processNextInQueue() {
-    if (uploadQueue.length > 0) {
-      const nextFile = uploadQueue[0];
-      const remaining = uploadQueue.slice(1);
+    const queue = uploadQueueRef.current.length > 0 ? uploadQueueRef.current : uploadQueue;
+    if (queue.length > 0) {
+      const nextFile = queue[0];
+      const remaining = queue.slice(1);
+      uploadQueueRef.current = remaining;
+      setUploadQueue(remaining);
       const nextCurrent = (queueStatus?.current || 1) + 1;
       const total = queueStatus?.total || (remaining.length + nextCurrent);
-      setUploadQueue(remaining);
       setQueueStatus({ current: nextCurrent, total });
       showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${total} (${nextFile.name})...`, 'info');
       void beginDigitization(nextFile);
     } else {
+      uploadQueueRef.current = [];
       if (queueStatus) {
-        showToast(`Đã hoàn tất xử lý hàng đợi ${queueStatus.total} tệp tài liệu y tế!`, 'success');
+        showToast(`Đã nhập dữ liệu xong toàn bộ ${queueStatus.total} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`, 'success');
       }
       setQueueStatus(null);
+      // Tự động kích hoạt toàn bộ luồng chuẩn hóa & phân tích 4 lớp sau khi tất cả các tệp hoàn tất
+      void runFamilyDoctorSummaryAfterQueue();
     }
   }
 
@@ -297,7 +395,6 @@ export function HealthDashboard({
     setProfiles({});
     setSelectedMemberId('');
     setDigitizationDraft(null);
-    setFileDuplicateCandidate(null);
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -459,6 +556,7 @@ export function HealthDashboard({
         ? current
         : nextWorkspace.family.members[0]?.id || ''
     );
+    return nextProfiles;
   }, []);
 
   const openWorkspace = useCallback(
@@ -669,40 +767,139 @@ export function HealthDashboard({
     }
   }
 
+  async function handleCleanupDriveDuplicates() {
+    if (!workspace || !driveAuthorized) return;
+    const confirmed = await confirm({
+      title: 'Quét & Dọn dẹp tệp trùng trên Google Drive?',
+      message: 'Hệ thống sẽ tự động tìm kiếm toàn bộ các tệp tin trùng lặp trong thư mục Drive của từng thành viên gia đình, giữ lại tệp gốc cũ nhất và xóa sạch các bản sao dư thừa để giải phóng dung lượng.',
+      confirmLabel: 'Quét & Dọn dẹp ngay',
+    });
+    if (!confirmed) return;
+
+    setIsLoading(true);
+    showToast('Đang quét và xóa các tệp trùng lặp trên Google Drive...', 'info');
+    try {
+      const result = await cleanupDuplicateRawFilesOnDrive(workspace);
+      if (result.deletedFilesCount > 0) {
+        const mbFreed = (result.freedSpaceBytes / (1024 * 1024)).toFixed(1);
+        showToast(
+          `Đã dọn dẹp thành công ${result.deletedFilesCount} tệp trùng lặp trên Google Drive (giải phóng ~${mbFreed} MB)!`,
+          'success'
+        );
+        if (workspace) await reloadProfiles(workspace);
+      } else {
+        showToast('Thư mục Google Drive của bạn đã sạch sẽ, không phát hiện tệp trùng lặp.', 'success');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Lỗi khi dọn dẹp tệp trùng trên Google Drive.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function beginDigitization(file: File, options?: { forceUpload?: boolean }) {
-    if (!workspace || !selectedMember) {
-      showToast('Hãy chọn hoặc tạo hồ sơ thành viên trước khi tải tài liệu.', 'error');
-      return;
-    }
-    if (!profiles[selectedMember.id]) {
-      showToast(
-        profileErrors[selectedMember.id]
-          ? 'Không tải được hồ sơ thành viên. Hãy tải lại hồ sơ trước khi thêm tài liệu.'
-          : 'Đang tải hồ sơ thành viên. Vui lòng thử lại sau.',
-        'error',
-      );
-      return;
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      showToast('Tệp vượt quá giới hạn cho phép 25 MB.', 'error');
+    if (!workspaceRef.current) {
+      showToast('Hãy kết nối Google Drive trước khi tải tài liệu.', 'error');
       return;
     }
 
-    // Kiểm tra trùng lặp tài liệu trước khi tải lên Drive (tránh tốn dung lượng và hạn ngạch AI)
+    // TỰ ĐỘNG KHỞI TẠO THÀNH VIÊN ĐẦU TIÊN NẾU CHƯA CÓ (Quick Start Flow)
+    // SỬ DỤNG REF để lấy danh sách thành viên mới nhất
+    const currentWorkspace = workspaceRef.current;
+    const currentMembers = currentWorkspace.family.members;
+    const targetMemberId = selectedMemberIdRef.current || selectedMemberId;
+    let effectiveMember = currentMembers.find(m => m.id === targetMemberId) || currentMembers[0];
+    
+    if (!effectiveMember) {
+      showToast('Đang khởi tạo hồ sơ gia đình đầu tiên cho bạn...', 'info');
+      setIsUploading(true);
+      try {
+        const user = auth.currentUser;
+        const defaultName = user?.displayName || user?.email?.split('@')[0] || 'Thành viên mới';
+        
+        const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+        const next = await addDriveFamilyMember(currentWorkspace, {
+          id: memberId,
+          name: defaultName,
+          role: 'other',
+        });
+        workspaceRef.current = next;
+        setWorkspace(next);
+        const freshProfiles = await reloadProfiles(next);
+        profilesRef.current = freshProfiles;
+        effectiveMember = next.family.members.find(m => m.id === memberId) || null;
+        if (!effectiveMember) throw new Error('Không thể khởi tạo hồ sơ thành viên mặc định.');
+        selectedMemberIdRef.current = memberId;
+        setSelectedMemberId(memberId);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi khi tạo hồ sơ đầu tiên.', 'error');
+        setIsUploading(false);
+        processNextInQueue();
+        return;
+      }
+    }
+
+    // KIỂM TRA HỒ SƠ SẴN SÀNG (Robust Loading for Batch)
+    let currentProfile = profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id];
+    if (!currentProfile) {
+      try {
+        const remote = await loadHealthProfile(effectiveMember.profileFileId);
+        currentProfile = parseHealthProfile(remote, effectiveMember);
+        profilesRef.current[effectiveMember.id] = currentProfile;
+        setProfiles((prev) => ({ ...prev, [effectiveMember.id]: currentProfile! }));
+      } catch (profileError) {
+        // Nếu vẫn lỗi, thử chờ 1 giây (có thể đang reload) rồi thử lại một lần nữa
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          const remote = await loadHealthProfile(effectiveMember.profileFileId);
+          currentProfile = parseHealthProfile(remote, effectiveMember);
+          profilesRef.current[effectiveMember.id] = currentProfile;
+          setProfiles((prev) => ({ ...prev, [effectiveMember.id]: currentProfile! }));
+        } catch (retryError) {
+          showToast(
+            `Đang chuẩn bị hồ sơ cho ${effectiveMember.name}. Vui lòng đợi trong giây lát...`,
+            'info',
+          );
+          // Vẫn cho chạy tiếp nếu đây là tệp đầu tiên của thành viên mới
+          if (members.length > 1) {
+            processNextInQueue();
+            return;
+          }
+        }
+      }
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showToast('Tệp vượt quá giới hạn cho phép 25 MB.', 'error');
+      processNextInQueue();
+      return;
+    }
+
+    // Kiểm tra trùng lặp tài liệu trước khi tải lên Drive
+    let existingDriveFileId: string | undefined = undefined;
     if (!options?.forceUpload) {
       try {
         const { hash, size } = await computeFileFingerprint(file);
-        const currentProfile = profiles[selectedMember.id] || createHealthProfile(selectedMember);
-        const fileDup = detectDuplicateFile({ name: file.name, size }, hash, currentProfile, selectedMember);
-        if (fileDup) {
-          setFileDuplicateCandidate({ file, match: fileDup });
-          return;
-        }
+        const activeProfile = profiles[effectiveMember.id] || createHealthProfile(effectiveMember);
+        const fileDup = detectDuplicateFile({ name: file.name, size }, hash, activeProfile, effectiveMember);
+        const crossDup = fileDup ? null : detectCrossMemberDuplicateFile({ name: file.name, size }, hash, profiles, effectiveMember.id);
+        const match = fileDup || crossDup;
 
-        const crossDup = detectCrossMemberDuplicateFile({ name: file.name, size }, hash, profiles, selectedMember.id);
-        if (crossDup) {
-          setFileDuplicateCandidate({ file, match: crossDup });
-          return;
+        if (match) {
+          const sourceStatus = match.existingSource.status;
+          // 1. Tự động BỎ QUA nếu tệp đã được tải lên và số hóa toàn bộ
+          if (sourceStatus === 'processed') {
+            const memberMsg = match.memberName && match.memberName !== effectiveMember.name
+              ? `trong hồ sơ của ${match.memberName}`
+              : `trong hồ sơ của ${effectiveMember.name}`;
+            showToast(`Tệp "${file.name}" đã được số hóa hoàn tất trước đó (${memberMsg}). Tự động bỏ qua.`, 'info');
+            processNextInQueue();
+            return;
+          }
+
+          // 2. Tự động LÀM LẠI nếu tệp đã tải lên nhưng chưa số hóa hoàn tất: Tái sử dụng tệp đã có trên Drive, KHÔNG tải bản sao mới
+          existingDriveFileId = match.existingSource.driveFileId;
+          showToast(`Phát hiện tệp "${file.name}" đã có trên Drive nhưng chưa hoàn tất. Đang tự động quét lại dữ liệu...`, 'info');
         }
       } catch (err) {
         console.warn('[Deduplication Pre-check Failed]:', err);
@@ -713,61 +910,85 @@ export function HealthDashboard({
     setDigitizationError('');
     setShowQuickActionModal(false);
 
-    // Mở ngay modal theo dõi tiến trình và nội dung đang nhận dạng trực quan
+    // 1. Tối ưu ảnh chụp phía client
+    const processedFile = await compressImageIfNeeded(file);
+
+    // Mở ngay modal theo dõi tiến trình
     setTrackerState({
       isOpen: true,
-      file,
-      memberId: selectedMember.id,
+      file: processedFile,
+      memberId: effectiveMember.id,
       step: 'uploading_drive',
-      progressPercent: 20,
-      progressMessage: 'Đang tải tệp lên thư mục "Suc khoe gia dinh" trên Google Drive...',
+      progressPercent: 25,
+      progressMessage: existingDriveFileId
+        ? 'Tệp đã có trên Drive. Đang chạy AI Vision quét lại dữ liệu...'
+        : 'Đang khởi động luồng song song: Tải Drive & AI Vision đọc tài liệu...',
       driveFile: null,
       modelUsed: 'gemini-3.5-flash-lite',
       partialExtracted: {},
       error: null,
+      detectedMemberMatch: null,
+      isRoutingDecisionRequired: false,
     });
 
     try {
-      const uploaded = await uploadRawHealthFile(selectedMember, file);
-      setTrackerState((prev) => ({ ...prev, driveFile: uploaded }));
-      const { hash } = await computeFileFingerprint(file);
-      const source: HealthSource = {
-        driveFileId: uploaded.id,
-        fileName: uploaded.name,
-        fileSize: file.size,
-        fileHash: hash,
-        mimeType: uploaded.mimeType || file.type || 'application/octet-stream',
-        uploadedAt: uploaded.createdTime || new Date().toISOString(),
-        status: 'pending',
-      };
-      const current = profiles[selectedMember.id] || createHealthProfile(selectedMember);
-      const stagedProfile = addHealthSource(current, source);
-      const savedStagedProfile = await saveHealthProfile(
-        selectedMember.profileFileId,
-        stagedProfile
-      );
-      setProfiles((prev) => ({ ...prev, [selectedMember.id]: savedStagedProfile }));
-      persistOcrRecoveryJob(uploaded.id, 'processing', 45);
+      if (existingDriveFileId) {
+        // Tệp đã có trên Google Drive: Tái sử dụng tệp gốc, KHÔNG tạo bản sao trùng lặp trên Drive
+        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId);
+        const reusedUploaded: DriveFile = {
+          id: existingDriveFileId,
+          name: processedFile.name,
+          mimeType: processedFile.type || 'application/octet-stream',
+          createdTime: new Date().toISOString(),
+        };
+        setTrackerState((prev) => ({ ...prev, driveFile: reusedUploaded }));
+      } else {
+        // Tệp mới hoàn toàn: Tải lên Google Drive và chạy số hóa song song
+        const uploadPromise = uploadRawHealthFile(effectiveMember, processedFile);
+        const extractionPromise = runDocumentExtraction(processedFile, effectiveMember);
 
-      setTrackerState((prev) => ({
-        ...prev,
-        step: 'reading_document',
-        progressPercent: 42,
-        progressMessage: 'Đã lưu tệp vào Google Drive. Khởi động AI Vision đọc tài liệu...',
-      }));
+        const [uploaded] = await Promise.all([uploadPromise, extractionPromise]);
+        setTrackerState((prev) => ({ ...prev, driveFile: uploaded }));
 
-      await runDocumentExtraction(file, selectedMember, uploaded.id);
+        const { hash } = await computeFileFingerprint(processedFile);
+        const source: HealthSource = {
+          driveFileId: uploaded.id,
+          fileName: uploaded.name,
+          fileSize: processedFile.size,
+          fileHash: hash,
+          mimeType: uploaded.mimeType || processedFile.type || 'application/octet-stream',
+          uploadedAt: uploaded.createdTime || new Date().toISOString(),
+          status: 'pending',
+        };
+        
+        // Đảm bảo lấy profile mới nhất từ state hoặc tạo mới
+        setProfiles(prev => {
+          const current = prev[effectiveMember!.id] || createHealthProfile(effectiveMember!);
+          const stagedProfile = addHealthSource(current, source);
+          void saveHealthProfile(effectiveMember!.profileFileId, stagedProfile);
+          return { ...prev, [effectiveMember!.id]: stagedProfile };
+        });
+      }
+
     } catch (error) {
       const msg = error instanceof Error
         ? error.message
         : 'Không thể hoàn tất lưu tài liệu vào Google Drive hoặc hồ sơ thành viên.';
-      setErrorMessage(msg);
+      
+      // Nếu lỗi do mạng, vẫn thử cho qua để xử lý tệp tiếp theo sau vài giây
       setTrackerState((prev) => ({
         ...prev,
         step: 'error',
-        progressMessage: 'Không thể hoàn tất lưu tài liệu',
+        progressMessage: 'Lỗi trong quá trình xử lý',
         error: msg,
       }));
+      
+      if (uploadQueueRef.current.length > 0 || uploadQueue.length > 0) {
+        setTimeout(() => {
+          setTrackerState(prev => ({ ...prev, isOpen: false }));
+          processNextInQueue();
+        }, 3000);
+      }
     } finally {
       setIsUploading(false);
     }
@@ -797,6 +1018,99 @@ export function HealthDashboard({
     });
   }
 
+  async function autoCommitAndRefineDigitization(
+    extracted: Partial<HealthEvent>,
+    file: File,
+    member: FamilyMember,
+    driveFileId?: string,
+    overrideProfiles?: Record<string, HealthProfile>,
+  ) {
+    try {
+      const currentProfiles = overrideProfiles || profilesRef.current;
+      const profile = currentProfiles[member.id] || createHealthProfile(member);
+      const rawEvent: HealthEvent = {
+        id: `event_${crypto.randomUUID()}`,
+        sourceFileId: driveFileId,
+        sourceFileName: file.name,
+        type: validEventType(extracted.type),
+        title: extracted.title || file.name || 'Hồ sơ y tế mới',
+        date: extracted.date || new Date().toISOString().slice(0, 10),
+        facility: extracted.facility,
+        diagnoses: extracted.diagnoses || [],
+        medications: extracted.medications || [],
+        metrics: extracted.metrics || [],
+        imagingResults: extracted.imagingResults || [],
+        advice: extracted.advice,
+        nextFollowUp: extracted.nextFollowUp,
+        notes: extracted.notes,
+        patientName: extracted.patientName,
+        patientBirthDate: extracted.patientBirthDate,
+        patientGender: extracted.patientGender,
+        extractedData: isRecord(extracted.extractedData)
+          ? (extracted.extractedData as Record<string, JsonValue>)
+          : undefined,
+        recordedAt: new Date().toISOString(),
+      };
+
+      // 1. Làm sạch & Khử trùng lặp nội bộ sự kiện
+      const cleanEvent = cleanAndDeduplicateEventData(rawEvent);
+
+      // 2. Tự động kiểm tra trùng lặp sự kiện cũ trong profile
+      const dupMatch = detectDuplicateEvent(profile.timeline, cleanEvent);
+      let updatedProfile: HealthProfile;
+
+      if (dupMatch && dupMatch.score >= 0.7) {
+        const mergedEvent = mergeHealthEvents(dupMatch.matchedEvent, cleanEvent);
+        const updatedTimeline = profile.timeline.map((item) =>
+          item.id === dupMatch.matchedEvent.id ? mergedEvent : item,
+        );
+        updatedProfile = {
+          ...profile,
+          timeline: updatedTimeline,
+          summary: summarizeTimeline(updatedTimeline, profile.summary.narrative),
+          updatedAt: new Date().toISOString(),
+        };
+      } else {
+        updatedProfile = digitizeHealthSource(profile, cleanEvent);
+      }
+
+      if (driveFileId) {
+        updatedProfile.sources = updatedProfile.sources.map((item) =>
+          item.driveFileId === driveFileId
+            ? { ...item, status: 'processed' as const, digitizedAt: new Date().toISOString() }
+            : item,
+        );
+        forgetOcrRecoveryJob(driveFileId);
+      }
+
+      // Lưu hồ sơ đã số hóa cơ bản (không Refine tại đây)
+      const savedProfile = await saveHealthProfile(member.profileFileId, updatedProfile);
+      profilesRef.current = { ...profilesRef.current, [member.id]: savedProfile };
+      selectedMemberIdRef.current = member.id;
+      setProfiles((prev) => ({ ...prev, [member.id]: savedProfile }));
+      setSelectedMemberId(member.id);
+
+      setTrackerState((prev) => ({
+        ...prev,
+        step: 'completed',
+        progressPercent: 100,
+        progressMessage: `Đã số hóa & lưu tạm thời cho ${member.name}!`,
+      }));
+
+      showToast(`Đã số hóa & lưu tệp "${file.name}" cho ${member.name}.`, 'success');
+
+      // Tự động chuyển tiếp tệp tiếp theo
+      setTimeout(() => {
+        setTrackerState((prev) => ({ ...prev, isOpen: false }));
+        processNextInQueue();
+      }, 500);
+    } catch (error) {
+      console.error('[Auto Commit Error]:', error);
+      showToast(error instanceof Error ? error.message : 'Lỗi khi tự động lưu hồ sơ.', 'error');
+      processNextInQueue();
+    }
+  }
+
   async function runDocumentExtraction(file: File, member: FamilyMember, driveFileId?: string) {
     let latestProgress = 45;
     try {
@@ -807,15 +1121,70 @@ export function HealthDashboard({
       };
       const result = await extractHealthEventWithProgress(file, member, reportProgress);
       if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100);
+
+      // SỬ DỤNG REF để lấy danh sách thành viên mới nhất (tránh race condition trong hàng đợi)
+      const currentMembers = workspaceRef.current?.family.members || [];
+      const patientNameRaw = result.extracted.patientName?.trim() || '';
+
+      // 1. Phân tích đối khớp thành viên bằng thuật toán so khớp tên tiếng Việt thông minh (bỏ dấu, hoa thường, tiền tố y tế BN, Bệnh nhân...)
+      let isMatchCurrent = !patientNameRaw || isSamePersonName(patientNameRaw, member.name);
+
+      let matchedMember: FamilyMember | null = null;
+      if (!isMatchCurrent && patientNameRaw) {
+        matchedMember = currentMembers.find((m) => m.id !== member.id && isSamePersonName(patientNameRaw, m.name)) || null;
+      }
+
+      let isMismatch = Boolean(!isMatchCurrent && matchedMember);
+      let isNewPerson = Boolean(!isMatchCurrent && !matchedMember && patientNameRaw.length > 3);
+
+      // Tự động gán tên tài liệu cho hồ sơ mặc định đầu tiên nếu thành viên hiện tại là placeholder
+      const isPlaceholder = member.name === 'Thành viên mới' || member.name === 'Gia đình' || member.name.toLowerCase().includes('thanh vien');
+      if (isNewPerson && isPlaceholder && currentMembers.length === 1 && workspaceRef.current) {
+        try {
+          const updatedWorkspace = await updateDriveFamilyMember(workspaceRef.current, member.id, {
+            name: patientNameRaw,
+            birthDate: result.extracted.patientBirthDate || undefined,
+            gender: (result.extracted.patientGender === 'Nam' || result.extracted.patientGender === 'male') ? 'male' : (result.extracted.patientGender === 'Nữ' || result.extracted.patientGender === 'female') ? 'female' : member.gender,
+          });
+          workspaceRef.current = updatedWorkspace;
+          setWorkspace(updatedWorkspace);
+          member = updatedWorkspace.family.members.find(m => m.id === member.id) || member;
+          selectedMemberIdRef.current = member.id;
+          setSelectedMemberId(member.id);
+          isMatchCurrent = true;
+          isMismatch = false;
+          isNewPerson = false;
+        } catch {
+          // Bỏ qua lỗi cập nhật tên và tiếp tục flow bình thường
+        }
+      }
+
       setTrackerState((prev) => ({
         ...prev,
         step: 'completed',
-        progressPercent: 100,
-        progressMessage: 'AI đã bóc tách xong toàn bộ dữ liệu y khoa từ tài liệu!',
+        progressPercent: 90,
+        progressMessage: 'Bóc tách dữ liệu thành công. Kiểm tra đối khớp thành viên...',
         partialExtracted: result.extracted,
         modelUsed: result.modelUsed || prev.modelUsed,
+        detectedMemberMatch: matchedMember,
+        isRoutingDecisionRequired: Boolean(isMismatch || isNewPerson),
       }));
-      showToast('AI đã trích xuất xong thông tin từ tài liệu.', 'success');
+
+      // Nếu khớp hoàn toàn với thành viên hiện tại hoặc không có thông tin người bệnh, cứ tự động lưu
+      if (!isMismatch && !isNewPerson) {
+        await autoCommitAndRefineDigitization(result.extracted, file, member, driveFileId);
+      } else if (isMismatch && matchedMember) {
+        // TỰ ĐỘNG CHUYỂN HỒ SƠ nếu phát hiện khớp chính xác với thành viên khác (Mượt mà UX)
+        showToast(`Phát hiện tài liệu của ${matchedMember.name}. Hệ thống đang tự động chuyển hồ sơ...`, 'info');
+        await autoCommitAndRefineDigitization(result.extracted, file, matchedMember, driveFileId);
+      } else {
+        // Tạm dừng nếu phát hiện người mới hoàn toàn để người dùng quyết định
+        setTrackerState(prev => ({
+          ...prev,
+          progressMessage: `Phát hiện người bệnh mới: ${result.extracted.patientName || 'Chưa rõ'}. Vui lòng chọn hành động.`,
+          step: 'matching_patient'
+        }));
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.';
       if (driveFileId) persistOcrRecoveryJob(driveFileId, 'interrupted', latestProgress);
@@ -827,6 +1196,7 @@ export function HealthDashboard({
         error: msg,
       }));
       showToast('Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.', 'info');
+      processNextInQueue();
     }
   }
 
@@ -926,6 +1296,8 @@ export function HealthDashboard({
         modelUsed: 'gemini-3.5-flash-lite',
         partialExtracted: {},
         error: null,
+        detectedMemberMatch: null,
+        isRoutingDecisionRequired: false,
       });
       persistOcrRecoveryJob(job.driveFileId, 'processing', 45);
       await runDocumentExtraction(file, member, job.driveFileId);
@@ -1131,14 +1503,17 @@ export function HealthDashboard({
     setIsSummarizing(true);
     try {
       const narrative = await summarizeHealthProfile(selectedMember, selectedProfile);
+      const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile);
       const updated: HealthProfile = {
         ...selectedProfile,
         summary: { ...selectedProfile.summary, narrative },
+        aiDeepAnalysis: deepRes.result,
+        aiAnalysis: deepRes.aiAnalysis,
         updatedAt: new Date().toISOString(),
       };
       const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      showToast('Đã tạo tóm tắt bệnh án thông minh bằng AI.', 'success');
+      showToast('Đã phân tích 4 lớp y khoa chuyên sâu bằng Gemini AI!', 'success');
     } catch (error) {
       showToast(
         error instanceof Error ? error.message : 'Không thể tạo tổng kết bệnh án.',
@@ -1150,13 +1525,14 @@ export function HealthDashboard({
   }
 
   async function handleRefineAndOrganize() {
-    if (!selectedMember || !selectedProfile || !selectedProfile.timeline.length) {
-      showToast('Chưa có sự kiện y tế nào để hiệu chỉnh.', 'info');
+    if (!selectedMember || !selectedProfile) return;
+    if (!selectedProfile.timeline || selectedProfile.timeline.length === 0) {
+      showToast('Chưa có dữ liệu y tế nào để hiệu chỉnh. Hãy tải tệp hoặc chụp tài liệu khám bệnh trước.', 'info');
       return;
     }
     setIsRefining(true);
     try {
-      const { organizedTimeline, refinementNotes } = await refineAndOrganizeMemberData(
+      const { organizedTimeline } = await refineAndOrganizeMemberData(
         selectedMember,
         selectedProfile.timeline
       );
@@ -1170,17 +1546,16 @@ export function HealthDashboard({
         throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc. Không có dữ liệu nào được thay đổi.');
       }
 
-      const hasEdits = organizedTimeline.some(
-        (event) => stableSerialize(event) !== stableSerialize(currentEvents.get(event.id)),
-      );
-      if (hasEdits) {
-        showToast(
-          `AI đề xuất chỉnh sửa nhưng ứng dụng chưa tự ghi đè hồ sơ gốc để tránh làm sai lệch dữ liệu y tế. Hãy kiểm tra thủ công. ${refinementNotes[0] || ''}`.trim(),
-          'info',
-        );
-        return;
-      }
-      showToast('AI không đề xuất thay đổi nội dung hồ sơ; dữ liệu gốc được giữ nguyên.', 'info');
+      const updatedProfile: HealthProfile = {
+        ...selectedProfile,
+        timeline: organizedTimeline,
+        summary: summarizeTimeline(organizedTimeline, selectedProfile.summary.narrative),
+        updatedAt: new Date().toISOString(),
+      };
+      const saved = await saveHealthProfile(selectedMember.profileFileId, updatedProfile);
+      setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
+      showToast('Đã chuẩn hóa danh pháp y khoa thành công! Đang chạy phân tích 4 lớp y khoa...', 'success');
+      void handleAiSummary();
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Lỗi khi hiệu chỉnh dữ liệu.', 'error');
     } finally {
@@ -1243,136 +1618,193 @@ export function HealthDashboard({
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
       {/* 1. TOP BAR CONTRACT: One row, clean zones, thumb-friendly safe area */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 safe-area-header shadow-xs">
-        <div className="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
+        <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
           {/* Zone 1: Brand Wordmark & Logo */}
-          <div className="flex items-center gap-2.5 min-w-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <AppLogo size="sm" />
             <div className="min-w-0">
-              <span className="text-base font-extrabold tracking-tight text-slate-900 truncate block">
+              <span className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 truncate block">
                 Sức Khỏe Gia Đình
               </span>
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    driveAuthorized ? 'bg-emerald-500' : 'bg-amber-400'
+                  }`}
+                />
                 <span className="truncate">
-                  {driveAuthorized ? 'Google Drive đã kết nối' : 'Chưa cấp quyền Drive'}
+                  {driveAuthorized ? 'Drive đã kết nối' : 'Chưa cấp quyền'}
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Zone 2: Active Member Switcher Dropdown (Mobile-first ergonomics) */}
-          {members.length > 0 && (
-            <div className="relative">
+          {/* Zone 2: Member & Menu Actions */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {members.length > 0 && (
+              <div className="relative" ref={memberMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMemberDropdown(!showMemberDropdown);
+                    setShowSettingsDropdown(false);
+                  }}
+                  className="flex items-center gap-1 p-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 active:scale-95 transition-all"
+                  title={selectedMember?.name || 'Chọn thành viên'}
+                >
+                  <span className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center text-xs font-bold shrink-0">
+                    {selectedMember?.name.charAt(0) || 'U'}
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                </button>
+
+                {showMemberDropdown && (
+                  <div className="absolute right-0 mt-2 w-60 bg-white border border-slate-200 rounded-2xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150">
+                    <div className="px-3 py-1.5 text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                      Hồ sơ thành viên
+                    </div>
+                    <div className="max-h-60 overflow-y-auto space-y-0.5">
+                      {members.map((m) => {
+                        const isCurrent = m.id === selectedMember?.id;
+                        const count = profiles[m.id]?.timeline?.length || 0;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedMemberId(m.id);
+                              setShowMemberDropdown(false);
+                            }}
+                            className={`w-full flex items-center justify-between p-2 rounded-xl text-xs font-semibold transition-colors ${
+                              isCurrent
+                                ? 'bg-emerald-50 text-emerald-800 font-bold'
+                                : 'hover:bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-[11px] shrink-0">
+                                {m.name.charAt(0)}
+                              </span>
+                              <span className="truncate">{m.name}</span>
+                            </div>
+                            <span className="text-[10px] text-slate-400 font-mono tabular-nums shrink-0">
+                              {count} mục
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-1 pt-1 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMemberDropdown(false);
+                          setActiveTab('family');
+                        }}
+                        className="w-full flex items-center gap-2 p-2 rounded-xl text-xs text-emerald-700 hover:bg-emerald-50 font-bold"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Thêm người thân...</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Menu / Settings Dropdown Trigger */}
+            <div className="relative" ref={settingsMenuRef}>
               <button
                 type="button"
-                onClick={() => setShowMemberDropdown(!showMemberDropdown)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 active:scale-[0.98] transition-all text-xs font-bold text-slate-800"
+                onClick={() => {
+                  setShowSettingsDropdown(!showSettingsDropdown);
+                  setShowMemberDropdown(false);
+                }}
+                className="p-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 active:scale-95 transition-all flex items-center justify-center"
+                title="Cài đặt & Tiện ích"
               >
-                <span className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[10px] font-bold">
-                  {selectedMember?.name.charAt(0) || 'U'}
-                </span>
-                <span className="max-w-[85px] sm:max-w-[120px] truncate">
-                  {selectedMember?.name || 'Thành viên'}
-                </span>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                <MoreVertical className="w-4 h-4" />
               </button>
 
-              {showMemberDropdown && (
-                <div
-                  className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-2xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150"
-                  onClick={() => setShowMemberDropdown(false)}
-                >
-                  <div className="px-3 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Chọn thành viên
-                  </div>
-                  {members.map((m) => {
-                    const isCurrent = m.id === selectedMember?.id;
-                    const count = profiles[m.id]?.timeline?.length || 0;
-                    return (
+              {showSettingsDropdown && (
+                <div className="absolute right-0 mt-2 w-64 bg-white border border-slate-200 rounded-2xl shadow-xl p-2.5 z-50 animate-in fade-in zoom-in-95 duration-150 space-y-1">
+                  {userEmail && (
+                    <div className="p-2 bg-slate-50 rounded-xl border border-slate-100 mb-1">
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Tài khoản</div>
+                      <div className="text-xs font-bold text-slate-800 truncate">{userEmail}</div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsDropdown(false);
+                      setShowWorkspaceAuditModal(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-teal-50 text-slate-700 hover:text-teal-900 transition-colors text-left text-xs font-semibold"
+                  >
+                    <FolderSync className="w-4 h-4 text-teal-600 shrink-0" />
+                    <span>Kiểm tra thư mục Drive</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsDropdown(false);
+                      void handleCleanupDriveDuplicates();
+                    }}
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-amber-50 text-slate-700 hover:text-amber-900 transition-colors text-left text-xs font-semibold"
+                  >
+                    <Trash2 className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>Dọn dẹp tệp trùng trên Drive</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isCheckingUpdate}
+                    onClick={() => {
+                      setShowSettingsDropdown(false);
+                      void checkAppUpdate(true);
+                    }}
+                    className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <RefreshCw className={`w-4 h-4 text-slate-500 shrink-0 ${isCheckingUpdate ? 'animate-spin text-emerald-600' : ''}`} />
+                      <span>Kiểm tra cập nhật</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono">v{appVersion}</span>
+                  </button>
+
+                  <div className="pt-1 border-t border-slate-100">
+                    {userEmail ? (
                       <button
-                        key={m.id}
                         type="button"
-                        onClick={() => setSelectedMemberId(m.id)}
-                        className={`w-full flex items-center justify-between p-2 rounded-xl text-xs font-semibold transition-colors ${
-                          isCurrent
-                            ? 'bg-emerald-50 text-emerald-800 font-bold'
-                            : 'hover:bg-slate-50 text-slate-700'
-                        }`}
+                        onClick={() => {
+                          setShowSettingsDropdown(false);
+                          onLogout();
+                        }}
+                        className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-rose-600 transition-colors text-left text-xs font-bold"
                       >
-                        <div className="flex items-center gap-2 truncate">
-                          <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-[11px]">
-                            {m.name.charAt(0)}
-                          </span>
-                          <span className="truncate">{m.name}</span>
-                        </div>
-                        <span className="text-[10px] text-slate-400 font-mono tabular-nums">
-                          {count} mục
-                        </span>
+                        <LogOut className="w-4 h-4 shrink-0 text-rose-500" />
+                        <span>Đăng xuất</span>
                       </button>
-                    );
-                  })}
-                  <div className="mt-1 pt-1 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('family')}
-                      className="w-full flex items-center gap-2 p-2 rounded-xl text-xs text-emerald-700 hover:bg-emerald-50 font-bold"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>Thêm người thân...</span>
-                    </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowSettingsDropdown(false);
+                          onConnectDrive();
+                        }}
+                        className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 transition-colors text-left text-xs font-bold"
+                      >
+                        <LogIn className="w-4 h-4 shrink-0" />
+                        <span>Đăng nhập Google</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
             </div>
-          )}
-
-          {/* Zone 3: Sync & Quick Action Trigger */}
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowWorkspaceAuditModal(true)}
-              title="Kiểm tra trùng lặp thư mục Drive & Khởi tạo lại"
-              className="p-2 rounded-xl text-slate-600 hover:text-teal-600 hover:bg-teal-50 active:scale-95 transition-all"
-            >
-              <FolderSync className="w-4 h-4 text-teal-600" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowGeminiPoolModal(true)}
-              title="Trạng thái Hệ thống AI Gemini Server (Tự động cân bằng tải & phân luồng)"
-              className="p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition-all relative"
-            >
-              <Cpu className="w-4 h-4 text-indigo-600" />
-              <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void checkAppUpdate(true)}
-              disabled={isCheckingUpdate}
-              title="Kiểm tra bản cập nhật mới"
-              className="p-2 rounded-xl text-slate-600 hover:bg-slate-100 active:scale-95 transition-all"
-            >
-              <RefreshCw className={`w-4 h-4 ${isCheckingUpdate ? 'animate-spin text-emerald-600' : ''}`} />
-            </button>
-            {userEmail ? (
-              <button
-                type="button"
-                onClick={onLogout}
-                title="Đăng xuất tài khoản"
-                className="p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 active:scale-95 transition-all"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onConnectDrive}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-bold shadow-xs active:scale-95 transition-all"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Đăng nhập</span>
-              </button>
-            )}
           </div>
         </div>
       </header>
@@ -1727,7 +2159,7 @@ export function HealthDashboard({
                     </div>
                     <div>
                       <h4 className="font-extrabold text-slate-900 text-sm">
-                        Trợ lý Y Tế AI (Gemini Flash)
+                        Trợ lý Y Tế AI
                       </h4>
                       <p className="text-xs text-slate-600 mt-0.5 max-w-lg">
                         Tra cứu nhanh lịch sử tiêm phòng, theo dõi dao động huyết áp, tra toa thuốc cũ chỉ bằng ngôn ngữ tự nhiên.
@@ -1749,117 +2181,58 @@ export function HealthDashboard({
             {activeTab === 'timeline' && (
               <div className="space-y-6 animate-in fade-in duration-150">
                 {/* Active Member Bar & Action CTAs */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
                   <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-lg">
+                    <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-lg shrink-0">
                       {selectedMember?.name.charAt(0) || 'U'}
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-extrabold text-slate-900 text-base">
-                          {selectedMember?.name}
-                        </h3>
-                        {selectedMember && (
-                          <span className="text-xs text-slate-500 font-normal">
-                            {[
-                              selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
-                              selectedMember.birthDate ? `Sinh ${selectedMember.birthDate}` : '',
-                            ].filter(Boolean).join(' · ')}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-500">
-                        Hồ sơ: {selectedProfile?.timeline.length || 0} tài liệu · Cập nhật gần nhất:{' '}
-                        {selectedProfile?.summary.latestEventDate || 'Chưa có'}
-                      </p>
+                    <div className="min-w-0">
+                      <h3 className="font-extrabold text-slate-900 text-sm truncate">
+                        {selectedMember?.name}
+                      </h3>
+                      {selectedMember && (
+                        <p className="text-[11px] text-slate-500 truncate">
+                          {[
+                            selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
+                            selectedMember.birthDate ? `Sinh ${selectedMember.birthDate}` : '',
+                          ].filter(Boolean).join(' · ')}
+                        </p>
+                      )}
                     </div>
                   </div>
-
-                  <div className="flex items-center gap-2">
+                  <div className="flex gap-2">
                     <button
                       type="button"
                       onClick={handleCameraCapture}
                       disabled={!driveAuthorized || isUploading}
-                      className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs shadow-sm transition-all disabled:opacity-50"
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
                     >
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>Chụp tài liệu</span>
+                      <Camera className="w-4 h-4" />
+                      <span>Chụp ảnh khám bệnh</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={!driveAuthorized || isUploading}
-                      className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-800 font-bold text-xs transition-all disabled:opacity-50"
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 font-bold text-xs transition-all disabled:opacity-50 active:scale-[0.98]"
                     >
-                      <FileUp className="w-3.5 h-3.5" />
-                      <span>Tải tệp</span>
+                      <FileUp className="w-4 h-4 text-emerald-600" />
+                      <span>Tải lên (PDF/Ảnh)</span>
                     </button>
                   </div>
                 </div>
 
-                {/* AI Summary Card (Tóm tắt bệnh án thông minh) */}
-                <div className="rounded-2xl border border-emerald-200/80 bg-white p-5 shadow-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-emerald-600" />
-                      <div>
-                        <h4 className="font-extrabold text-slate-900 text-sm">
-                          Đánh giá y khoa & Phân tích chuyên sâu (AI Flash)
-                        </h4>
-                        <span className="text-[10px] text-slate-400">
-                          Tier 3.8 / 3.6 / 3 Flash • Tự động failover qua 6 key
-                        </span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => void handleRefineAndOrganize()}
-                        disabled={isRefining || !selectedProfile?.timeline.length}
-                        title="Dùng AI Flash-Lite chuẩn hóa danh pháp, liều lượng và sắp xếp thông minh"
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all disabled:opacity-40"
-                      >
-                        <RefreshCw
-                          className={`w-3.5 h-3.5 ${isRefining ? 'animate-spin text-indigo-600' : ''}`}
-                        />
-                        <span>{isRefining ? 'Đang chuẩn hóa...' : 'Chuẩn hóa & sắp xếp (Lite)'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleAiSummary()}
-                        disabled={isSummarizing || !selectedProfile?.timeline.length}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs active:scale-95 transition-all disabled:opacity-40"
-                      >
-                        <RefreshCw
-                          className={`w-3.5 h-3.5 ${isSummarizing ? 'animate-spin' : ''}`}
-                        />
-                        <span>{isSummarizing ? 'Đang phân tích...' : 'Đánh giá hồ sơ (Flash)'}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <p className="text-xs sm:text-sm text-slate-700 leading-relaxed">
-                    {selectedProfile?.summary.narrative ||
-                      'Chưa có bản tổng hợp AI. Hãy tải lên tài liệu y tế hoặc bấm "Cập nhật tóm tắt" để AI tóm tắt tiền sử bệnh, thuốc và các chẩn đoán quan trọng.'}
-                  </p>
-
-                  {selectedProfile?.summary.latestDiagnoses &&
-                    selectedProfile.summary.latestDiagnoses.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
-                        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mr-1">
-                          Chẩn đoán gần nhất:
-                        </span>
-                        {selectedProfile.summary.latestDiagnoses.map((diag, i) => (
-                          <span
-                            key={i}
-                            className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 text-xs font-semibold"
-                          >
-                            {diag}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                </div>
+                {/* AI 4-Layer Medical Deep-Dive Engine & Summary */}
+                <AiDeepAnalysisCard
+                  analysis={selectedProfile?.aiDeepAnalysis}
+                  aiAnalysis={selectedProfile?.aiAnalysis}
+                  medicalHistory={selectedProfile?.medicalHistory}
+                  narrativeSummary={selectedProfile?.summary.narrative}
+                  isAnalyzing={isSummarizing}
+                  onRefresh={() => void handleAiSummary()}
+                  onRefine={() => void handleRefineAndOrganize()}
+                  isRefining={isRefining}
+                />
 
                 {/* Vital Metrics Trend Chart */}
                 {metricNames.length > 0 && (
@@ -2102,11 +2475,41 @@ export function HealthDashboard({
                               {event.metrics.map((met, idx) => (
                                 <span
                                   key={idx}
-                                  className="px-2.5 py-1 rounded-lg bg-teal-50 border border-teal-200 text-teal-900 text-xs font-semibold tabular-nums"
+                                  className={`px-2.5 py-1 rounded-lg border text-xs font-semibold tabular-nums ${
+                                    met.status === 'critical_high' || met.status === 'critical_low'
+                                      ? 'bg-rose-50 border-rose-200 text-rose-900 font-bold'
+                                      : 'bg-teal-50 border-teal-200 text-teal-900'
+                                  }`}
                                 >
                                   {met.name}: <strong>{met.value}</strong> {met.unit}
                                 </span>
                               ))}
+                            </div>
+                          )}
+
+                          {/* Imaging Results */}
+                          {event.imagingResults && event.imagingResults.length > 0 && (
+                            <div className="space-y-1.5 pt-1.5">
+                              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                                Chẩn đoán hình ảnh (Siêu âm / X-quang):
+                              </span>
+                              <div className="grid gap-1.5 sm:grid-cols-2">
+                                {event.imagingResults.map((img, idx) => (
+                                  <div key={idx} className="p-2.5 rounded-xl bg-purple-50/80 border border-purple-200 text-xs">
+                                    <div className="font-bold text-purple-950 flex items-center gap-1">
+                                      <span>🖥️ {img.modality}</span>
+                                    </div>
+                                    {img.findings && (
+                                      <p className="text-[11px] text-slate-600 mt-0.5">{img.findings}</p>
+                                    )}
+                                    {img.conclusion && (
+                                      <p className="text-xs font-semibold text-purple-900 mt-1">
+                                        👉 Kết luận: {img.conclusion}
+                                      </p>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           )}
 
@@ -2526,11 +2929,15 @@ export function HealthDashboard({
             const files = Array.from(event.target.files || []);
             if (files.length === 0) return;
             if (files.length === 1) {
+              uploadQueueRef.current = [];
               setUploadQueue([]);
-              setQueueStatus(null);
+              setQueueStatus({ current: 1, total: 1 });
+              showToast(`Đang tự động xử lý tệp tài liệu y tế "${files[0].name}"...`, 'info');
               void beginDigitization(files[0]);
             } else {
-              setUploadQueue(files.slice(1));
+              const remaining = files.slice(1);
+              uploadQueueRef.current = remaining;
+              setUploadQueue(remaining);
               setQueueStatus({ current: 1, total: files.length });
               showToast(`Đã chọn ${files.length} tệp. Đang xử lý tệp 1/${files.length} (${files[0].name})...`, 'info');
               void beginDigitization(files[0]);
@@ -2539,33 +2946,65 @@ export function HealthDashboard({
           }}
         />
 
-        {/* Upload Queue Floating Status Banner */}
         {queueStatus && (
-          <div className="fixed bottom-20 left-4 right-4 z-40 max-w-md mx-auto bg-slate-900/95 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700 flex items-center justify-between gap-3 animate-in slide-in-from-bottom-4">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0">
-                <RefreshCw className="w-4 h-4 animate-spin" />
+          <div className="fixed bottom-24 left-4 right-4 z-40 max-w-lg mx-auto bg-slate-900 shadow-2xl rounded-3xl border border-slate-700/50 overflow-hidden animate-in slide-in-from-bottom-4">
+            <div className="p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/20">
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  </div>
+                  <div className="min-w-0">
+                    <span className="font-black text-sm text-white block">
+                      Đang xử lý hàng đợi y tế ({queueStatus.current}/{queueStatus.total})
+                    </span>
+                    <span className="text-[11px] text-slate-400 truncate block">
+                      {uploadQueue.length > 0 ? `Tiếp theo: ${uploadQueue[0].name}` : 'Đang xử lý tệp cuối cùng...'}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    uploadQueueRef.current = [];
+                    setUploadQueue([]);
+                    setQueueStatus(null);
+                    showToast('Đã hủy hàng đợi tải lên.', 'info');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-400 font-bold text-xs transition-colors"
+                >
+                  Dừng xử lý
+                </button>
               </div>
-              <div>
-                <span className="font-bold text-xs block">
-                  Đang xử lý hàng đợi tải lên ({queueStatus.current}/{queueStatus.total})
-                </span>
-                <span className="text-[10px] text-slate-400">
-                  Xử lý tuần tự; lưu hoặc bỏ qua bản xem xét để sang tệp tiếp theo
-                </span>
+
+              {/* Enhanced Progress Bar for the entire Queue */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 px-0.5">
+                  <span>Tiến độ tổng quát</span>
+                  <span>{Math.round((queueStatus.current / queueStatus.total) * 100)}%</span>
+                </div>
+                <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden flex gap-0.5 p-0.5">
+                  {Array.from({ length: queueStatus.total }).map((_, i) => (
+                    <div
+                      key={i}
+                      className={`h-full flex-1 rounded-full transition-all duration-500 ${
+                        i < queueStatus.current - 1
+                          ? 'bg-emerald-500'
+                          : i === queueStatus.current - 1
+                          ? 'bg-emerald-400 animate-pulse'
+                          : 'bg-slate-700'
+                      }`}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setUploadQueue([]);
-                setQueueStatus(null);
-                showToast('Đã hủy hàng đợi tải lên.', 'info');
-              }}
-              className="text-xs text-rose-400 hover:text-rose-300 font-bold px-2 py-1"
-            >
-              Hủy
-            </button>
+            
+            <div className="bg-slate-950/50 px-4 py-2 border-t border-slate-800/50">
+              <p className="text-[10px] text-slate-500 italic text-center">
+                AI xử lý tự động; kết quả sẽ xuất hiện trong Dòng thời gian sau khi hoàn tất.
+              </p>
+            </div>
           </div>
         )}
         {!trackerState.isOpen && ocrRecoveryJobs.some((job) => job.status !== 'processing') && (
@@ -2682,7 +3121,7 @@ export function HealthDashboard({
           <button
             type="button"
             onClick={() => setShowQuickActionModal(true)}
-            className="w-13 h-13 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-lg shadow-emerald-600/30 active:scale-95 transition-transform"
+            className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-lg shadow-emerald-600/30 active:scale-95 transition-transform"
             aria-label="Thêm hồ sơ mới"
           >
             <Plus className="w-6 h-6 stroke-[2.5]" />
@@ -2773,6 +3212,8 @@ export function HealthDashboard({
           modelUsed={trackerState.modelUsed}
           partialExtracted={trackerState.partialExtracted}
           error={trackerState.error}
+          detectedMemberMatch={trackerState.detectedMemberMatch}
+          isRoutingDecisionRequired={trackerState.isRoutingDecisionRequired}
           onReview={() => {
             if (trackerState.driveFile) {
               setDigitizationDraft({
@@ -2781,6 +3222,107 @@ export function HealthDashboard({
               });
             }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
+          }}
+          onSaveToDetected={async () => {
+            if (trackerState.detectedMemberMatch && trackerState.driveFile) {
+              const matched = trackerState.detectedMemberMatch;
+              const file = trackerState.file!;
+              const driveFileId = trackerState.driveFile.id;
+              
+              setTrackerState(prev => ({
+                ...prev,
+                progressMessage: `Đang chuyển hồ sơ sang: ${matched.name}...`,
+                progressPercent: 92,
+                step: 'matching_patient'
+              }));
+              
+              try {
+                await autoCommitAndRefineDigitization(trackerState.partialExtracted, file, matched, driveFileId);
+              } catch (err) {
+                showToast(err instanceof Error ? err.message : 'Lỗi khi chuyển hồ sơ.', 'error');
+                processNextInQueue();
+              }
+            } else {
+              processNextInQueue();
+            }
+          }}
+          onCreateNewMember={async () => {
+            if (!workspace || !trackerState.partialExtracted.patientName || !trackerState.driveFile) {
+              setTrackerState(prev => ({ ...prev, isOpen: false }));
+              processNextInQueue();
+              return;
+            }
+            const name = trackerState.partialExtracted.patientName;
+            const birthDate = trackerState.partialExtracted.patientBirthDate;
+            const genderRaw = trackerState.partialExtracted.patientGender as any;
+            const gender = (genderRaw === 'Nam' || genderRaw === 'male') ? 'male' : (genderRaw === 'Nữ' || genderRaw === 'female') ? 'female' : 'other';
+            const file = trackerState.file!;
+            const driveFileId = trackerState.driveFile.id;
+
+            setTrackerState(prev => ({
+              ...prev,
+              progressMessage: `Đang khởi tạo hồ sơ cho: ${name}...`,
+              progressPercent: 92,
+              step: 'matching_patient'
+            }));
+            
+            try {
+              const currentMemberId = trackerState.memberId;
+              const currentMember = members.find(m => m.id === currentMemberId);
+              const currentProfile = currentMember ? profiles[currentMember.id] : null;
+              
+              let targetMember: FamilyMember | null = null;
+              let freshProfiles: Record<string, HealthProfile> | undefined;
+
+              // Tối ưu: Nếu thành viên hiện tại chỉ là placeholder vừa tạo (chưa có sự kiện nào)
+              // thì cập nhật thông tin luôn cho mượt, tránh tạo người thứ 2 dư thừa
+              if (currentMember && currentProfile && currentProfile.timeline.length <= 0 && members.length === 1) {
+                const next = await updateDriveFamilyMember(workspace, currentMember.id, {
+                  name: name.trim(),
+                  birthDate: birthDate || undefined,
+                  gender,
+                });
+                workspaceRef.current = next;
+                setWorkspace(next);
+                targetMember = next.family.members.find(m => m.id === currentMemberId) || null;
+                freshProfiles = await reloadProfiles(next);
+                if (freshProfiles) {
+                  profilesRef.current = freshProfiles;
+                }
+                selectedMemberIdRef.current = currentMemberId;
+                setSelectedMemberId(currentMemberId);
+              } else {
+                // Tạo người mới bình thường
+                const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+                const next = await addDriveFamilyMember(workspace, {
+                  id: memberId,
+                  name: name.trim(),
+                  birthDate: birthDate || undefined,
+                  gender,
+                  role: 'other',
+                });
+                workspaceRef.current = next;
+                setWorkspace(next);
+                targetMember = next.family.members.find(m => m.id === memberId) || null;
+                freshProfiles = await reloadProfiles(next);
+                if (freshProfiles) {
+                  profilesRef.current = freshProfiles;
+                }
+                selectedMemberIdRef.current = memberId;
+                setSelectedMemberId(memberId);
+              }
+
+              if (targetMember) {
+                await autoCommitAndRefineDigitization(trackerState.partialExtracted, file, targetMember, driveFileId, freshProfiles);
+              } else {
+                throw new Error('Không thể xác định hồ sơ đích sau khi khởi tạo.');
+              }
+            } catch (err) {
+              console.error('[Create New Member Error]:', err);
+              showToast(err instanceof Error ? err.message : 'Không thể xử lý hồ sơ mới.', 'error');
+              setTrackerState(prev => ({ ...prev, isOpen: false }));
+              processNextInQueue();
+            }
           }}
           onRetry={() => {
             void retryDigitization();
@@ -2825,54 +3367,12 @@ export function HealthDashboard({
         />
       )}
 
-      {/* Duplicate Document Pre-Upload Modal */}
-      <DuplicateDocumentModal
-        isOpen={Boolean(fileDuplicateCandidate)}
-        file={fileDuplicateCandidate?.file || null}
-        match={fileDuplicateCandidate?.match || null}
-        currentMemberName={selectedMember?.name || ''}
-        onViewExisting={(linkedEvent, memberId) => {
-          if (memberId && memberId !== selectedMember?.id) {
-            setSelectedMemberId(memberId);
-          }
-          setFileDuplicateCandidate(null);
-          setActiveTab('timeline');
-          showToast(`Đã chuyển tới hồ sơ: ${linkedEvent.title}`, 'info');
-          processNextInQueue();
-        }}
-        onProceedReScan={() => {
-          if (fileDuplicateCandidate) {
-            const targetFile = fileDuplicateCandidate.file;
-            setFileDuplicateCandidate(null);
-            void beginDigitization(targetFile, { forceUpload: true });
-          }
-        }}
-        onProceedForceNew={() => {
-          if (fileDuplicateCandidate) {
-            const targetFile = fileDuplicateCandidate.file;
-            setFileDuplicateCandidate(null);
-            void beginDigitization(targetFile, { forceUpload: true });
-          }
-        }}
-        onCancel={() => {
-          setFileDuplicateCandidate(null);
-          if (fileInputRef.current) fileInputRef.current.value = '';
-          processNextInQueue();
-        }}
-      />
-
       {/* App Update Modal */}
       <AppUpdateModal
         isOpen={isUpdateModalOpen}
         currentVersion={appVersion}
         updateInfo={updateInfo}
         onClose={() => setIsUpdateModalOpen(false)}
-      />
-
-      {/* Gemini 6-Key Pool Management Modal */}
-      <GeminiPoolModal
-        isOpen={showGeminiPoolModal}
-        onClose={() => setShowGeminiPoolModal(false)}
       />
 
       {/* Workspace Audit & Factory Reset Modal */}
@@ -2908,15 +3408,12 @@ function findBestMemberMatch(
   currentSelectedId: string
 ): string {
   if (!members.length) return '';
-  const patientName = extracted.patientName?.trim().toLowerCase();
+  const patientName = extracted.patientName?.trim();
   const patientGender = extracted.patientGender?.trim().toLowerCase();
   const patientBirth = extracted.patientBirthDate?.trim();
 
   if (patientName) {
-    const matched = members.find((m) => {
-      const mName = m.name.trim().toLowerCase();
-      return mName === patientName || patientName.includes(mName) || mName.includes(patientName);
-    });
+    const matched = members.find((m) => isSamePersonName(patientName, m.name));
     if (matched) return matched.id;
   }
 

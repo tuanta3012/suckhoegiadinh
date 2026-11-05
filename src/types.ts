@@ -17,8 +17,10 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [key:
 
 export interface HealthMetric {
   name: string;
+  standardKey?: string;
   value: number;
   unit: string;
+  status?: 'normal' | 'optimal' | 'warning_high' | 'warning_low' | 'critical_high' | 'critical_low' | string;
 }
 
 export interface Medication {
@@ -28,17 +30,24 @@ export interface Medication {
   duration?: string;
 }
 
+export interface ImagingResult {
+  modality: string;
+  findings: string;
+  conclusion: string;
+}
+
 export interface HealthEvent {
   id: string;
   sourceFileId: string;
   sourceFileName: string;
-  type: 'medical_report' | 'prescription' | 'test_result' | 'vaccination' | 'discharge' | 'other';
+  type: 'medical_report' | 'prescription' | 'test_result' | 'vaccination' | 'discharge' | 'comprehensive_exam' | 'other';
   title: string;
   date: string;
   facility?: string;
   diagnoses: string[];
   medications: Medication[];
   metrics: HealthMetric[];
+  imagingResults?: ImagingResult[];
   advice?: string;
   nextFollowUp?: string;
   notes?: string;
@@ -69,12 +78,85 @@ export interface HealthSummary {
   narrative?: string;
 }
 
+export interface MedicalHistory {
+  surgeries: Array<{
+    procedure: string;
+    year?: string;
+    hospital?: string;
+    notes?: string;
+  }>;
+  chronicConditions: Array<{
+    condition: string;
+    diagnosedYear?: string;
+    status?: 'stable_benign' | 'monitored' | 'progressing' | 'resolved' | string;
+    details?: string;
+  }>;
+}
+
+export interface CrossParameterCorrelation {
+  parameters: string[];
+  findings: string;
+  severity: 'critical' | 'warning' | 'info';
+}
+
+export interface VelocityTrendItem {
+  metricName: string;
+  trendDirection: 'increasing' | 'decreasing' | 'stable' | 'fluctuating';
+  velocityDescription: string;
+  riskProjection: string;
+}
+
+export interface ChronicDiseaseSurveillanceItem {
+  conditionName: string;
+  status: 'stable_benign' | 'monitored' | 'progressing' | 'resolved';
+  comparisonOverTime: string;
+  recommendation: string;
+}
+
+export interface ActionableHealthRoadmap {
+  criticalAlerts: string[];
+  specialistReferrals: Array<{
+    specialty: string;
+    reason: string;
+  }>;
+  timeBoundPlan: {
+    next3Months: string[];
+    next6Months: string[];
+    next12Months: string[];
+  };
+}
+
+export interface AiDeepAnalysisResult {
+  analyzedAt: string;
+  healthScore: number;
+  overallAssessment: string;
+  crossCorrelations: CrossParameterCorrelation[];
+  velocityTrends: VelocityTrendItem[];
+  chronicSurveillance: ChronicDiseaseSurveillanceItem[];
+  roadmap: ActionableHealthRoadmap;
+}
+
+export interface AiAnalysisBlock {
+  lastAnalyzedDate?: string;
+  overviewSummary?: string;
+  criticalAlerts?: string[];
+  chronicConditionsTracking?: string[];
+  actionRoadmap?: {
+    specialistConsultation?: string[];
+    dietaryModifications?: string[];
+    followUpSchedule?: string;
+  };
+}
+
 export interface HealthProfile {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   member: FamilyMember;
+  medicalHistory?: MedicalHistory;
   timeline: HealthEvent[];
   sources: HealthSource[];
   summary: HealthSummary;
+  aiDeepAnalysis?: AiDeepAnalysisResult;
+  aiAnalysis?: AiAnalysisBlock;
   createdAt: string;
   updatedAt: string;
 }

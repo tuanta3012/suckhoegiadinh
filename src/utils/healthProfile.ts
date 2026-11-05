@@ -39,6 +39,13 @@ function isMedication(value: unknown): boolean {
   );
 }
 
+function isImagingResult(value: unknown): boolean {
+  return Boolean(
+    isJsonRecord(value) &&
+      (typeof value.modality === 'string' || typeof value.findings === 'string' || typeof value.conclusion === 'string')
+  );
+}
+
 function isHealthEvent(value: unknown): value is HealthEvent {
   if (!isJsonRecord(value)) return false;
   return Boolean(
@@ -55,6 +62,7 @@ function isHealthEvent(value: unknown): value is HealthEvent {
       value.medications.every(isMedication) &&
       Array.isArray(value.metrics) &&
       value.metrics.every(isHealthMetric) &&
+      (value.imagingResults === undefined || (Array.isArray(value.imagingResults) && value.imagingResults.every(isImagingResult))) &&
       isNonEmptyString(value.recordedAt) &&
       ['facility', 'advice', 'nextFollowUp', 'notes', 'patientName', 'patientBirthDate', 'patientGender'].every(
         (key) => value[key] === undefined || typeof value[key] === 'string',
@@ -81,7 +89,7 @@ function isHealthSource(value: unknown): value is HealthSource {
 
 export function createHealthProfile(member: FamilyMember, now = new Date().toISOString()): HealthProfile {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     member,
     timeline: [],
     sources: [],
@@ -126,11 +134,14 @@ export function mergeHealthProfiles(
   );
   const mergedSources = [...sources.values()].sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt));
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     member: incoming.member || current.member,
     timeline,
     sources: mergedSources,
     summary: summarizeTimeline(timeline, incoming.summary.narrative || current.summary.narrative),
+    aiAnalysis: incoming.aiAnalysis || current.aiAnalysis,
+    aiDeepAnalysis: incoming.aiDeepAnalysis || current.aiDeepAnalysis,
+    medicalHistory: incoming.medicalHistory || current.medicalHistory,
     createdAt: current.createdAt || incoming.createdAt,
     updatedAt: now,
   };
@@ -194,8 +205,9 @@ export function summarizeTimeline(
   const latestMetrics: Record<string, HealthMetric & { date: string }> = {};
   for (const event of timeline) {
     for (const metric of event.metrics) {
-      const previous = latestMetrics[metric.name];
-      if (!previous || event.date >= previous.date) latestMetrics[metric.name] = { ...metric, date: event.date };
+      const key = metric.standardKey || metric.name;
+      const previous = latestMetrics[key];
+      if (!previous || event.date >= previous.date) latestMetrics[key] = { ...metric, date: event.date };
     }
   }
   const followUp = [...timeline]
@@ -215,7 +227,7 @@ export function summarizeTimeline(
 export function parseHealthProfile(value: unknown, member: FamilyMember): HealthProfile {
   if (!value || typeof value !== 'object') throw new Error('Tệp hồ sơ trên Drive không phải JSON hợp lệ.');
   const data = value as Partial<HealthProfile>;
-  if (data.schemaVersion !== 1 || !Array.isArray(data.timeline) || !Array.isArray(data.sources)) {
+  if (!Array.isArray(data.timeline) || !Array.isArray(data.sources)) {
     throw new Error('Phiên bản hoặc cấu trúc hồ sơ sức khỏe không được hỗ trợ.');
   }
   if (!data.timeline.every(isHealthEvent)) {
@@ -236,11 +248,14 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
   }
 
   const normalized: HealthProfile = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     member: { ...(data.member || member), ...member },
     timeline: data.timeline,
     sources: data.sources,
     summary: data.summary || { latestDiagnoses: [], latestMetrics: {} },
+    aiAnalysis: data.aiAnalysis,
+    aiDeepAnalysis: data.aiDeepAnalysis,
+    medicalHistory: data.medicalHistory,
     createdAt: data.createdAt || new Date().toISOString(),
     updatedAt: data.updatedAt || new Date().toISOString(),
   };

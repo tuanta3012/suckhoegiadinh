@@ -10,6 +10,38 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function normalizeStandardKey(name: string): string {
+  const clean = name.trim().toLowerCase();
+  if (/acid\s*uric|uric\s*acid|axit\s*uric/.test(clean)) return 'ACID_URIC';
+  if (/hba1c|hb\s*a1c/.test(clean)) return 'HbA1c';
+  if (/glucose|đường\s*huyết|duong\s*huyet|\bglu\b/.test(clean)) return 'GLUCOSE';
+  if (/creatinin|creatinine|\bcre\b/.test(clean)) return 'CREATININ';
+  if (/egfr|\bgfr\b|lọc\s*cầu\s*thận/.test(clean)) return 'EGFR';
+  if (/wbc|bạch\s*cầu|bach\s*cau/.test(clean)) return 'WBC';
+  if (/rbc|hồng\s*cầu|hong\s*cau/.test(clean)) return 'RBC';
+  if (/hgb|\bhb\b|hemoglobin/.test(clean)) return 'HGB';
+  if (/hct|hematocrit/.test(clean)) return 'HCT';
+  if (/mcv/.test(clean)) return 'MCV';
+  if (/mchc/.test(clean)) return 'MCHC';
+  if (/mch/.test(clean)) return 'MCH';
+  if (/plt|tiểu\s*cầu|tieu\s*cau/.test(clean)) return 'PLT';
+  if (/triglycerid|triglyceride|\btri\b/.test(clean)) return 'TRIGLYCERID';
+  if (/cholesterol/.test(clean)) return 'CHOLESTEROL';
+  if (/hdl/.test(clean)) return 'HDL';
+  if (/ldl/.test(clean)) return 'LDL';
+  if (/ast|sgot|\bgot\b/.test(clean)) return 'AST';
+  if (/alt|sgpt|\bgpt\b/.test(clean)) return 'ALT';
+  if (/ggt/.test(clean)) return 'GGT';
+  if (/ure|urea/.test(clean)) return 'URE';
+  if (/đạm\s*niệu|protein\s*niệu|proteinuria/.test(clean)) return 'PROTEIN_URINE';
+  if (/sys|huyết\s*áp\s*tâm\s*thu/.test(clean)) return 'BLOOD_PRESSURE_SYS';
+  if (/dia|huyết\s*áp\s*tâm\s*trương/.test(clean)) return 'BLOOD_PRESSURE_DIA';
+  if (/spo2/.test(clean)) return 'SPO2';
+  if (/weight|cân\s*nặng/.test(clean)) return 'WEIGHT';
+  if (/height|chiều\s*cao/.test(clean)) return 'HEIGHT';
+  return name.trim().toUpperCase().replace(/\s+/g, '_');
+}
+
 export function cleanExtractedJson(value: unknown): JsonRecord {
   if (!isRecord(value)) throw new Error('Phản hồi Gemini không phải một JSON object.');
   const result = { ...value };
@@ -54,9 +86,38 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
     const metrics = new Map<string, JsonRecord>();
     for (const metric of result.metrics) {
       if (!isRecord(metric) || typeof metric.name !== 'string' || !metric.name.trim()) continue;
-      metrics.set(metric.name.trim().toLowerCase(), metric);
+      const name = metric.name.trim();
+      const standardKey = typeof metric.standardKey === 'string' && metric.standardKey.trim()
+        ? metric.standardKey.trim()
+        : normalizeStandardKey(name);
+      const cleanedMetric: JsonRecord = {
+        ...metric,
+        name,
+        standardKey,
+      };
+      if (typeof metric.status === 'string') {
+        cleanedMetric.status = metric.status.trim();
+      }
+      metrics.set(standardKey.toLowerCase(), cleanedMetric);
     }
     result.metrics = Array.from(metrics.values());
+  }
+
+  if (Array.isArray(result.imagingResults)) {
+    const imagingList: JsonRecord[] = [];
+    const seen = new Set<string>();
+    for (const item of result.imagingResults) {
+      if (!isRecord(item)) continue;
+      const modality = typeof item.modality === 'string' ? item.modality.trim() : '';
+      const findings = typeof item.findings === 'string' ? item.findings.trim() : '';
+      const conclusion = typeof item.conclusion === 'string' ? item.conclusion.trim() : '';
+      if (!modality && !findings && !conclusion) continue;
+      const key = `${modality.toLowerCase()}_${conclusion.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      imagingList.push({ modality, findings, conclusion });
+    }
+    result.imagingResults = imagingList;
   }
 
   return result;
@@ -82,6 +143,7 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord
   merged.diagnoses = values.flatMap((value) => Array.isArray(value.diagnoses) ? value.diagnoses : []);
   merged.medications = values.flatMap((value) => Array.isArray(value.medications) ? value.medications : []);
   merged.metrics = values.flatMap((value) => Array.isArray(value.metrics) ? value.metrics : []);
+  merged.imagingResults = values.flatMap((value) => Array.isArray(value.imagingResults) ? value.imagingResults : []);
 
   const notes = batches.map(({ firstPage, lastPage }, index) => {
     const note = typeof values[index].notes === 'string' ? values[index].notes.trim() : '';
@@ -103,3 +165,4 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord
   if (advice.length) merged.advice = advice.join('\n');
   return cleanExtractedJson(merged);
 }
+

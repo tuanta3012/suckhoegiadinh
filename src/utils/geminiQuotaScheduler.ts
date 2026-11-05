@@ -20,47 +20,11 @@ interface UsageWindow {
 }
 
 export function parseGeminiProjects(
-  projectsJson: string | undefined,
-  legacyKeys: string[],
+  apiKeys: string[],
   defaultKey: string | undefined,
 ): GeminiProject[] {
-  if (projectsJson?.trim()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(projectsJson);
-    } catch (error) {
-      throw new Error('GEMINI_PROJECTS contains invalid JSON.', { cause: error });
-    }
-    if (!Array.isArray(parsed)) {
-      throw new Error('GEMINI_PROJECTS must be a JSON array of { id, apiKey } objects.');
-    }
-
-    const projects = parsed.map((entry, index) => {
-      if (
-        !entry ||
-        typeof entry !== 'object' ||
-        !('apiKey' in entry) ||
-        typeof entry.apiKey !== 'string' ||
-        entry.apiKey.trim().length <= 10 ||
-        !('id' in entry) ||
-        typeof entry.id !== 'string' ||
-        !entry.id.trim()
-      ) {
-        throw new Error(`GEMINI_PROJECTS entry ${index + 1} must have a non-empty id and API key.`);
-      }
-      return { id: entry.id.trim(), apiKey: entry.apiKey.trim() };
-    });
-    if (new Set(projects.map((project) => project.id)).size !== projects.length) {
-      throw new Error('GEMINI_PROJECTS project ids must be unique.');
-    }
-    if (new Set(projects.map((project) => project.apiKey)).size !== projects.length) {
-      throw new Error('GEMINI_PROJECTS API keys must be unique; use one key per independent project.');
-    }
-    return projects;
-  }
-
-  const keys = [...new Set([...legacyKeys, ...(defaultKey ? [defaultKey] : [])])];
-  return keys.map((apiKey, index) => ({ id: `legacy-${index + 1}`, apiKey }));
+  const keys = [...new Set([...apiKeys, ...(defaultKey ? [defaultKey] : [])])];
+  return keys.map((apiKey, index) => ({ id: `account-${index + 1}`, apiKey }));
 }
 
 function utcDay(timestamp: number): string {

@@ -4,40 +4,18 @@ import { GeminiQuotaScheduler, parseGeminiProjects } from './geminiQuotaSchedule
 const quota = { rpm: 1, rpd: 2, maxConcurrent: 1 };
 
 describe('parseGeminiProjects', () => {
-  it('parses six separately named projects', () => {
-    const projects = Array.from({ length: 6 }, (_, index) => ({
-      id: `project-${index + 1}`,
-      apiKey: `project-api-key-${index + 1}`,
-    }));
-    expect(parseGeminiProjects(JSON.stringify(projects), [], undefined)).toHaveLength(6);
+  it('parses list of independent API keys into project objects', () => {
+    const keys = Array.from({ length: 6 }, (_, index) => `project-api-key-${index + 1}`);
+    const projects = parseGeminiProjects(keys, undefined);
+    expect(projects).toHaveLength(6);
+    expect(projects[0]).toEqual({ id: 'account-1', apiKey: 'project-api-key-1' });
   });
 
-  it('rejects duplicate project ids instead of silently merging quota pools', () => {
-    expect(() => parseGeminiProjects(
-      JSON.stringify([
-        { id: 'same', apiKey: 'first-project-api-key' },
-        { id: 'same', apiKey: 'second-project-api-key' },
-      ]),
-      [],
-      undefined,
-    )).toThrow('must be unique');
-  });
-
-  it('rejects reusing a key across project entries', () => {
-    expect(() => parseGeminiProjects(
-      JSON.stringify([
-        { id: 'one', apiKey: 'same-project-api-key' },
-        { id: 'two', apiKey: 'same-project-api-key' },
-      ]),
-      [],
-      undefined,
-    )).toThrow('API keys must be unique');
-  });
-
-  it('keeps backwards compatibility with legacy key lists', () => {
-    expect(parseGeminiProjects(undefined, ['first-legacy-api-key'], 'second-legacy-api-key')).toEqual([
-      { id: 'legacy-1', apiKey: 'first-legacy-api-key' },
-      { id: 'legacy-2', apiKey: 'second-legacy-api-key' },
+  it('deduplicates API keys and appends defaultKey if distinct', () => {
+    expect(parseGeminiProjects(['key-1', 'key-1', 'key-2'], 'key-3')).toEqual([
+      { id: 'account-1', apiKey: 'key-1' },
+      { id: 'account-2', apiKey: 'key-2' },
+      { id: 'account-3', apiKey: 'key-3' },
     ]);
   });
 });

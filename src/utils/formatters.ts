@@ -315,3 +315,60 @@ export function parseNumberFromDots(str: string | null | undefined): number {
   const num = parseInt(digits, 10);
   return isNaN(num) ? 0 : num;
 }
+
+/**
+ * Chuẩn hóa tên tiếng Việt loại bỏ dấu, khoảng trắng thừa và ký tự đặc biệt
+ */
+export function normalizeVietnamese(str?: string | null): string {
+  if (!str) return '';
+  return str
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Kiểm tra xem hai tên có cùng chỉ một người hay không:
+ * - So sánh không phân biệt hoa thường và không phân biệt dấu tiếng Việt (TRƯƠNG ANH TUẤN === Truong Anh Tuan)
+ * - Bỏ qua các tiền tố y tế: "bệnh nhân", "bn", "ông", "bà", "anh", "chị", "em", "cháu"
+ * - So sánh họ tên hoặc chuỗi chứa nhau
+ */
+export function isSamePersonName(name1?: string | null, name2?: string | null): boolean {
+  if (!name1 || !name2) return false;
+  const n1 = normalizeVietnamese(name1);
+  const n2 = normalizeVietnamese(name2);
+  if (!n1 || !n2) return false;
+  if (n1 === n2) return true;
+
+  const cleanPrefixes = (s: string) =>
+    s
+      .replace(/^(ho va ten|ho ten|ten bn|ten benh nhan|benh nhan|bn|khach hang|nguoi benh|ong|ba|anh|chi|chau|em)\s+/i, '')
+      .replace(/\s+(nam|nu|tuoi|\d+\s*t|\d+\s*tuoi)$/i, '')
+      .trim();
+
+  const c1 = cleanPrefixes(n1);
+  const c2 = cleanPrefixes(n2);
+  if (c1 === c2) return true;
+
+  if (c1.length >= 4 && c2.length >= 4) {
+    if (c1.includes(c2) || c2.includes(c1)) return true;
+  }
+
+  // Token check (first name + last name)
+  const t1 = c1.split(' ').filter(Boolean);
+  const t2 = c2.split(' ').filter(Boolean);
+  if (t1.length >= 2 && t2.length >= 2) {
+    const first1 = t1[t1.length - 1];
+    const last1 = t1[0];
+    const first2 = t2[t2.length - 1];
+    const last2 = t2[0];
+    if (first1 === first2 && last1 === last2) return true;
+  }
+
+  return false;
+}
