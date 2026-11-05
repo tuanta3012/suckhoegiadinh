@@ -6,6 +6,7 @@ import { SecureStoragePlugin } from 'capacitor-secure-storage-plugin';
  * Check if the app is running as a native app (iOS/Android)
  */
 const isNative = Capacitor.isNativePlatform();
+const LEGACY_GEMINI_KEYS_STORAGE_KEY = 'stk_gemini_api_keys_pool';
 
 /**
  * Securely store a key-value pair.
@@ -124,6 +125,18 @@ export async function removeSecureItem(key: string): Promise<void> {
  */
 export async function autoCleanupStartupCache(): Promise<void> {
   try {
+    await removeSecureItem(LEGACY_GEMINI_KEYS_STORAGE_KEY);
+    if (isNative) {
+      try {
+        await Preferences.remove({ key: LEGACY_GEMINI_KEYS_STORAGE_KEY });
+      } catch (error) {
+        console.warn('[SecureStorage] Could not clear legacy Gemini key preferences.', error);
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(LEGACY_GEMINI_KEYS_STORAGE_KEY);
+    }
+
     const PRESERVED_PREFIXES = [
       'savings_',
       'google_drive_',

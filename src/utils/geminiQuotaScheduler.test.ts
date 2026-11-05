@@ -21,7 +21,7 @@ describe('parseGeminiProjects', () => {
 });
 
 describe('GeminiQuotaScheduler', () => {
-  it('rotates calls across independent projects and enforces per-project RPM', async () => {
+  it('rotates calls across independent projects and waits when per-project RPM is exhausted', async () => {
     const scheduler = new GeminiQuotaScheduler([
       { id: 'one', apiKey: 'first-project-api-key' },
       { id: 'two', apiKey: 'second-project-api-key' },
@@ -31,7 +31,7 @@ describe('GeminiQuotaScheduler', () => {
     const second = await scheduler.acquire('analysis', 'model-a', quota, new Set(), 100);
     expect(first.project.id).not.toBe(second.project.id);
     await expect(scheduler.acquire('analysis', 'model-a', quota, new Set(), 100))
-      .rejects.toThrow('No RPM capacity remains');
+      .rejects.toThrow('Timed out waiting for an available analysis Gemini quota slot.');
     first.release();
     second.release();
   });
@@ -44,6 +44,39 @@ describe('GeminiQuotaScheduler', () => {
     scheduler.markRateLimited('one', 'model-a', 60_000);
 
     const lease = await scheduler.acquire('analysis', 'model-a', quota, new Set(), 100);
+    expect(lease.project.id).toBe('two');
+    lease.release();
+  });
+
+  it('can reserve a fallback model on the same project and accounts for that model separately', async () => {
+    const scheduler = new GeminiQuotaScheduler([
+      { id: 'one', apiKey: 'first-project-api-key' },
+      { id: 'two', apiKey: 'second-project-api-key' },
+    ]);
+
+    const primary = await scheduler.acquire('digitization', 'model-primary', quota, new Set(), 100);
+    const fallback = await scheduler.acquire(
+      'digitization',
+      'model-fallback',
+      quota,
+      new Set(),
+      100,
+      primary.project.id,
+    );
+
+    expect(fallback.project.id).toBe(primary.project.id);
+    primary.release();
+    fallback.release();
+  });
+
+  it('skips a project during its temporary cooldown', async () => {
+    const scheduler = new GeminiQuotaScheduler([
+      { id: 'one', apiKey: 'first-project-api-key' },
+      { id: 'two', apiKey: 'second-project-api-key' },
+    ]);
+    scheduler.markProjectCooldown('one', 10_000);
+
+    const lease = await scheduler.acquire('digitization', 'model-a', quota, new Set(), 100);
     expect(lease.project.id).toBe('two');
     lease.release();
   });

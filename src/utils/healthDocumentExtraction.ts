@@ -87,9 +87,11 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
     for (const metric of result.metrics) {
       if (!isRecord(metric) || typeof metric.name !== 'string' || !metric.name.trim()) continue;
       const name = metric.name.trim();
-      const standardKey = typeof metric.standardKey === 'string' && metric.standardKey.trim()
-        ? metric.standardKey.trim()
-        : normalizeStandardKey(name);
+      const standardKey = normalizeStandardKey(
+        typeof metric.standardKey === 'string' && metric.standardKey.trim()
+          ? metric.standardKey
+          : name,
+      );
       const cleanedMetric: JsonRecord = {
         ...metric,
         name,
@@ -98,7 +100,12 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
       if (typeof metric.status === 'string') {
         cleanedMetric.status = metric.status.trim();
       }
-      metrics.set(standardKey.toLowerCase(), cleanedMetric);
+      const identity = [
+        standardKey.toLowerCase(),
+        String(metric.value ?? ''),
+        typeof metric.unit === 'string' ? metric.unit.trim().toLowerCase() : '',
+      ].join('_');
+      metrics.set(identity, cleanedMetric);
     }
     result.metrics = Array.from(metrics.values());
   }
@@ -165,4 +172,3 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord
   if (advice.length) merged.advice = advice.join('\n');
   return cleanExtractedJson(merged);
 }
-

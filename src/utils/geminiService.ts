@@ -449,7 +449,10 @@ export async function summarizeHealthProfile(
     member,
     profile,
   });
-  return data.summary;
+  if (typeof data.summary !== 'string' || !data.summary.trim()) {
+    throw new Error('AI chưa trả về bản tóm tắt hợp lệ. Vui lòng thử lại sau.');
+  }
+  return data.summary.trim();
 }
 
 /**
@@ -466,6 +469,9 @@ export async function askHealthAssistant(
     profile,
     stream: false,
   });
+  if (typeof data.answer !== 'string' || !data.answer.trim()) {
+    throw new Error('Trợ lý AI chưa trả về câu trả lời hợp lệ. Vui lòng thử lại.');
+  }
   return data.answer;
 }
 
@@ -489,8 +495,12 @@ export async function streamHealthAssistant(
     body: JSON.stringify({ question, member, profile, stream: true }),
   });
 
-  if (!response.ok || !response.body) {
-    throw new Error(`Lỗi kết nối máy chủ (${response.status})`);
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(errorBody?.error || `Máy chủ trợ lý AI trả về mã lỗi ${response.status}.`);
+  }
+  if (!response.body) {
+    throw new Error('Máy chủ trợ lý AI không trả về luồng phản hồi. Vui lòng thử lại.');
   }
 
   const reader = response.body.getReader();
@@ -545,26 +555,44 @@ export async function analyzeComprehensiveHealth(
     profile,
   });
 
+  const result = data.result;
+  if (
+    !isRecord(result) ||
+    typeof result.overallAssessment !== 'string' ||
+    !Array.isArray(result.crossCorrelations) ||
+    !Array.isArray(result.velocityTrends) ||
+    !Array.isArray(result.chronicSurveillance) ||
+    !isRecord(result.roadmap) ||
+    !Array.isArray(result.roadmap.criticalAlerts) ||
+    !Array.isArray(result.roadmap.specialistReferrals) ||
+    !isRecord(result.roadmap.timeBoundPlan) ||
+    !Array.isArray(result.roadmap.timeBoundPlan.next3Months) ||
+    !Array.isArray(result.roadmap.timeBoundPlan.next6Months) ||
+    !Array.isArray(result.roadmap.timeBoundPlan.next12Months)
+  ) {
+    throw new Error('AI trả về phân tích chưa đầy đủ. Hồ sơ chưa được cập nhật; vui lòng thử phân tích lại.');
+  }
+
   const aiAnalysisFallback: AiAnalysisBlock = {
     lastAnalyzedDate: new Date().toISOString().slice(0, 10),
-    overviewSummary: data.result.overallAssessment,
-    criticalAlerts: data.result.roadmap.criticalAlerts,
-    chronicConditionsTracking: data.result.chronicSurveillance.map(
+    overviewSummary: result.overallAssessment,
+    criticalAlerts: result.roadmap.criticalAlerts,
+    chronicConditionsTracking: result.chronicSurveillance.map(
       (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`
     ),
     actionRoadmap: {
-      specialistConsultation: data.result.roadmap.specialistReferrals.map((s) => s.specialty),
-      dietaryModifications: data.result.roadmap.timeBoundPlan.next3Months.filter((i) =>
+      specialistConsultation: result.roadmap.specialistReferrals.map((s) => s.specialty),
+      dietaryModifications: result.roadmap.timeBoundPlan.next3Months.filter((i) =>
         /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i)
       ),
-      followUpSchedule: data.result.roadmap.timeBoundPlan.next3Months.find((i) =>
+      followUpSchedule: result.roadmap.timeBoundPlan.next3Months.find((i) =>
         /tái khám|kiểm tra lại|xét nghiệm/i.test(i)
       ) || 'Tái khám kiểm tra lại sau 3 tháng.',
     },
   };
 
   return {
-    result: data.result,
+    result,
     aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
   };
 }

@@ -99,6 +99,39 @@ export function createHealthProfile(member: FamilyMember, now = new Date().toISO
   };
 }
 
+export function mergeFamilyMembers(
+  current: FamilyMember[],
+  incoming: FamilyMember[],
+  baseline: FamilyMember[] = current,
+): FamilyMember[] {
+  const members = new Map(current.map((member) => [member.id, member]));
+  const baselineById = new Map(baseline.map((member) => [member.id, member]));
+  for (const member of incoming) {
+    const latest = members.get(member.id);
+    const previous = baselineById.get(member.id);
+    if (!latest || !previous) {
+      members.set(member.id, member);
+      continue;
+    }
+
+    members.set(member.id, {
+      id: latest.id,
+      name: member.name !== previous.name ? member.name : latest.name,
+      gender: member.gender !== previous.gender ? member.gender : latest.gender,
+      birthDate: member.birthDate !== previous.birthDate ? member.birthDate : latest.birthDate,
+      role: member.role !== previous.role ? member.role : latest.role,
+      driveFolderId: member.driveFolderId !== previous.driveFolderId
+        ? member.driveFolderId
+        : latest.driveFolderId,
+      profileFileId: member.profileFileId !== previous.profileFileId
+        ? member.profileFileId
+        : latest.profileFileId,
+      avatarUrl: member.avatarUrl !== previous.avatarUrl ? member.avatarUrl : latest.avatarUrl,
+    });
+  }
+  return [...members.values()];
+}
+
 export function mergeHealthProfiles(
   current: HealthProfile,
   incoming: HealthProfile,

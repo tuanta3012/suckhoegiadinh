@@ -1,6 +1,6 @@
 import { getGoogleAccessToken, getValidGoogleAccessToken, trySilentRefresh } from './googleDriveService';
 import type { FamilyMember, HealthFamily, HealthProfile } from '../types';
-import { canDeleteRawSource, mergeHealthProfiles, parseHealthProfile } from './healthProfile';
+import { canDeleteRawSource, mergeFamilyMembers, mergeHealthProfiles, parseHealthProfile } from './healthProfile';
 import { registerHealthWorkspaceRelay } from './workspaceShareRelay';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
@@ -319,14 +319,10 @@ export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: 
       throw new Error('family.json không hợp lệ; không thể cập nhật danh sách thành viên.');
     }
 
-    const members = new Map(latest.members.map((member) => [member.id, member]));
-    for (const member of family.members) {
-      if (!members.has(member.id)) members.set(member.id, member);
-    }
     const next: HealthFamily = {
       ...latest,
       ...family,
-      members: [...members.values()],
+      members: mergeFamilyMembers(latest.members, family.members, workspace.family.members),
       createdAt: latest.createdAt || family.createdAt,
       updatedAt: new Date().toISOString(),
     };

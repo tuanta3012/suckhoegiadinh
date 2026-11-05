@@ -5,6 +5,7 @@ import {
   canDeleteRawSource,
   createHealthProfile,
   digitizeHealthSource,
+  mergeFamilyMembers,
   mergeHealthProfiles,
   parseHealthProfile,
 } from './healthProfile';
@@ -31,6 +32,21 @@ const event: HealthEvent = {
 };
 
 describe('health profile', () => {
+  it('applies member updates while retaining members added concurrently on another device', () => {
+    const updatedMember = { ...member, name: 'Mẹ mới', avatarUrl: 'avatar.png' };
+    const remotelyUpdatedMember = { ...member, gender: 'female' as const };
+    const concurrentMember = { ...member, id: 'member-2', name: 'Bố' };
+
+    expect(mergeFamilyMembers(
+      [remotelyUpdatedMember, concurrentMember],
+      [updatedMember],
+      [member],
+    )).toEqual([
+      { ...updatedMember, gender: 'female' },
+      concurrentMember,
+    ]);
+  });
+
   it('keeps uploaded originals ineligible for deletion until a linked event is digitized', () => {
     let profile = createHealthProfile(member);
     profile = addHealthSource(profile, {

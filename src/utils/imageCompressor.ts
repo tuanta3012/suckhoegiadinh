@@ -7,8 +7,8 @@ export async function compressImageIfNeeded(
   maxDimension = 2048,
   quality = 0.85,
 ): Promise<File> {
-  if (!file.type.startsWith('image/') || file.size < 800 * 1024) {
-    return file; // If not an image or already under 800KB, return as-is
+  if (!file.type.startsWith('image/')) {
+    return file;
   }
 
   return new Promise((resolve) => {
@@ -20,16 +20,21 @@ export async function compressImageIfNeeded(
       let { width, height } = img;
 
       if (width <= maxDimension && height <= maxDimension) {
-        resolve(file);
-        return;
-      }
-
-      if (width > height) {
+        if (file.size < 800 * 1024) {
+          resolve(file);
+          return;
+        }
+      } else if (width > height) {
         height = Math.round((height * maxDimension) / width);
         width = maxDimension;
       } else {
         width = Math.round((width * maxDimension) / height);
         height = maxDimension;
+      }
+
+      if (width <= 0 || height <= 0) {
+        resolve(file);
+        return;
       }
 
       const canvas = document.createElement('canvas');

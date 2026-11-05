@@ -2,6 +2,26 @@ import { describe, expect, it } from 'vitest';
 import { mergeExtractedBatches } from './healthDocumentExtraction';
 
 describe('mergeExtractedBatches', () => {
+  it('normalizes supplied standard keys to stable canonical names', () => {
+    const merged = mergeExtractedBatches([{
+      firstPage: 1,
+      lastPage: 1,
+      extracted: {
+        metrics: [
+          { name: 'Đường huyết', standardKey: 'blood glucose', value: 5.2, unit: 'mmol/L' },
+          { name: 'Đường huyết', standardKey: 'GLUCOSE', value: 6.1, unit: 'mmol/L' },
+          { name: 'HbA1c', standardKey: 'hba1c', value: 6, unit: '%' },
+        ],
+      },
+    }]);
+
+    expect(merged.metrics).toEqual([
+      { name: 'Đường huyết', standardKey: 'GLUCOSE', value: 5.2, unit: 'mmol/L' },
+      { name: 'Đường huyết', standardKey: 'GLUCOSE', value: 6.1, unit: 'mmol/L' },
+      { name: 'HbA1c', standardKey: 'HbA1c', value: 6, unit: '%' },
+    ]);
+  });
+
   it('merges page data, removes duplicates, and retains page provenance', () => {
     const merged = mergeExtractedBatches([
       {

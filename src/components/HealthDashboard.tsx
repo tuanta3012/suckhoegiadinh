@@ -263,6 +263,72 @@ export function HealthDashboard({
   const profilesRef = useRef<Record<string, HealthProfile>>({});
   const selectedMemberIdRef = useRef<string>(selectedMemberId);
   const uploadQueueRef = useRef<File[]>([]);
+  const authIdentityRef = useRef({ userEmail, driveAuthorized });
+  authIdentityRef.current = { userEmail, driveAuthorized };
+  const previousSelectedMemberIdRef = useRef(selectedMemberId);
+  const previousWorkspaceRootRef = useRef(workspace?.rootFolderId);
+
+  useEffect(() => {
+    if (previousSelectedMemberIdRef.current !== selectedMemberId) {
+      previousSelectedMemberIdRef.current = selectedMemberId;
+      setChatMessages([]);
+      setChatInput('');
+      setSelectedMetric('');
+      setTimelineFilter('all');
+    }
+  }, [selectedMemberId]);
+
+  useEffect(() => {
+    if (previousWorkspaceRootRef.current !== workspace?.rootFolderId) {
+      previousWorkspaceRootRef.current = workspace?.rootFolderId;
+      setChatMessages([]);
+      setChatInput('');
+      setSelectedMetric('');
+      setTimelineFilter('all');
+    }
+  }, [workspace?.rootFolderId]);
+
+  useEffect(() => {
+    if (driveAuthorized && userEmail) return;
+
+    workspaceRef.current = null;
+    profilesRef.current = {};
+    selectedMemberIdRef.current = '';
+    uploadQueueRef.current = [];
+    setWorkspace(null);
+    setProfiles({});
+    setProfileErrors({});
+    setSelectedMemberId('');
+    setRootIdInput('');
+    setErrorMessage('');
+    setWorkspaceAssignments([]);
+    setInviteEmail('');
+    setActiveTab('overview');
+    setChatMessages([]);
+    setChatInput('');
+    setDigitizationDraft(null);
+    setDigitizationError('');
+    setUploadQueue([]);
+    setQueueStatus(null);
+    setSelectedMetric('');
+    setTimelineFilter('all');
+    setIsUploading(false);
+    setIsLoading(false);
+    setIsChatting(false);
+    setIsSummarizing(false);
+    setIsRefining(false);
+    setTrackerState((previous) => ({
+      ...previous,
+      isOpen: false,
+      file: null,
+      driveFile: null,
+      memberId: '',
+      partialExtracted: {},
+      error: null,
+      detectedMemberMatch: null,
+      isRoutingDecisionRequired: false,
+    }));
+  }, [driveAuthorized, userEmail]);
 
   useEffect(() => {
     workspaceRef.current = workspace;
@@ -352,7 +418,10 @@ export function HealthDashboard({
       showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp lên trang chính của ${targetMember.name}!`, 'success');
     } catch (error) {
       console.warn('[Auto Family Doctor Summary Warning]:', error);
-      showToast('Lỗi khi tự động phân tích chuyên sâu.', 'error');
+      showToast(
+        error instanceof Error ? error.message : 'Lỗi khi tự động phân tích chuyên sâu.',
+        'error',
+      );
     } finally {
       setIsSummarizing(false);
     }
@@ -529,6 +598,9 @@ export function HealthDashboard({
   }, [workspace?.rootFolderId]);
 
   const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
+    const authIdentity = authIdentityRef.current;
+    if (!authIdentity.driveAuthorized || !authIdentity.userEmail) return {};
+
     const entries = await Promise.all(
       nextWorkspace.family.members.map(async (member) => {
         try {
@@ -543,6 +615,12 @@ export function HealthDashboard({
         }
       })
     );
+    if (
+      authIdentityRef.current.userEmail !== authIdentity.userEmail ||
+      !authIdentityRef.current.driveAuthorized
+    ) {
+      return {};
+    }
     const nextProfiles: Record<string, HealthProfile> = {};
     const nextErrors: Record<string, string> = {};
     for (const [memberId, profile, error] of entries) {
@@ -561,10 +639,18 @@ export function HealthDashboard({
 
   const openWorkspace = useCallback(
     async (id: string) => {
+      const authIdentity = authIdentityRef.current;
+      if (!authIdentity.driveAuthorized || !authIdentity.userEmail) return;
       setIsLoading(true);
       setErrorMessage('');
       try {
         const opened = await openHealthWorkspace(id.trim());
+        if (
+          authIdentityRef.current.userEmail !== authIdentity.userEmail ||
+          !authIdentityRef.current.driveAuthorized
+        ) {
+          return;
+        }
         if (userEmail) {
           localStorage.setItem(
             `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
@@ -911,7 +997,15 @@ export function HealthDashboard({
     setShowQuickActionModal(false);
 
     // 1. Tối ưu ảnh chụp phía client
-    const processedFile = await compressImageIfNeeded(file);
+    let processedFile: File;
+    try {
+      processedFile = await compressImageIfNeeded(file);
+    } catch (error) {
+      setIsUploading(false);
+      showToast(error instanceof Error ? error.message : 'Không thể chuẩn bị tệp hình ảnh.', 'error');
+      processNextInQueue();
+      return;
+    }
 
     // Mở ngay modal theo dõi tiến trình
     setTrackerState({
@@ -922,7 +1016,7 @@ export function HealthDashboard({
       progressPercent: 25,
       progressMessage: existingDriveFileId
         ? 'Tệp đã có trên Drive. Đang chạy AI Vision quét lại dữ liệu...'
-        : 'Đang khởi động luồng song song: Tải Drive & AI Vision đọc tài liệu...',
+        : 'Đang tải tài liệu lên Drive trước khi bắt đầu số hóa...',
       driveFile: null,
       modelUsed: 'gemini-3.5-flash-lite',
       partialExtracted: {},
@@ -943,11 +1037,7 @@ export function HealthDashboard({
         };
         setTrackerState((prev) => ({ ...prev, driveFile: reusedUploaded }));
       } else {
-        // Tệp mới hoàn toàn: Tải lên Google Drive và chạy số hóa song song
-        const uploadPromise = uploadRawHealthFile(effectiveMember, processedFile);
-        const extractionPromise = runDocumentExtraction(processedFile, effectiveMember);
-
-        const [uploaded] = await Promise.all([uploadPromise, extractionPromise]);
+        const uploaded = await uploadRawHealthFile(effectiveMember, processedFile);
         setTrackerState((prev) => ({ ...prev, driveFile: uploaded }));
 
         const { hash } = await computeFileFingerprint(processedFile);
@@ -960,14 +1050,15 @@ export function HealthDashboard({
           uploadedAt: uploaded.createdTime || new Date().toISOString(),
           status: 'pending',
         };
-        
-        // Đảm bảo lấy profile mới nhất từ state hoặc tạo mới
-        setProfiles(prev => {
-          const current = prev[effectiveMember!.id] || createHealthProfile(effectiveMember!);
-          const stagedProfile = addHealthSource(current, source);
-          void saveHealthProfile(effectiveMember!.profileFileId, stagedProfile);
-          return { ...prev, [effectiveMember!.id]: stagedProfile };
-        });
+        const current = profilesRef.current[effectiveMember.id] ||
+          currentProfile ||
+          createHealthProfile(effectiveMember);
+        const stagedProfile = addHealthSource(current, source);
+        const savedProfile = await saveHealthProfile(effectiveMember.profileFileId, stagedProfile);
+        profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
+        setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
+
+        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id);
       }
 
     } catch (error) {
@@ -1027,7 +1118,21 @@ export function HealthDashboard({
   ) {
     try {
       const currentProfiles = overrideProfiles || profilesRef.current;
-      const profile = currentProfiles[member.id] || createHealthProfile(member);
+      let profile = currentProfiles[member.id] || createHealthProfile(member);
+      if (driveFileId && !profile.sources.some((source) => source.driveFileId === driveFileId)) {
+        const source = Object.values(currentProfiles)
+          .flatMap((candidate) => candidate.sources)
+          .find((candidate) => candidate.driveFileId === driveFileId);
+        if (!source) {
+          throw new Error('Không tìm thấy tài liệu nguồn cần liên kết với hồ sơ thành viên đã chọn.');
+        }
+        profile = await saveHealthProfile(
+          member.profileFileId,
+          addHealthSource(profile, source),
+        );
+        profilesRef.current = { ...profilesRef.current, [member.id]: profile };
+        setProfiles((previous) => ({ ...previous, [member.id]: profile }));
+      }
       const rawEvent: HealthEvent = {
         id: `event_${crypto.randomUUID()}`,
         sourceFileId: driveFileId,

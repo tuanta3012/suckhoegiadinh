@@ -36,6 +36,7 @@ export class GeminiQuotaScheduler {
   private readonly cursors = new Map<string, number>();
   private readonly disabledProjects = new Set<string>();
   private readonly disabledProjectModels = new Set<string>();
+  private readonly projectCooldownUntil = new Map<string, number>();
 
   constructor(private readonly projects: GeminiProject[]) {}
 
@@ -49,11 +50,13 @@ export class GeminiQuotaScheduler {
     quota: GeminiQuota,
     excludedProjectIds: ReadonlySet<string>,
     timeoutMs: number,
+    preferredProjectId?: string,
   ): Promise<{ project: GeminiProject; release: () => void }> {
     const startedAt = Date.now();
     const queueKey = `${task}:${model}`;
     while (Date.now() - startedAt < timeoutMs) {
       const candidates = this.getOrderedCandidates(queueKey).filter((project) =>
+        (!preferredProjectId || project.id === preferredProjectId) &&
         !excludedProjectIds.has(project.id) &&
         !this.disabledProjects.has(project.id) &&
         !this.disabledProjectModels.has(`${project.id}:${model}`),
@@ -64,6 +67,7 @@ export class GeminiQuotaScheduler {
       let nextWaitMs = timeoutMs - (Date.now() - startedAt);
       let hasDailyQuota = false;
       let blockedByConcurrency = false;
+      let blockedByCapacity = false;
 
       for (const project of candidates) {
         const usage = this.getUsage(project.id, model);
@@ -76,11 +80,22 @@ export class GeminiQuotaScheduler {
         if (usage.dayRequests >= quota.rpd) continue;
         hasDailyQuota = true;
 
+        const projectCooldownWait = Math.max(0, (this.projectCooldownUntil.get(project.id) || 0) - now);
+        if (projectCooldownWait > 0) {
+          blockedByCapacity = true;
+          nextWaitMs = Math.min(nextWaitMs, projectCooldownWait);
+          continue;
+        }
+
         const requestWait = usage.minuteRequests.length >= quota.rpm
           ? Math.max(1, 60_000 - (now - usage.minuteRequests[0]))
           : 0;
         const cooldownWait = Math.max(0, usage.cooldownUntil - now);
-        if (requestWait > 0 || cooldownWait > 0) continue;
+        if (requestWait > 0 || cooldownWait > 0) {
+          blockedByCapacity = true;
+          nextWaitMs = Math.min(nextWaitMs, Math.max(requestWait, cooldownWait));
+          continue;
+        }
         if (usage.active >= quota.maxConcurrent) {
           blockedByConcurrency = true;
           nextWaitMs = Math.min(nextWaitMs, 250);
@@ -101,7 +116,7 @@ export class GeminiQuotaScheduler {
       if (!hasDailyQuota) {
         throw new Error(`No daily ${task} quota remains for ${model} in any configured Gemini project.`);
       }
-      if (!blockedByConcurrency) {
+      if (!blockedByConcurrency && !blockedByCapacity) {
         throw new Error(`No RPM capacity remains for ${model} in the configured projects.`);
       }
       await new Promise((resolve) => setTimeout(resolve, Math.min(nextWaitMs, 1_000)));
@@ -112,6 +127,13 @@ export class GeminiQuotaScheduler {
   markRateLimited(projectId: string, model: string, retryAfterMs = 60_000): void {
     const usage = this.getUsage(projectId, model);
     usage.cooldownUntil = Math.max(usage.cooldownUntil, Date.now() + retryAfterMs);
+  }
+
+  markProjectCooldown(projectId: string, cooldownMs: number): void {
+    this.projectCooldownUntil.set(
+      projectId,
+      Math.max(this.projectCooldownUntil.get(projectId) || 0, Date.now() + cooldownMs),
+    );
   }
 
   markDailyQuotaExhausted(projectId: string, model: string): void {

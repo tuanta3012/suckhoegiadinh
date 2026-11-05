@@ -41,14 +41,15 @@ function getAttemptTimeout(task: GeminiTask): number {
 const PORT = getPort();
 const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(MAX_DOCUMENT_BYTES / 3) * 4;
-const GEMINI_RATE_LIMIT_PER_MINUTE = 100;
+const GEMINI_RATE_LIMIT_PER_MINUTE = 20;
 const rateLimitWindows = new Map<string, { startedAt: number; count: number }>();
 const GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS = 18_000;
 const GEMINI_DIGITIZATION_ATTEMPT_TIMEOUT_MS = 45_000;
 const GEMINI_ANALYSIS_TIMEOUT_MS = 110_000;
 const GEMINI_OCR_TIMEOUT_MS = 600_000;
-const OCR_BATCH_PAGES = 1;
-const OCR_BATCH_CONCURRENCY = 18;
+const OCR_BATCH_PAGES = 3;
+const OCR_BATCH_CONCURRENCY = 6;
+const GEMINI_OCR_PROJECT_COOLDOWN_MS = 10_000;
 let quotaScheduler: GeminiQuotaScheduler | null = null;
 
 // Quotas are tracked independently for each configured project and model.
@@ -102,6 +103,8 @@ function recordProjectFailure(
   projectId: string,
   model: string,
   error: unknown,
+  disableInvalidProject = true,
+  disableUnavailableModel = true,
 ): boolean {
   const { status, message } = describeGeminiError(error);
   if (status === 429) {
@@ -114,11 +117,11 @@ function recordProjectFailure(
     status === 403 ||
     /api key.{0,30}(invalid|not valid)|invalid api key|api_key_invalid/i.test(message)
   ) {
-    scheduler.markProjectUnavailable(projectId);
+    if (disableInvalidProject) scheduler.markProjectUnavailable(projectId);
     return true;
   }
   if (status === 404 || /model.{0,40}(not found|unsupported|not available)/i.test(message)) {
-    scheduler.markModelUnavailable(projectId, model);
+    if (disableUnavailableModel) scheduler.markModelUnavailable(projectId, model);
     return true;
   }
   return status !== 400;
@@ -244,10 +247,14 @@ async function callGeminiModel(
 }
 
 async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ text: string; modelUsed: string }> {
+  if (options.task === 'digitization') {
+    return executeDigitizationWithFailover(options);
+  }
+
   const scheduler = getQuotaScheduler();
   const projects = scheduler.getProjects();
   if (projects.length === 0) {
-    throw new Error('Chưa cấu hình GEMINI_PROJECTS hoặc GEMINI_API_KEYS trên máy chủ.');
+    throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ.');
   }
 
   const models = TASK_MODELS[options.task];
@@ -353,6 +360,106 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
   throw lastError || new Error('Đã hết quota hoặc thời gian chờ cho các model Gemini đã cấu hình.');
 }
 
+async function executeDigitizationWithFailover(
+  options: ExecuteOptions,
+): Promise<{ text: string; modelUsed: string }> {
+  const scheduler = getQuotaScheduler();
+  const projects = scheduler.getProjects();
+  if (projects.length === 0) {
+    throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ.');
+  }
+
+  const [primaryModel, fallbackModel] = TASK_MODELS.digitization;
+  const deadline = Date.now() + (options.timeoutMs || GEMINI_OCR_TIMEOUT_MS);
+  const quota = getTaskQuota('digitization');
+  const attemptedProjectIds = new Set<string>();
+  let lastError: Error | null = null;
+
+  while (attemptedProjectIds.size < projects.length && Date.now() < deadline) {
+    if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
+
+    const lease = await scheduler.acquire(
+      'digitization',
+      primaryModel,
+      quota,
+      attemptedProjectIds,
+      Math.min(5_000, deadline - Date.now()),
+    );
+    const { project } = lease;
+    attemptedProjectIds.add(project.id);
+
+    try {
+      try {
+        options.onProgress?.(`Đang xử lý bằng ${primaryModel} (Key: ${project.id})`);
+        const text = await callGeminiModel(
+          project.apiKey,
+          primaryModel,
+          options,
+          deadline,
+          options.signal,
+        );
+        return { text, modelUsed: primaryModel };
+      } catch (primaryError) {
+        if (options.signal?.aborted) throw primaryError;
+        lastError = primaryError instanceof Error ? primaryError : new Error(String(primaryError));
+        console.warn(
+          `[Gemini digitization] ${primaryModel} failed for Key ${project.id}: ${describeGeminiError(primaryError).message}`,
+        );
+
+        let fallbackError: unknown;
+        let fallbackLease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>> | undefined;
+        try {
+          fallbackLease = await scheduler.acquire(
+            'digitization',
+            fallbackModel,
+            quota,
+            new Set(),
+            Math.min(5_000, deadline - Date.now()),
+            project.id,
+          );
+          options.onProgress?.(
+            `Key ${project.id} lỗi với ${primaryModel}; đang thử dự phòng ${fallbackModel} trên cùng key...`,
+          );
+          const text = await callGeminiModel(
+            project.apiKey,
+            fallbackModel,
+            options,
+            deadline,
+            options.signal,
+          );
+          recordProjectFailure(scheduler, project.id, primaryModel, primaryError, false, false);
+          console.info(
+            `[Gemini digitization] Fallback ${fallbackModel} succeeded for Key ${project.id}.`,
+          );
+          return { text, modelUsed: fallbackModel };
+        } catch (error) {
+          if (options.signal?.aborted) throw error;
+          fallbackError = error;
+          lastError = error instanceof Error ? error : new Error(String(error));
+          console.warn(
+            `[Gemini digitization] ${fallbackModel} failed for Key ${project.id}: ${describeGeminiError(error).message}`,
+          );
+        } finally {
+          fallbackLease?.release();
+        }
+
+        recordProjectFailure(scheduler, project.id, primaryModel, primaryError, false, false);
+        if (fallbackLease) {
+          recordProjectFailure(scheduler, project.id, fallbackModel, fallbackError, false, false);
+        }
+        scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
+        options.onProgress?.(
+          `Hai model đều lỗi với Key ${project.id}; tạm nghỉ key 10 giây và chuyển sang key khác...`,
+        );
+      }
+    } finally {
+      lease.release();
+    }
+  }
+
+  throw lastError || new Error('Đã hết key Gemini khả dụng hoặc quá thời gian OCR.');
+}
+
 async function startServer() {
   quotaScheduler = new GeminiQuotaScheduler(getConfiguredProjects());
   const app = express();
@@ -369,6 +476,13 @@ async function startServer() {
       quotasPerProject: {
         digitization: { rpm: 15, rpd: 500, maxConcurrent: 3 },
         analysis: { rpm: 5, rpd: 20, maxConcurrent: 2 },
+      },
+      ocr: {
+        batchPages: OCR_BATCH_PAGES,
+        concurrentBatchesPerRequest: OCR_BATCH_CONCURRENCY,
+        failedKeyCooldownMs: GEMINI_OCR_PROJECT_COOLDOWN_MS,
+        primaryModel: TASK_MODELS.digitization[0],
+        fallbackModel: TASK_MODELS.digitization[1],
       },
       architecture: 'server-side-secure',
     });
@@ -569,7 +683,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
           type: 'progress',
           progressPercent: 46,
           message: effectiveMime === 'application/pdf'
-            ? `Đã chia PDF ${pageBatches.length} trang, khởi chạy 6 key xoay tua song song (3.5 Flash Lite / 3.1 Backup).`
+            ? `Đã chia PDF thành ${pageBatches.length} phần, xử lý tối đa 6 phần song song theo quota Gemini.`
             : 'Đã nhận tài liệu. Đang xếp lượt theo quota Gemini còn khả dụng.',
           totalPages: pageBatches.length,
         });
@@ -934,7 +1048,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
       if (stream) {
         const scheduler = getQuotaScheduler();
         const projects = scheduler.getProjects();
-        if (projects.length === 0) throw new Error('Chưa cấu hình GEMINI_PROJECTS hoặc GEMINI_API_KEYS.');
+        if (projects.length === 0) throw new Error('Chưa cấu hình GEMINI_API_KEYS.');
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');

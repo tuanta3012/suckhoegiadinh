@@ -282,12 +282,12 @@ export function AiDeepAnalysisCard({
 
           {/* Tầng 1: Cảnh báo đỏ */}
           {roadmap.criticalAlerts && roadmap.criticalAlerts.length > 0 && (
-            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-1">
-              <span className="font-bold text-rose-950 flex items-center gap-1.5">
-                <AlertOctagon className="w-4 h-4 text-rose-600" />
+            <div className="p-4 sm:p-5 rounded-2xl bg-rose-50 border-2 border-rose-300 text-rose-950 text-sm space-y-2 shadow-sm">
+              <span className="font-extrabold text-rose-950 flex items-center gap-2 text-sm sm:text-base">
+                <AlertOctagon className="w-5 h-5 text-rose-700 shrink-0" />
                 <span>Cảnh báo đỏ cấp thiết (Critical Alerts):</span>
               </span>
-              <ul className="list-disc list-inside space-y-1 font-semibold text-rose-900 pl-1">
+              <ul className="list-disc list-inside space-y-1.5 font-semibold text-rose-950 pl-1 leading-relaxed">
                 {roadmap.criticalAlerts.map((alert, idx) => (
                   <li key={idx}>{alert}</li>
                 ))}
@@ -318,14 +318,14 @@ export function AiDeepAnalysisCard({
 
           {/* Tầng 3: Lộ trình Mốc Thời gian 3-6-12 tháng */}
           {roadmap.timeBoundPlan && (
-            <div className="grid gap-2.5 sm:grid-cols-3 text-xs">
+            <div className="grid gap-2.5 sm:grid-cols-3 text-sm">
               {roadmap.timeBoundPlan.next3Months && roadmap.timeBoundPlan.next3Months.length > 0 && (
                 <div className="p-3 rounded-2xl bg-emerald-50/80 border border-emerald-200 space-y-1">
                   <span className="font-bold text-emerald-900 flex items-center gap-1">
                     <Clock className="w-3.5 h-3.5 text-emerald-600" />
                     <span>Lộ trình 3 tháng tới:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1 text-emerald-950 text-[11px] pl-0.5">
+                  <ul className="list-disc list-inside space-y-1.5 text-emerald-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
                     {roadmap.timeBoundPlan.next3Months.map((act, i) => (
                       <li key={i}>{act}</li>
                     ))}
@@ -339,7 +339,7 @@ export function AiDeepAnalysisCard({
                     <Calendar className="w-3.5 h-3.5 text-blue-600" />
                     <span>Lộ trình 6 tháng tới:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1 text-blue-950 text-[11px] pl-0.5">
+                  <ul className="list-disc list-inside space-y-1.5 text-blue-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
                     {roadmap.timeBoundPlan.next6Months.map((act, i) => (
                       <li key={i}>{act}</li>
                     ))}
@@ -353,7 +353,7 @@ export function AiDeepAnalysisCard({
                     <HeartPulse className="w-3.5 h-3.5 text-purple-600" />
                     <span>Tái khám 12 tháng:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1 text-purple-950 text-[11px] pl-0.5">
+                  <ul className="list-disc list-inside space-y-1.5 text-purple-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
                     {roadmap.timeBoundPlan.next12Months.map((act, i) => (
                       <li key={i}>{act}</li>
                     ))}
@@ -374,12 +374,12 @@ export function AiDeepAnalysisCard({
           </h5>
 
           {aiAnalysis.criticalAlerts && aiAnalysis.criticalAlerts.length > 0 && !roadmap?.criticalAlerts?.length && (
-            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-1">
-              <span className="font-bold text-rose-950 flex items-center gap-1.5">
-                <AlertOctagon className="w-4 h-4 text-rose-600" />
+            <div className="p-4 sm:p-5 rounded-2xl bg-rose-50 border-2 border-rose-300 text-rose-950 text-sm space-y-2 shadow-sm">
+              <span className="font-extrabold text-rose-950 flex items-center gap-2 text-sm sm:text-base">
+                <AlertOctagon className="w-5 h-5 text-rose-700 shrink-0" />
                 <span>Cảnh báo Y tế Quan trọng (criticalAlerts):</span>
               </span>
-              <ul className="list-disc list-inside space-y-1 font-semibold text-rose-900 pl-1">
+              <ul className="list-disc list-inside space-y-1.5 font-semibold text-rose-950 pl-1 leading-relaxed">
                 {aiAnalysis.criticalAlerts.map((alert, idx) => (
                   <li key={idx}>{alert}</li>
                 ))}
@@ -425,7 +425,7 @@ export function AiDeepAnalysisCard({
                     <Activity className="w-4 h-4 text-amber-600" />
                     <span>Hướng dẫn Dinh dưỡng & Lối sống:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1 text-amber-950 text-[11px] pl-0.5 font-medium">
+                  <ul className="list-disc list-inside space-y-1.5 text-amber-950 text-xs sm:text-sm pl-0.5 font-medium leading-relaxed">
                     {aiAnalysis.actionRoadmap.dietaryModifications.map((diet, idx) => (
                       <li key={idx}>{diet}</li>
                     ))}
