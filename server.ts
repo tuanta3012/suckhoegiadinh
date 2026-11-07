@@ -692,7 +692,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
   "date": "YYYY-MM-DD",
   "type": "comprehensive_exam" | "test_result" | "imaging" | "prescription" | "vaccination" | "discharge" | "other",
   "customCategory": "Tên phân loại tự động nếu type là other",
-  "patientName": "Họ và tên bệnh nhân ghi trên tài liệu (nếu có)",
+  "patientName": "Họ và tên bệnh nhân ghi trên tài liệu. BẮT BUỘC tự động chuẩn hóa viết hoa đúng quy tắc tên riêng có dấu tiếng Việt đầy đủ (VD: 'TRUONG AN TUAN' ➔ 'Trương An Tuấn', 'nguyen van a' ➔ 'Nguyễn Văn A').",
   "patientBirthDate": "YYYY-MM-DD hoặc YYYY (ngày sinh/năm sinh nếu có)",
   "patientGender": "Nam" | "Nữ" | "Khác",
   "facility": "Tên cơ sở y tế",

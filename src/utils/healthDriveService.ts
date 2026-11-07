@@ -188,19 +188,115 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
   );
 }
 
+export async function searchDriveFoldersByName(folderName: string): Promise<DriveFile[]> {
+  try {
+    const params = new URLSearchParams({
+      q: `mimeType = '${FOLDER_MIME}' and name = '${folderName.replace(/'/g, "\\'")}' and trashed = false`,
+      fields: `nextPageToken,files(${FILE_FIELDS})`,
+      pageSize: '100',
+    });
+    const result = await driveRequest<{ files?: DriveFile[] }>(
+      `${DRIVE_API}/files?${params.toString()}`,
+    );
+    return result.files || [];
+  } catch (error) {
+    console.warn('[Google Drive Search] Global search failed, falling back to root list:', error);
+    return [];
+  }
+}
+
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
+  const foldersToInspect: DriveFile[] = [];
+
+  // 1. Global Drive search for any folder matching WORKSPACE_FOLDER_NAME or LEGACY_WORKSPACE_FOLDER_NAMES
   for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
-    const existingFolders = await listFiles('root', folderName, FOLDER_MIME);
-    for (const folder of existingFolders) {
-      const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
-      if (manifestFiles.length > 0) {
-        if (folder.name !== WORKSPACE_FOLDER_NAME) {
-          void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
-            console.warn('[Google Drive] Không thể chuẩn hóa tên Workspace cũ.', error);
-          });
-        }
-        return openHealthWorkspace(folder.id);
+    const globalFound = await searchDriveFoldersByName(folderName);
+    for (const f of globalFound) {
+      if (!foldersToInspect.some((existing) => existing.id === f.id)) {
+        foldersToInspect.push(f);
       }
+    }
+  }
+
+  // 2. Direct root search as secondary guarantee
+  for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
+    try {
+      const rootFound = await listFiles('root', folderName, FOLDER_MIME);
+      for (const f of rootFound) {
+        if (!foldersToInspect.some((existing) => existing.id === f.id)) {
+          foldersToInspect.push(f);
+        }
+      }
+    } catch {
+      // Ignore root query error
+    }
+  }
+
+  // Inspect each folder found
+  for (const folder of foldersToInspect) {
+    // Check for family.json
+    const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
+    if (manifestFiles.length > 0) {
+      if (folder.name !== WORKSPACE_FOLDER_NAME) {
+        void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
+          console.warn('[Google Drive] Could not normalize legacy folder name.', error);
+        });
+      }
+      return openHealthWorkspace(folder.id);
+    }
+
+    // Check if folder contains profiles/raw_files or json profile files
+    const children = await listFiles(folder.id);
+    const profilesFolder = children.find((c) => c.name === 'profiles' && c.mimeType === FOLDER_MIME);
+    if (profilesFolder) {
+      // Auto-recover family.json for existing folder
+      const profileFiles = await listFiles(profilesFolder.id);
+      const members: FamilyMember[] = [];
+      for (const pf of profileFiles) {
+        if (pf.name.endsWith('.json')) {
+          try {
+            const rawProfile = await driveRequest<any>(
+              `${DRIVE_API}/files/${encodeURIComponent(pf.id)}?alt=media`
+            );
+            const memberName = rawProfile?.member?.name || pf.name.replace('.json', '');
+            const memberId = rawProfile?.member?.id || `member_${pf.id.slice(0, 8)}`;
+            members.push({
+              id: memberId,
+              name: memberName,
+              driveFolderId: folder.id,
+              profileFileId: pf.id,
+              role: rawProfile?.member?.role || 'other',
+            });
+          } catch {
+            // Ignore unparseable files
+          }
+        }
+      }
+
+      const now = new Date().toISOString();
+      const rawFolder = children.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME) || folder;
+      const family: HealthFamily = {
+        schemaVersion: 1,
+        adminEmail: '',
+        rawFilesFolderId: rawFolder.id,
+        profilesFolderId: profilesFolder.id,
+        members,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const manifest = await uploadContent(
+        'family.json',
+        JSON_MIME,
+        new Blob([JSON.stringify(family, null, 2)]),
+        folder.id,
+      );
+
+      return {
+        rootFolderId: folder.id,
+        familyFileId: manifest.id,
+        family,
+      };
     }
   }
   return null;

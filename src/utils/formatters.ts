@@ -143,18 +143,87 @@ export function formatShortVND(amount: number, hideAmount: boolean = false): str
   return `${sign}${VN_NUMBER_FORMATTER_0DEC.format(abs)} đ`;
 }
 
-export function formatDateVN(dateStr: string, padZeros: boolean = false): string {
-  if (!dateStr) return '';
-  try {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    if (!year || !month || !day) return dateStr;
+export function formatDateVN(dateStr?: string | null, padZeros: boolean = true): string {
+  if (!dateStr || !dateStr.trim()) return '';
+  const trimmed = dateStr.trim();
+
+  // If already in DD/MM/YYYY format
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(trimmed)) {
+    const parts = trimmed.split('/');
     if (padZeros) {
-      return `${day.toString().padStart(2, '0')}/${month.toString().padStart(2, '0')}/${year}`;
+      return `${parts[0].padStart(2, '0')}/${parts[1].padStart(2, '0')}/${parts[2]}`;
     }
-    return `${day}/${month}/${year}`;
+    return trimmed;
+  }
+
+  // Handle YYYY-MM-DD or YYYY-MM-DDTHH:mm:ssZ
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return padZeros
+      ? `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`
+      : `${parseInt(day, 10)}/${parseInt(month, 10)}/${year}`;
+  }
+
+  try {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      const day = padZeros ? String(d.getDate()).padStart(2, '0') : String(d.getDate());
+      const month = padZeros ? String(d.getMonth() + 1).padStart(2, '0') : String(d.getMonth() + 1);
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
+    }
+  } catch {
+    // ignore
+  }
+
+  return trimmed;
+}
+
+export function formatDateTimeVN(dateStr?: string | null): string {
+  if (!dateStr || !dateStr.trim()) return '';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    return `${day}/${month}/${year} ${hours}:${minutes}`;
   } catch {
     return dateStr;
   }
+}
+
+/**
+ * Tự động chuẩn hóa tên thành viên khi tiếp nhận tài liệu:
+ * 1. Nếu trùng khớp với thành viên sẵn có trong gia đình (isSamePersonName), trả về tên có dấu chuẩn của thành viên đó.
+ * 2. Nếu là tên mới, loại bỏ tiền tố y tế (bệnh nhân, ông, bà...), viết hoa chữ cái đầu mỗi từ (Title Case).
+ */
+export function normalizeVietnameseProperName(
+  extractedName?: string | null,
+  existingMembers: Array<{ id: string; name: string }> = []
+): string {
+  if (!extractedName || !extractedName.trim()) return '';
+  const cleanName = extractedName
+    .replace(/^(ho va ten|ho ten|ten bn|ten benh nhan|benh nhan|bn|khach hang|nguoi benh|ong|ba|anh|chi|chau|em)\s+/i, '')
+    .trim();
+
+  // Matched against existing member -> return proper accented member name
+  for (const m of existingMembers) {
+    if (m.name && isSamePersonName(cleanName, m.name)) {
+      return m.name;
+    }
+  }
+
+  // Otherwise Title Case
+  return cleanName
+    .toLowerCase()
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 }
 
 export function formatRelativeDays(days: number): string {

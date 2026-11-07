@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { HealthEvent } from '../types';
 import type { FileDuplicateMatch } from '../utils/deduplicationService';
+import { formatDateVN, formatDateTimeVN } from '../utils/formatters';
 
 interface DuplicateDocumentModalProps {
   isOpen: boolean;
@@ -95,7 +96,7 @@ export function DuplicateDocumentModal({
             <div className="pt-2 border-t border-slate-200/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
               <span className="flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-slate-400" />
-                Đã tải lên lúc: {new Date(match.existingSource.uploadedAt).toLocaleDateString('vi-VN')}
+                Đã tải lên lúc: {formatDateTimeVN(match.existingSource.uploadedAt)}
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
@@ -119,7 +120,7 @@ export function DuplicateDocumentModal({
               <div className="bg-white p-2.5 rounded-xl border border-emerald-100 text-xs space-y-1">
                 <div className="font-bold text-slate-900 flex items-center justify-between">
                   <span>{linkedEvent.title}</span>
-                  <span className="text-emerald-700 font-mono text-[11px]">{linkedEvent.date}</span>
+                  <span className="text-emerald-700 font-mono text-[11px]">{formatDateVN(linkedEvent.date)}</span>
                 </div>
                 {linkedEvent.facility && (
                   <div className="text-slate-500 text-[11px]">Tại: {linkedEvent.facility}</div>

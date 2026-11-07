@@ -13,6 +13,8 @@ import {
 import type { FamilyMember, HealthProfile, HealthSource } from '../types';
 import type { HealthDriveWorkspace } from '../utils/healthDriveService';
 
+import { formatDateTimeVN } from '../utils/formatters';
+
 interface RawFilesManagerModalProps {
   isOpen: boolean;
   workspace: HealthDriveWorkspace | null;
@@ -160,7 +162,7 @@ export function RawFilesManagerModal({
                           <span>·</span>
                           <span className="text-slate-700 font-semibold">Trang OCR: <strong className="text-slate-900">{processedPages}/{totalPages} trang</strong></span>
                           <span>·</span>
-                          <span>Tải lên: {new Date(source.uploadedAt).toLocaleDateString('vi-VN')}</span>
+                          <span>Tải lên: {formatDateTimeVN(source.uploadedAt)}</span>
                         </div>
                       </div>
                     </div>

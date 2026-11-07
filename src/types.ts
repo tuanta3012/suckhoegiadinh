@@ -5,6 +5,7 @@
 export interface FamilyMember {
   id: string;
   name: string;
+  email?: string;
   gender?: 'male' | 'female' | 'other';
   birthDate?: string;
   role?: 'father' | 'mother' | 'child' | 'other' | string;

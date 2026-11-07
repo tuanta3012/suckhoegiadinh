@@ -279,34 +279,77 @@ export function summarizeTimeline(
   };
 }
 
+function sanitizeTimelineEvent(raw: any): HealthEvent | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const eventTypes: HealthEvent['type'][] = [
+    'comprehensive_exam',
+    'medical_report',
+    'prescription',
+    'test_result',
+    'vaccination',
+    'discharge',
+    'other',
+  ];
+  const type = eventTypes.includes(raw.type) ? raw.type : 'medical_report';
+  return {
+    id: String(raw.id || `event_${crypto.randomUUID().slice(0, 8)}`),
+    sourceFileId: String(raw.sourceFileId || 'legacy_source'),
+    sourceFileName: String(raw.sourceFileName || 'Tài liệu y tế'),
+    type,
+    title: String(raw.title || 'Kết quả khám y tế'),
+    date: String(raw.date || new Date().toISOString().slice(0, 10)),
+    diagnoses: Array.isArray(raw.diagnoses) ? raw.diagnoses.map(String) : [],
+    medications: Array.isArray(raw.medications) ? raw.medications : [],
+    metrics: Array.isArray(raw.metrics) ? raw.metrics : [],
+    imagingResults: Array.isArray(raw.imagingResults) ? raw.imagingResults : [],
+    recordedAt: String(raw.recordedAt || new Date().toISOString()),
+    facility: raw.facility ? String(raw.facility) : undefined,
+    advice: raw.advice ? String(raw.advice) : undefined,
+    nextFollowUp: raw.nextFollowUp ? String(raw.nextFollowUp) : undefined,
+    notes: raw.notes ? String(raw.notes) : undefined,
+    patientName: raw.patientName ? String(raw.patientName) : undefined,
+    patientBirthDate: raw.patientBirthDate ? String(raw.patientBirthDate) : undefined,
+    patientGender: raw.patientGender ? String(raw.patientGender) : undefined,
+    extractedData: raw.extractedData || undefined,
+  };
+}
+
+function sanitizeHealthSource(raw: any): HealthSource | null {
+  if (!raw || typeof raw !== 'object' || !raw.driveFileId) return null;
+  return {
+    driveFileId: String(raw.driveFileId),
+    fileName: String(raw.fileName || 'Tài liệu y tế'),
+    mimeType: String(raw.mimeType || 'application/octet-stream'),
+    uploadedAt: String(raw.uploadedAt || new Date().toISOString()),
+    status: raw.status === 'processed' ? 'processed' : 'pending',
+    digitizedAt: raw.digitizedAt ? String(raw.digitizedAt) : undefined,
+    rawDeletedAt: raw.rawDeletedAt ? String(raw.rawDeletedAt) : undefined,
+    fileSize: typeof raw.fileSize === 'number' ? raw.fileSize : undefined,
+    fileHash: raw.fileHash ? String(raw.fileHash) : undefined,
+    totalPages: typeof raw.totalPages === 'number' ? raw.totalPages : undefined,
+    processedPages: typeof raw.processedPages === 'number' ? raw.processedPages : undefined,
+  };
+}
+
 export function parseHealthProfile(value: unknown, member: FamilyMember): HealthProfile {
   if (!value || typeof value !== 'object') throw new Error('Tệp hồ sơ trên Drive không phải JSON hợp lệ.');
-  const data = value as Partial<HealthProfile>;
-  if (!Array.isArray(data.timeline) || !Array.isArray(data.sources)) {
-    throw new Error('Phiên bản hoặc cấu trúc hồ sơ sức khỏe không được hỗ trợ.');
-  }
-  if (!data.timeline.every(isHealthEvent)) {
-    throw new Error('Hồ sơ có sự kiện thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
-  }
-  if (!data.sources.every(isHealthSource)) {
-    throw new Error('Hồ sơ có tài liệu nguồn thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
-  }
-  if (data.summary !== undefined && !isJsonRecord(data.summary)) {
-    throw new Error('Phần tổng hợp hồ sơ sức khỏe không hợp lệ.');
-  }
-  if (
-    data.summary &&
-    data.summary.narrative !== undefined &&
-    typeof data.summary.narrative !== 'string'
-  ) {
-    throw new Error('Phần tóm tắt hồ sơ sức khỏe không hợp lệ.');
-  }
+  const data = value as any;
+  const rawTimeline = Array.isArray(data.timeline) ? data.timeline : [];
+  const rawSources = Array.isArray(data.sources) ? data.sources : [];
+
+  const timeline: HealthEvent[] = rawTimeline
+    .map((item: any) => sanitizeTimelineEvent(item))
+    .filter((item: HealthEvent | null): item is HealthEvent => item !== null);
+
+  const sources: HealthSource[] = rawSources
+    .map((item: any) => sanitizeHealthSource(item))
+    .filter((item: HealthSource | null): item is HealthSource => item !== null);
 
   const normalized: HealthProfile = {
     schemaVersion: 2,
     member: { ...(data.member || member), ...member },
-    timeline: data.timeline,
-    sources: data.sources,
+    timeline,
+    sources,
     summary: data.summary || { latestDiagnoses: [], latestMetrics: {} },
     aiAnalysis: data.aiAnalysis,
     aiDeepAnalysis: data.aiDeepAnalysis,
@@ -316,7 +359,7 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
   };
   return {
     ...normalized,
-    summary: summarizeTimeline(normalized.timeline, normalized.summary.narrative),
+    summary: summarizeTimeline(normalized.timeline, normalized.summary?.narrative),
   };
 }
 

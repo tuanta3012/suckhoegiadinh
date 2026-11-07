@@ -240,7 +240,7 @@ export async function extractHealthEventWithProgress(
   onProgress?.({
     stage: 'reading_document',
     progressPercent: 45,
-    message: 'Khởi động AI Vision (gemini-3.5-flash-lite) đọc tài liệu...',
+    message: 'Khởi động AI Vision đọc tài liệu...',
     modelUsed: 'gemini-3.5-flash-lite',
   });
 
