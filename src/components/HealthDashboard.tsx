@@ -31,6 +31,7 @@ import {
   Mail,
   MessageSquare,
   MoreVertical,
+  Pencil,
   Pill,
   Plus,
   RefreshCw,
@@ -47,21 +48,16 @@ import {
   X,
 } from 'lucide-react';
 import { CameraResultType, CameraSource } from '@capacitor/camera';
+import { Capacitor } from '@capacitor/core';
 import { Camera as CapacitorCamera } from '@capacitor/camera';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppUpdateModal } from './AppUpdateModal';
 import { useAppUpdate } from '../hooks/useAppUpdate';
 import { AppLogo } from './AppLogo';
 import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
+import { MemberEditModal, type EditableFamilyMember } from './MemberEditModal';
+import { SubjectResolutionModal } from './SubjectResolutionModal';
+const HealthMetricsChart = lazy(() => import('./HealthMetricsChart'));
 import type {
   FamilyMember,
   HealthEvent,
@@ -81,6 +77,7 @@ import {
   type HealthDriveWorkspace,
   openHealthWorkspace,
   loadHealthProfile,
+  moveDriveFileToMember,
   saveHealthProfile,
   updateDriveFamilyMember,
   uploadRawHealthFile,
@@ -146,6 +143,7 @@ import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
 import { formatDateVN, formatDateTimeVN, isSamePersonName, normalizeVietnameseProperName } from '../utils/formatters';
+import { findMemberByOcrPatientName, isRecognizablePatientName } from '../utils/ocrSubjectRouting';
 
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
@@ -200,6 +198,82 @@ function createDefaultLocalWorkspace(adminEmail: string | null): HealthDriveWork
   };
 }
 
+function offlineCacheKey(baseKey: string, userEmail: string | null): string {
+  return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
+}
+
+function loadNativeOfflineState(userEmail: string | null): {
+  workspace: HealthDriveWorkspace;
+  profiles: Record<string, HealthProfile>;
+} {
+  const fallback = {
+    workspace: createDefaultLocalWorkspace(userEmail),
+    profiles: {} as Record<string, HealthProfile>,
+  };
+  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
+
+  const workspaceKey = offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail);
+  const profilesKey = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
+  let serializedWorkspace = localStorage.getItem(workspaceKey);
+  let serializedProfiles = localStorage.getItem(profilesKey);
+  let migratingLegacyCache = false;
+
+  if (!serializedWorkspace) {
+    const legacyWorkspace = localStorage.getItem(LOCAL_WORKSPACE_KEY);
+    if (legacyWorkspace) {
+      try {
+        const parsed = JSON.parse(legacyWorkspace) as HealthDriveWorkspace;
+        const expectedEmail = userEmail?.trim().toLowerCase() || 'offline@user';
+        const cachedAdminEmail = parsed.family?.adminEmail?.trim().toLowerCase();
+        if (cachedAdminEmail === expectedEmail) {
+          serializedWorkspace = legacyWorkspace;
+          serializedProfiles = localStorage.getItem(LOCAL_PROFILES_KEY);
+          migratingLegacyCache = true;
+        } else {
+          localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+          localStorage.removeItem(LOCAL_PROFILES_KEY);
+        }
+      } catch {
+        localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+        localStorage.removeItem(LOCAL_PROFILES_KEY);
+      }
+    }
+  }
+
+  if (!serializedWorkspace) return fallback;
+  try {
+    const parsedWorkspace = JSON.parse(serializedWorkspace) as HealthDriveWorkspace;
+    if (
+      !parsedWorkspace?.family ||
+      typeof parsedWorkspace.rootFolderId !== 'string' ||
+      !Array.isArray(parsedWorkspace.family.members) ||
+      parsedWorkspace.family.members.length === 0
+    ) {
+      return fallback;
+    }
+    const parsedProfiles = serializedProfiles ? JSON.parse(serializedProfiles) as Record<string, HealthProfile> : {};
+    if (!parsedProfiles || typeof parsedProfiles !== 'object' || Array.isArray(parsedProfiles)) {
+      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
+    }
+    if (migratingLegacyCache) {
+      localStorage.setItem(workspaceKey, serializedWorkspace);
+      if (serializedProfiles) localStorage.setItem(profilesKey, serializedProfiles);
+      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+      localStorage.removeItem(LOCAL_PROFILES_KEY);
+    }
+    if (parsedWorkspace.rootFolderId !== 'local_offline_workspace' && userEmail) {
+      localStorage.setItem(
+        `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
+        parsedWorkspace.rootFolderId,
+      );
+    }
+    return { workspace: parsedWorkspace, profiles: parsedProfiles };
+  } catch (error) {
+    console.warn('[Offline cache] Could not restore native workspace data.', error);
+    return fallback;
+  }
+}
+
 const EVENT_TYPE_OPTIONS: Array<{
   value: HealthEvent['type'];
   label: string;
@@ -223,59 +297,22 @@ export function HealthDashboard({
   onLogout,
   showToast,
 }: HealthDashboardProps) {
+  const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [rootIdInput, setRootIdInput] = useState('');
 
-  const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_WORKSPACE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && parsed.family && Array.isArray(parsed.family.members) && parsed.family.members.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Could not restore offline workspace', e);
-    }
-    return createDefaultLocalWorkspace(userEmail);
-  });
-
-  const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_PROFILES_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Could not restore offline profiles', e);
-    }
-    const defaultWs = createDefaultLocalWorkspace(userEmail);
-    const defaultMember = defaultWs.family.members[0];
-    return {
-      [defaultMember.id]: createHealthProfile(defaultMember),
-    };
-  });
+  const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(offlineStartup.workspace);
+  const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(offlineStartup.profiles);
 
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
-  const [selectedMemberId, setSelectedMemberId] = useState<string>(() => {
-    const savedWs = localStorage.getItem(LOCAL_WORKSPACE_KEY);
-    if (savedWs) {
-      try {
-        const parsed = JSON.parse(savedWs);
-        if (parsed?.family?.members?.[0]?.id) return parsed.family.members[0].id;
-      } catch {
-        // Fallback
-      }
-    }
-    return 'member_local_1';
-  });
+  const [selectedMemberId, setSelectedMemberId] = useState<string>(
+    offlineStartup.workspace.family.members[0]?.id || 'member_local_1',
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isAddingMember, setIsAddingMember] = useState(false);
+  const [editingMember, setEditingMember] = useState<FamilyMember | null>(null);
+  const [isSavingMember, setIsSavingMember] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberBirthDate, setNewMemberBirthDate] = useState('');
@@ -285,6 +322,8 @@ export function HealthDashboard({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<WorkspaceAccessRole>('EDITOR');
   const [digitizationDraft, setDigitizationDraft] = useState<DigitizationDraft | null>(null);
+  const [identityResolutionDraft, setIdentityResolutionDraft] = useState<DigitizationDraft | null>(null);
+  const [isResolvingSubject, setIsResolvingSubject] = useState(false);
   const [digitizationError, setDigitizationError] = useState('');
   const [trackerState, setTrackerState] = useState<{
     isOpen: boolean;
@@ -297,8 +336,6 @@ export function HealthDashboard({
     modelUsed: string;
     partialExtracted: Partial<HealthEvent>;
     error: string | null;
-    detectedMemberMatch: FamilyMember | null;
-    isRoutingDecisionRequired: boolean;
   }>({
     isOpen: false,
     file: null,
@@ -310,8 +347,6 @@ export function HealthDashboard({
     modelUsed: 'gemini-3.5-flash-lite',
     partialExtracted: {},
     error: null,
-    detectedMemberMatch: null,
-    isRoutingDecisionRequired: false,
   });
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -349,6 +384,10 @@ export function HealthDashboard({
   // Refs to maintain fresh data in async queue closure
   const workspaceRef = useRef<HealthDriveWorkspace | null>(null);
   const profilesRef = useRef<Record<string, HealthProfile>>({});
+  const shouldRefreshCachedWorkspaceRef = useRef(
+    Capacitor.isNativePlatform() &&
+      offlineStartup.workspace.rootFolderId !== 'local_offline_workspace',
+  );
   const selectedMemberIdRef = useRef<string>(selectedMemberId);
   const uploadQueueRef = useRef<File[]>([]);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
@@ -376,29 +415,58 @@ export function HealthDashboard({
     }
   }, [workspace?.rootFolderId]);
 
+  const previousUserEmailRef = useRef(userEmail);
   useEffect(() => {
-    if (workspace) {
-      try {
-        localStorage.setItem(LOCAL_WORKSPACE_KEY, JSON.stringify(workspace));
-      } catch (e) {
-        console.warn('Could not persist offline workspace', e);
-      }
-    }
-  }, [workspace]);
-
-  useEffect(() => {
-    if (profiles && Object.keys(profiles).length > 0) {
-      try {
-        localStorage.setItem(LOCAL_PROFILES_KEY, JSON.stringify(profiles));
-      } catch (e) {
-        console.warn('Could not persist offline profiles', e);
-      }
-    }
-  }, [profiles]);
+    if (previousUserEmailRef.current === userEmail) return;
+    previousUserEmailRef.current = userEmail;
+    const nextOfflineState = loadNativeOfflineState(userEmail);
+    setWorkspace(nextOfflineState.workspace);
+    shouldRefreshCachedWorkspaceRef.current =
+      Capacitor.isNativePlatform() &&
+      nextOfflineState.workspace.rootFolderId !== 'local_offline_workspace';
+    setProfiles(nextOfflineState.profiles);
+    profilesRef.current = nextOfflineState.profiles;
+    setSelectedMemberId(nextOfflineState.workspace.family.members[0]?.id || 'member_local_1');
+    setProfileErrors({});
+    setDigitizationDraft(null);
+    setIdentityResolutionDraft(null);
+    setIsResolvingSubject(false);
+    setChatMessages([]);
+    setOcrRecoveryJobs([]);
+    setWorkspaceAssignments([]);
+    setEditingMember(null);
+    setErrorMessage('');
+  }, [userEmail]);
 
   useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== userEmail) return;
+    try {
+      localStorage.setItem(
+        offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail),
+        JSON.stringify(workspace),
+      );
+    } catch (error) {
+      console.warn('[Offline cache] Could not persist native workspace.', error);
+    }
+  }, [userEmail, workspace]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== userEmail) return;
+    const key = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
+    try {
+      if (Object.keys(profiles).length > 0) {
+        localStorage.setItem(key, JSON.stringify(profiles));
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch (error) {
+      console.warn('[Offline cache] Could not persist native health profiles.', error);
+    }
+  }, [profiles, userEmail]);
 
   useEffect(() => {
     profilesRef.current = profiles;
@@ -525,9 +593,9 @@ export function HealthDashboard({
       return;
     }
 
-    const savedRootId =
-      localStorage.getItem(`${PROFILE_ROOT_KEY}_${userEmail?.trim().toLowerCase()}`) ||
-      localStorage.getItem(PROFILE_ROOT_KEY);
+    const savedRootId = userEmail
+      ? localStorage.getItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`)
+      : null;
 
     if (savedRootId) {
       void openWorkspace(savedRootId);
@@ -545,7 +613,6 @@ export function HealthDashboard({
               discovered.rootFolderId
             );
           }
-          localStorage.setItem(PROFILE_ROOT_KEY, discovered.rootFolderId);
           setWorkspace(discovered);
           await reloadProfiles(discovered);
           showToast('Đã kết nối và đồng bộ 2 chiều thành công!', 'success');
@@ -597,8 +664,10 @@ export function HealthDashboard({
       } catch (error) {
         console.error('[OCR recovery] Could not clear local recovery metadata after reset.', error);
       }
-      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
-      localStorage.removeItem(LOCAL_PROFILES_KEY);
+      localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail));
+      localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, userEmail));
+      localStorage.removeItem('health_offline_workspace_v2');
+      localStorage.removeItem('health_offline_profiles_v2');
 
       const freshWs = createDefaultLocalWorkspace(userEmail);
       const freshMember = freshWs.family.members[0];
@@ -608,6 +677,8 @@ export function HealthDashboard({
       setProfiles(freshProf);
       setSelectedMemberId(freshMember.id);
       setDigitizationDraft(null);
+      setIdentityResolutionDraft(null);
+      setIsResolvingSubject(false);
       showToast('Đã xóa sạch dữ liệu và đặt lại trạng thái ban đầu.', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Lỗi khi xóa dữ liệu.', 'error');
@@ -668,7 +739,11 @@ export function HealthDashboard({
     if (!selectedProfile?.timeline || !selectedMetric) return [];
     return selectedProfile.timeline
       .filter((event) => event.metrics.some((m) => m.name === selectedMetric))
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .sort(
+        (a, b) =>
+          new Date(a.date || a.recordedAt).getTime() -
+          new Date(b.date || b.recordedAt).getTime(),
+      )
       .map((event) => {
         const met = event.metrics.find((m) => m.name === selectedMetric);
         return {
@@ -684,7 +759,9 @@ export function HealthDashboard({
   const filteredTimeline = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
     const list = [...selectedProfile.timeline].sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+      (a, b) =>
+        new Date(b.date || b.recordedAt).getTime() -
+        new Date(a.date || a.recordedAt).getTime(),
     );
     if (timelineFilter === 'all') return list;
     return list.filter((event) => event.type === timelineFilter);
@@ -838,14 +915,20 @@ export function HealthDashboard({
   // Auto-connect workspace on mount or Drive authorization change
   useEffect(() => {
     if (!driveAuthorized || !userEmail) return;
-    if (workspace && workspace.rootFolderId !== 'local_offline_workspace') return;
+    const shouldRefreshCachedWorkspace = shouldRefreshCachedWorkspaceRef.current;
+    if (
+      workspace &&
+      workspace.rootFolderId !== 'local_offline_workspace' &&
+      !shouldRefreshCachedWorkspace
+    ) return;
+    shouldRefreshCachedWorkspaceRef.current = false;
 
     let cancelled = false;
     setIsSyncing(true);
 
-    const savedRootId =
-      localStorage.getItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`) ||
-      localStorage.getItem(PROFILE_ROOT_KEY);
+    const savedRootId = localStorage.getItem(
+      `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`
+    );
 
     async function autoConnectDriveWorkspace() {
       try {
@@ -865,14 +948,20 @@ export function HealthDashboard({
           }
         }
 
-        const assignment = await readHealthWorkspaceAssignment(userEmail).catch(() => null);
+        let assignment: Awaited<ReturnType<typeof readHealthWorkspaceAssignment>> = null;
+        try {
+          assignment = await readHealthWorkspaceAssignment(userEmail);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Không thể kiểm tra lời mời Workspace.';
+          setErrorMessage(message);
+          showToast(message, 'error');
+        }
         if (cancelled) return;
         if (assignment) {
           try {
             const opened = await openHealthWorkspace(assignment.rootFolderId);
             if (!cancelled) {
               localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, opened.rootFolderId);
-              localStorage.setItem(PROFILE_ROOT_KEY, opened.rootFolderId);
               setWorkspace(opened);
               setRootIdInput(opened.rootFolderId);
               await reloadProfiles(opened);
@@ -889,7 +978,6 @@ export function HealthDashboard({
         const discovered = await findExistingHealthWorkspace();
         if (!cancelled && discovered) {
           localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, discovered.rootFolderId);
-          localStorage.setItem(PROFILE_ROOT_KEY, discovered.rootFolderId);
           setWorkspace(discovered);
           setRootIdInput(discovered.rootFolderId);
           const loadedProfiles = await reloadProfiles(discovered);
@@ -962,7 +1050,6 @@ export function HealthDashboard({
         `${PROFILE_ROOT_KEY}_${userEmail?.trim().toLowerCase()}`,
         created.rootFolderId
       );
-      localStorage.setItem(PROFILE_ROOT_KEY, created.rootFolderId);
       setWorkspace(created);
       setRootIdInput(created.rootFolderId);
       showToast('Đã tạo thư mục Suc khoe gia dinh trên Google Drive!', 'success');
@@ -1016,6 +1103,52 @@ export function HealthDashboard({
       setErrorMessage(error instanceof Error ? error.message : 'Không thể thêm thành viên.');
     } finally {
       setIsAddingMember(false);
+    }
+  }
+
+  async function handleSaveMember(updates: EditableFamilyMember) {
+    if (!workspace || !editingMember || !driveAuthorized || !isWorkspaceAdmin) return;
+    const name = updates.name.trim();
+    if (!name) {
+      showToast('Họ tên thành viên không được để trống.', 'error');
+      return;
+    }
+    const duplicate = workspace.family.members.some(
+      (member) =>
+        member.id !== editingMember.id &&
+        member.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase(),
+    );
+    if (duplicate) {
+      showToast('Tên thành viên này đã có trong gia đình.', 'error');
+      return;
+    }
+    if (updates.birthDate) {
+      const parsedDate = new Date(`${updates.birthDate}T00:00:00`);
+      if (!Number.isFinite(parsedDate.getTime()) || parsedDate > new Date()) {
+        showToast('Ngày sinh không hợp lệ hoặc nằm trong tương lai.', 'error');
+        return;
+      }
+    }
+
+    setIsSavingMember(true);
+    setErrorMessage('');
+    try {
+      const next = await updateDriveFamilyMember(workspace, editingMember.id, {
+        ...updates,
+        name,
+      });
+      workspaceRef.current = next;
+      setWorkspace(next);
+      const loaded = await reloadProfiles(next);
+      profilesRef.current = loaded;
+      showToast(`Đã cập nhật thông tin thành viên ${name}.`, 'success');
+      setEditingMember(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Không thể cập nhật thành viên.';
+      setErrorMessage(message);
+      showToast(message, 'error');
+    } finally {
+      setIsSavingMember(false);
     }
   }
 
@@ -1095,8 +1228,8 @@ export function HealthDashboard({
       // Robust Token Validation before any Drive or AI work
       const token = await getValidGoogleAccessToken();
       if (!token) throw new Error('Không lấy được access token.');
-    } catch (tokenErr) {
-      digitizationLogger.log('error', 'drive', 'Lỗi xác thực Google Drive trước khi upload', { error: tokenErr });
+    } catch {
+      digitizationLogger.log('error', 'drive', 'Lỗi xác thực Google Drive trước khi upload');
       showToast('Phiên Google Drive đã hết hạn hoặc chưa được cấp quyền. Vui lòng kết nối lại Drive.', 'error');
       setIsUploading(false);
       setQueueStatus(null);
@@ -1224,8 +1357,6 @@ export function HealthDashboard({
       modelUsed: 'gemini-3.5-flash-lite',
       partialExtracted: {},
       error: null,
-      detectedMemberMatch: null,
-      isRoutingDecisionRequired: false,
     });
 
     // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload
@@ -1350,141 +1481,6 @@ export function HealthDashboard({
     });
   }
 
-  async function autoCommitAndRefineDigitization(
-    extracted: Partial<HealthEvent>,
-    file: File,
-    member: FamilyMember,
-    driveFileId?: string,
-    overrideProfiles?: Record<string, HealthProfile>,
-    pageCounts?: { totalPages?: number; processedPages?: number },
-  ) {
-    try {
-      const currentProfiles = overrideProfiles || profilesRef.current;
-      let profile = currentProfiles[member.id] || createHealthProfile(member);
-      
-      // 1. Filename & Content Frequency-based Year/Date Validation
-      const extractYearFromFilename = (filename: string): string | null => {
-        const match = filename.match(/\b(19|20)\d{2}\b/);
-        return match ? match[0] : null;
-      };
-
-      let eventDate = extracted.date || new Date().toISOString().slice(0, 10);
-      const year = extractYearFromFilename(file.name);
-      if (year && eventDate.substring(0, 4) !== year) {
-        eventDate = eventDate.replace(/^\d{4}/, year);
-      }
-
-      // 2. Title Normalization: Lấy trực tiếp năm khám thực tế thay vì niên hạn công ty
-      let eventTitle = extracted.title || file.name || 'Hồ sơ y tế mới';
-      const eventYear = eventDate.substring(0, 4);
-      if (eventYear) {
-        // Thay thế mọi năm cũ trong tiêu đề (ví dụ 2023) thành năm thực hiện khám thực tế (ví dụ 2024)
-        eventTitle = eventTitle.replace(/\b(19|20)\d{2}\b/, eventYear);
-      }
-
-      // 3. Event Normalization & Conflict Check
-      const rawEvent: HealthEvent = {
-        id: crypto.randomUUID(), 
-        sourceFileId: driveFileId,
-        sourceFileName: file.name,
-        type: validEventType(extracted.type || 'other'),
-        title: eventTitle,
-        date: eventDate,
-        facility: extracted.facility,
-        doctorName: extracted.doctorName,
-        customCategory: extracted.customCategory,
-        physicalExam: extracted.physicalExam,
-        diagnoses: extracted.diagnoses || [],
-        medications: extracted.medications || [],
-        metrics: extracted.metrics || [],
-        imagingResults: extracted.imagingResults || [],
-        vaccinations: extracted.vaccinations || [],
-        hospitalization: extracted.hospitalization,
-        advice: extracted.advice,
-        notes: extracted.notes,
-        patientName: extracted.patientName ? normalizeVietnameseProperName(extracted.patientName, members) : member.name,
-        patientBirthDate: extracted.patientBirthDate,
-        patientGender: extracted.patientGender,
-        recordedAt: new Date().toISOString(),
-      };
-
-      // 3. Upsert / Merge Logic
-      const existingIndex = profile.timeline.findIndex(e => 
-        (driveFileId && e.sourceFileId === driveFileId) || 
-        (e.date === eventDate && e.title === rawEvent.title)
-      );
-
-      let updatedTimeline: HealthEvent[];
-      if (existingIndex !== -1) {
-        updatedTimeline = profile.timeline.map((e, i) => i === existingIndex ? { ...e, ...rawEvent, id: e.id } : e);
-      } else {
-        updatedTimeline = [...profile.timeline, rawEvent];
-      }
-
-      // 4. Update Profile
-      let updatedProfile: HealthProfile = {
-        ...profile,
-        timeline: updatedTimeline,
-        summary: summarizeTimeline(updatedTimeline, profile.summary.narrative),
-        updatedAt: new Date().toISOString(),
-      };
-
-      // 5. Link Source if new
-      if (driveFileId && !updatedProfile.sources.some(s => s.driveFileId === driveFileId)) {
-        const source = Object.values(currentProfiles)
-          .flatMap((c) => c.sources)
-          .find((c) => c.driveFileId === driveFileId);
-        if (source) {
-          updatedProfile = addHealthSource(updatedProfile, source);
-        }
-      }
-
-      // 6. Update Source Status
-      if (driveFileId) {
-        const totPages = pageCounts?.totalPages || 1;
-        const procPages = pageCounts?.processedPages || totPages;
-        updatedProfile.sources = updatedProfile.sources.map((item) =>
-          item.driveFileId === driveFileId
-            ? {
-                ...item,
-                status: 'processed' as const,
-                digitizedAt: new Date().toISOString(),
-                totalPages: item.totalPages || totPages,
-                processedPages: item.processedPages || procPages,
-              }
-            : item,
-        );
-        forgetOcrRecoveryJob(driveFileId);
-      }
-
-      const savedProfile = await saveHealthProfile(member.profileFileId, updatedProfile);
-      profilesRef.current = { ...profilesRef.current, [member.id]: savedProfile };
-      setProfiles((prev) => ({ ...prev, [member.id]: savedProfile }));
-      selectedMemberIdRef.current = member.id;
-      setSelectedMemberId(member.id);
-
-      setTrackerState((prev) => ({
-        ...prev,
-        step: 'completed',
-        progressPercent: 100,
-        progressMessage: `Đã lưu hồ sơ cho ${member.name}!`,
-      }));
-
-      showToast(`Đã lưu tệp "${file.name}" cho ${member.name}.`, 'success');
-      
-      setTimeout(() => {
-        setTrackerState((prev) => ({ ...prev, isOpen: false }));
-        processNextInQueue();
-      }, 500);
-
-    } catch (error) {
-      console.error('[Commit Error]:', error);
-      setTrackerState((prev) => ({ ...prev, step: 'error', error: 'Lỗi khi lưu' }));
-      showToast('Lỗi khi lưu dữ liệu vào hồ sơ.', 'error');
-      processNextInQueue();
-    }
-  }
-
   async function runDocumentExtraction(file: File, member: FamilyMember, driveFileId?: string) {
     let latestProgress = 45;
     try {
@@ -1495,74 +1491,52 @@ export function HealthDashboard({
       };
       const result = await extractHealthEventWithProgress(file, member, reportProgress);
       if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100);
+      if (!driveFileId) throw new Error('Không xác định được mã tài liệu Drive để lưu kết quả OCR.');
 
-      // SỬ DỤNG REF để lấy danh sách thành viên mới nhất (tránh race condition trong hàng đợi)
-      const currentMembers = workspaceRef.current?.family.members || [];
-      const patientNameRaw = result.extracted.patientName?.trim() || '';
-
-      // 1. Phân tích đối khớp thành viên bằng thuật toán so khớp tên tiếng Việt thông minh (bỏ dấu, hoa thường, tiền tố y tế BN, Bệnh nhân...)
-      let isMatchCurrent = !patientNameRaw || isSamePersonName(patientNameRaw, member.name);
-
-      let matchedMember: FamilyMember | null = null;
-      if (!isMatchCurrent && patientNameRaw) {
-        matchedMember = currentMembers.find((m) => m.id !== member.id && isSamePersonName(patientNameRaw, m.name)) || null;
-      }
-
-      let isMismatch = Boolean(!isMatchCurrent && matchedMember);
-      let isNewPerson = Boolean(!isMatchCurrent && !matchedMember && patientNameRaw.length > 3);
-
-      // Tự động gán tên tài liệu cho hồ sơ mặc định đầu tiên nếu thành viên hiện tại là placeholder
-      const isPlaceholder = member.name === 'Thành viên mới' || member.name === 'Gia đình' || member.name.toLowerCase().includes('thanh vien');
-      if (isNewPerson && isPlaceholder && currentMembers.length === 1 && workspaceRef.current) {
-        try {
-          const updatedWorkspace = await updateDriveFamilyMember(workspaceRef.current, member.id, {
-            name: patientNameRaw,
-            birthDate: result.extracted.patientBirthDate || undefined,
-            gender: (result.extracted.patientGender === 'Nam' || result.extracted.patientGender === 'male') ? 'male' : (result.extracted.patientGender === 'Nữ' || result.extracted.patientGender === 'female') ? 'female' : member.gender,
-          });
-          workspaceRef.current = updatedWorkspace;
-          setWorkspace(updatedWorkspace);
-          member = updatedWorkspace.family.members.find(m => m.id === member.id) || member;
-          selectedMemberIdRef.current = member.id;
-          setSelectedMemberId(member.id);
-          isMatchCurrent = true;
-          isMismatch = false;
-          isNewPerson = false;
-        } catch {
-          // Bỏ qua lỗi cập nhật tên và tiếp tục flow bình thường
-        }
-      }
-
-      setTrackerState((prev) => ({
-        ...prev,
+      const source = Object.values(profilesRef.current)
+        .flatMap((profile) => profile.sources)
+        .find((item) => item.driveFileId === driveFileId);
+      const draft: DigitizationDraft = {
+        source: {
+          id: driveFileId,
+          name: source?.fileName || file.name,
+          mimeType: source?.mimeType || file.type || 'application/octet-stream',
+          createdTime: source?.uploadedAt || new Date().toISOString(),
+        },
+        extracted: result.extracted,
+      };
+      setTrackerState((previous) => ({
+        ...previous,
         step: 'completed',
-        progressPercent: 90,
-        progressMessage: 'Bóc tách dữ liệu thành công. Kiểm tra đối khớp thành viên...',
+        progressPercent: 100,
+        progressMessage: 'OCR hoàn tất. Đang xác định hồ sơ thành viên...',
         partialExtracted: result.extracted,
-        modelUsed: result.modelUsed || prev.modelUsed,
-        detectedMemberMatch: matchedMember,
-        isRoutingDecisionRequired: Boolean(isMismatch || isNewPerson),
+        modelUsed: result.modelUsed || previous.modelUsed,
+        isOpen: false,
       }));
 
-      // Nếu khớp hoàn toàn với thành viên hiện tại hoặc không có thông tin người bệnh, cứ tự động lưu
-      if (!isMismatch && !isNewPerson) {
-        await autoCommitAndRefineDigitization(result.extracted, file, member, driveFileId, undefined, {
-          totalPages: result.totalPages,
-          processedPages: result.processedPages,
+      const patientName = result.extracted.patientName?.trim();
+      if (!isRecognizablePatientName(patientName)) {
+        setIdentityResolutionDraft({
+          ...draft,
+          extracted: { ...draft.extracted, patientName: undefined },
         });
-      } else if (isMismatch && matchedMember) {
-        // TỰ ĐỘNG CHUYỂN HỒ SƠ nếu phát hiện khớp chính xác với thành viên khác (Mượt mà UX)
-        showToast(`Phát hiện tài liệu của ${matchedMember.name}. Hệ thống đang tự động chuyển hồ sơ...`, 'info');
-        await autoCommitAndRefineDigitization(result.extracted, file, matchedMember, driveFileId, undefined, {
-          totalPages: result.totalPages,
-          processedPages: result.processedPages,
-        });
-      } else {
-        // Tạm dừng nếu phát hiện người mới hoàn toàn để người dùng quyết định
-        setTrackerState(prev => ({
-          ...prev,
-          progressMessage: `Phát hiện người bệnh mới: ${result.extracted.patientName || 'Chưa rõ'}. Vui lòng chọn hành động.`,
-          step: 'matching_patient'
+        showToast('OCR chưa xác định được chủ thể. Chọn hồ sơ hiện có hoặc nhập tên để tạo hồ sơ mới.', 'info');
+        return;
+      }
+
+      const targetMember = await findOrCreateOcrMember(patientName, result.extracted, member);
+      setSelectedMemberId(targetMember.id);
+      selectedMemberIdRef.current = targetMember.id;
+      setTrackerState((previous) => ({ ...previous, memberId: targetMember.id }));
+      const saved = await saveExtractedDocumentAutomatically(draft, targetMember);
+      if (!saved) {
+        setTrackerState((previous) => ({
+          ...previous,
+          isOpen: true,
+          step: 'error',
+          progressMessage: 'Không thể lưu kết quả OCR.',
+          error: 'Tài liệu đã được tải lên Drive nhưng chưa lưu được vào hồ sơ.',
         }));
       }
     } catch (error) {
@@ -1577,6 +1551,192 @@ export function HealthDashboard({
       }));
       showToast('Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.', 'info');
       processNextInQueue();
+    }
+  }
+
+  async function findOrCreateOcrMember(
+    patientName: string,
+    extracted: Partial<HealthEvent>,
+    initialMember: FamilyMember,
+  ): Promise<FamilyMember> {
+    const currentWorkspace = workspaceRef.current;
+    if (!currentWorkspace) throw new Error('Không tìm thấy Workspace để gán tài liệu OCR.');
+    const currentMembers = currentWorkspace.family.members;
+    const matchingMember = findMemberByOcrPatientName(patientName, currentMembers);
+    if (matchingMember) {
+      if (!profilesRef.current[matchingMember.id]) {
+        profilesRef.current = await reloadProfiles(currentWorkspace);
+      }
+      return matchingMember;
+    }
+
+    const initialProfile =
+      profilesRef.current[initialMember.id] || profiles[initialMember.id];
+    const isPlaceholder =
+      initialMember.name === 'Thành viên mới' ||
+      initialMember.name === 'Gia đình' ||
+      initialMember.name.toLowerCase().includes('thanh vien');
+    if (
+      isPlaceholder &&
+      currentMembers.length === 1 &&
+      initialProfile &&
+      initialProfile.timeline.length === 0
+    ) {
+      const updatedWorkspace = await updateDriveFamilyMember(currentWorkspace, initialMember.id, {
+        name: patientName,
+        birthDate: extracted.patientBirthDate || undefined,
+        gender: genderFromOcr(extracted.patientGender, initialMember.gender),
+      });
+      workspaceRef.current = updatedWorkspace;
+      setWorkspace(updatedWorkspace);
+      profilesRef.current = await reloadProfiles(updatedWorkspace);
+      return updatedWorkspace.family.members.find((candidate) => candidate.id === initialMember.id) || {
+        ...initialMember,
+        name: patientName,
+      };
+    }
+
+    const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+    const updatedWorkspace = await addDriveFamilyMember(currentWorkspace, {
+      id: memberId,
+      name: patientName,
+      birthDate: extracted.patientBirthDate || undefined,
+      gender: genderFromOcr(extracted.patientGender),
+      role: 'other',
+    });
+    workspaceRef.current = updatedWorkspace;
+    setWorkspace(updatedWorkspace);
+    profilesRef.current = await reloadProfiles(updatedWorkspace);
+    const createdMember = updatedWorkspace.family.members.find((candidate) => candidate.id === memberId);
+    if (!createdMember) throw new Error('Không thể tải hồ sơ của thành viên vừa tạo.');
+    return createdMember;
+  }
+
+  function genderFromOcr(
+    value?: string,
+    fallback: FamilyMember['gender'] = 'other',
+  ): FamilyMember['gender'] {
+    const gender = value?.trim().toLowerCase();
+    if (gender === 'nam' || gender === 'male') return 'male';
+    if (gender === 'nữ' || gender === 'female') return 'female';
+    return fallback;
+  }
+
+  async function saveExtractedDocumentAutomatically(
+    draft: DigitizationDraft,
+    member: FamilyMember,
+  ): Promise<boolean> {
+    const profile = profilesRef.current[member.id] || profiles[member.id];
+    if (!profile) {
+      showToast(`Không tải được hồ sơ của ${member.name}; tài liệu chưa được gán.`, 'error');
+      return false;
+    }
+    const extracted = draft.extracted;
+    const event: HealthEvent = cleanAndDeduplicateEventData({
+      id: `event_${crypto.randomUUID()}`,
+      sourceFileId: draft.source.id,
+      sourceFileName: draft.source.name,
+      type: validEventType(extracted.type || 'other'),
+      title: extracted.title?.trim() || draft.source.name || 'Hồ sơ y tế mới',
+      date: validDateOrEmpty(extracted.date),
+      facility: extracted.facility,
+      doctorName: extracted.doctorName,
+      customCategory: extracted.customCategory,
+      physicalExam: extracted.physicalExam,
+      diagnoses: extracted.diagnoses || [],
+      medications: extracted.medications || [],
+      metrics: extracted.metrics || [],
+      imagingResults: extracted.imagingResults || [],
+      vaccinations: extracted.vaccinations || [],
+      hospitalization: extracted.hospitalization,
+      advice: extracted.advice,
+      nextFollowUp: extracted.nextFollowUp,
+      notes: extracted.notes,
+      patientName: extracted.patientName?.trim() || member.name,
+      patientBirthDate: extracted.patientBirthDate,
+      patientGender: extracted.patientGender,
+      extractedData: isRecord(extracted.extractedData)
+        ? extracted.extractedData as Record<string, JsonValue>
+        : undefined,
+      recordedAt: new Date().toISOString(),
+    });
+    const duplicate = detectDuplicateEvent(profile.timeline, {
+      ...extracted,
+      sourceFileId: draft.source.id,
+    });
+    const formData = new FormData();
+    formData.set('duplicateResolution', duplicate ? 'merge' : 'create_new');
+    formData.set('matchedEventId', duplicate?.matchedEvent.id || '');
+    const saved = await handleSaveDigitization(formData, {
+      draft,
+      member,
+      event,
+      duplicateResolution: duplicate ? 'merge' : 'create_new',
+      matchedEventId: duplicate?.matchedEvent.id,
+    });
+    if (saved) {
+      setIdentityResolutionDraft(null);
+      setDigitizationError('');
+      showToast(`Đã tự động lưu tài liệu cho ${member.name}.`, 'success');
+    }
+    return saved;
+  }
+
+  async function resolveUnknownSubject(memberId?: string, newMemberName?: string) {
+    const draft = identityResolutionDraft;
+    if (!draft) return;
+    setIsResolvingSubject(true);
+    setDigitizationError('');
+    try {
+      let targetMember: FamilyMember | undefined;
+      const currentWorkspace = workspaceRef.current;
+      if (!currentWorkspace) throw new Error('Không tìm thấy Workspace hiện tại.');
+
+      if (memberId) {
+        targetMember = currentWorkspace.family.members.find((candidate) => candidate.id === memberId);
+        if (!targetMember) throw new Error('Thành viên đã chọn không còn trong Workspace.');
+        if (!profilesRef.current[targetMember.id]) {
+          profilesRef.current = await reloadProfiles(currentWorkspace);
+        }
+      } else {
+        const name = newMemberName?.trim();
+        if (!name) throw new Error('Hãy nhập tên thành viên mới.');
+        const existingMember = findMemberByOcrPatientName(name, currentWorkspace.family.members);
+        if (existingMember) {
+          targetMember = existingMember;
+          if (!profilesRef.current[targetMember.id]) {
+            profilesRef.current = await reloadProfiles(currentWorkspace);
+          }
+        } else {
+          const initialMember =
+            currentWorkspace.family.members.find((candidate) =>
+              profilesRef.current[candidate.id]?.sources.some(
+                (source) => source.driveFileId === draft.source.id,
+              ),
+            ) || currentWorkspace.family.members[0];
+          if (!initialMember) throw new Error('Không có thành viên để làm hồ sơ khởi tạo.');
+          targetMember = await findOrCreateOcrMember(name, draft.extracted, initialMember);
+        }
+      }
+
+      if (!targetMember) throw new Error('Không xác định được thành viên đích.');
+      const resolvedDraft: DigitizationDraft = {
+        ...draft,
+        extracted: {
+          ...draft.extracted,
+          patientName: draft.extracted.patientName?.trim() || targetMember.name,
+        },
+      };
+      setSelectedMemberId(targetMember.id);
+      selectedMemberIdRef.current = targetMember.id;
+      const saved = await saveExtractedDocumentAutomatically(resolvedDraft, targetMember);
+      if (!saved) throw new Error('Chưa lưu được tài liệu. Vui lòng kiểm tra kết nối Drive rồi thử lại.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Không thể gán tài liệu vào hồ sơ.';
+      setDigitizationError(message);
+      showToast(message, 'error');
+    } finally {
+      setIsResolvingSubject(false);
     }
   }
 
@@ -1676,8 +1836,6 @@ export function HealthDashboard({
         modelUsed: 'gemini-3.5-flash-lite',
         partialExtracted: {},
         error: null,
-        detectedMemberMatch: null,
-        isRoutingDecisionRequired: false,
       });
       persistOcrRecoveryJob(job.driveFileId, 'processing', 45);
       await runDocumentExtraction(file, member, job.driveFileId);
@@ -1714,31 +1872,43 @@ export function HealthDashboard({
   }
 
   async function handleSaveDigitization(
-    event: React.FormEvent<HTMLFormElement>,
-    targetMemberId?: string
-  ) {
-    event.preventDefault();
+    submitEvent: React.FormEvent<HTMLFormElement> | FormData,
+    options: {
+      targetMemberId?: string;
+      member?: FamilyMember;
+      draft?: DigitizationDraft;
+      event?: HealthEvent;
+      duplicateResolution?: 'merge' | 'replace' | 'create_new';
+      matchedEventId?: string;
+    } = {},
+  ): Promise<boolean> {
+    if (!(submitEvent instanceof FormData)) submitEvent.preventDefault();
     const effectiveMember =
-      (targetMemberId && members.find((m) => m.id === targetMemberId)) || selectedMember;
-    const effectiveProfile = effectiveMember ? profiles[effectiveMember.id] : selectedProfile;
-    if (!digitizationDraft || !effectiveMember || !effectiveProfile) return;
-    const form = new FormData(event.currentTarget);
+      options.member ||
+      (options.targetMemberId && members.find((m) => m.id === options.targetMemberId)) ||
+      selectedMember;
+    let effectiveProfile = effectiveMember
+      ? profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id]
+      : selectedProfile;
+    const draft = options.draft || digitizationDraft;
+    if (!draft || !effectiveMember || !effectiveProfile) return false;
+    const form = submitEvent instanceof FormData ? submitEvent : new FormData(submitEvent.currentTarget);
     const date = String(form.get('date') || '');
     const title = String(form.get('title') || '').trim();
-    const extracted = digitizationDraft.extracted;
-    const duplicateResolution = String(form.get('duplicateResolution') || 'create_new') as
+    const extracted = draft.extracted;
+    const duplicateResolution = options.duplicateResolution || String(form.get('duplicateResolution') || 'create_new') as
       | 'merge'
       | 'replace'
       | 'create_new';
-    const matchedEventId = String(form.get('matchedEventId') || '');
+    const matchedEventId = options.matchedEventId || String(form.get('matchedEventId') || '');
 
-    const rawEvent: HealthEvent = {
+    const rawEvent: HealthEvent = options.event || {
       id: `event_${crypto.randomUUID()}`,
-      sourceFileId: digitizationDraft.source.id,
-      sourceFileName: digitizationDraft.source.name,
+      sourceFileId: draft.source.id,
+      sourceFileName: draft.source.name,
       type: validEventType(String(form.get('type') || extracted.type)),
       title: title || 'Hồ sơ y tế mới',
-      date: date || new Date().toISOString().slice(0, 10),
+      date,
       facility: String(form.get('facility') || '').trim() || undefined,
       doctorName: extracted.doctorName,
       customCategory: extracted.customCategory,
@@ -1762,9 +1932,83 @@ export function HealthDashboard({
     };
 
     // Khử trùng lặp nội dung bên trong (chẩn đoán, thuốc, chỉ số đo)
-    const nextEvent = cleanAndDeduplicateEventData(rawEvent);
+    const nextEvent = options.event || cleanAndDeduplicateEventData(rawEvent);
 
     try {
+      const currentProfiles = profilesRef.current;
+      const sourceOwner = members.find((member) =>
+        currentProfiles[member.id]?.sources.some(
+          (source) => source.driveFileId === draft.source.id && !source.relocatedToMemberId,
+        ),
+      );
+      const priorSource = Object.values(currentProfiles)
+        .flatMap((profile) => profile.sources)
+        .find((source) => source.driveFileId === draft.source.id);
+      const { relocatedToMemberId: _previousOwner, ...sourceBase } = priorSource || {
+        driveFileId: draft.source.id,
+        fileName: draft.source.name,
+        mimeType: draft.source.mimeType || 'application/octet-stream',
+        uploadedAt: draft.source.createdTime || new Date().toISOString(),
+        status: 'pending' as const,
+      };
+      const targetSource: HealthSource = {
+        ...sourceBase,
+        status: priorSource?.status || 'pending',
+        relocatedToMemberId: undefined,
+      };
+
+      if (sourceOwner?.id !== effectiveMember.id) {
+       let driveFileMoved = false;
+       try {
+         await moveDriveFileToMember(draft.source.id, effectiveMember);
+         driveFileMoved = true;
+         const targetWithSource = addHealthSource(effectiveProfile, targetSource);
+         effectiveProfile = await saveHealthProfile(effectiveMember.profileFileId, targetWithSource);
+         currentProfiles[effectiveMember.id] = effectiveProfile;
+         profilesRef.current = currentProfiles;
+         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: effectiveProfile! }));
+
+         if (sourceOwner) {
+           const ownerProfile = currentProfiles[sourceOwner.id];
+           if (ownerProfile) {
+             const relocatedProfile: HealthProfile = {
+               ...ownerProfile,
+               sources: ownerProfile.sources.map((source) =>
+                 source.driveFileId === draft.source.id
+                   ? { ...source, relocatedToMemberId: effectiveMember.id }
+                   : source,
+               ),
+               updatedAt: new Date().toISOString(),
+             };
+             const savedOwner = await saveHealthProfile(sourceOwner.profileFileId, relocatedProfile);
+             currentProfiles[sourceOwner.id] = savedOwner;
+             setProfiles((previous) => ({ ...previous, [sourceOwner.id]: savedOwner }));
+           }
+         }
+       } catch (transferError) {
+         if (driveFileMoved && sourceOwner) {
+           try {
+             await moveDriveFileToMember(draft.source.id, sourceOwner);
+           } catch (rollbackError) {
+             const originalMessage = transferError instanceof Error ? transferError.message : 'Lỗi chưa xác định.';
+             const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : 'Lỗi chưa xác định.';
+             throw new Error(
+               `Không thể hoàn tất chuyển tài liệu (${originalMessage}). Cũng không thể chuyển tệp về thư mục ban đầu (${rollbackMessage}). Hãy kiểm tra hai hồ sơ trên Drive trước khi tiếp tục.`,
+             );
+           }
+         }
+         throw transferError;
+       }
+      } else if (!effectiveProfile.sources.some((source) => source.driveFileId === draft.source.id)) {
+        effectiveProfile = await saveHealthProfile(
+          effectiveMember.profileFileId,
+          addHealthSource(effectiveProfile, targetSource),
+        );
+        currentProfiles[effectiveMember.id] = effectiveProfile;
+        profilesRef.current = currentProfiles;
+        setProfiles((previous) => ({ ...previous, [effectiveMember.id]: effectiveProfile! }));
+      }
+
       const existingMatch = matchedEventId
         ? effectiveProfile.timeline.find((item) => item.id === matchedEventId)
         : null;
@@ -1776,7 +2020,7 @@ export function HealthDashboard({
           item.id === matchedEventId ? mergedEvent : item
         );
         const updatedSources = effectiveProfile.sources.map((item) =>
-          item.driveFileId === digitizationDraft.source.id
+          item.driveFileId === draft.source.id
             ? { ...item, status: 'processed' as const, digitizedAt: new Date().toISOString() }
             : item
         );
@@ -1789,9 +2033,11 @@ export function HealthDashboard({
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
-        forgetOcrRecoveryJob(digitizationDraft.source.id);
+        forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
+        selectedMemberIdRef.current = effectiveMember.id;
         setDigitizationDraft(null);
+        setIdentityResolutionDraft(null);
         setDigitizationError('');
         showToast(
           `Đã hợp nhất dữ liệu vào hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
@@ -1799,7 +2045,7 @@ export function HealthDashboard({
         );
         setActiveTab('timeline');
         processNextInQueue();
-        return;
+        return true;
       } else if (duplicateResolution === 'replace' && existingMatch) {
         // 2. Ghi đè toàn bộ sự kiện cũ bằng dữ liệu mới nhất
         const replacedEvent: HealthEvent = { ...nextEvent, id: matchedEventId };
@@ -1807,7 +2053,7 @@ export function HealthDashboard({
           item.id === matchedEventId ? replacedEvent : item
         );
         const updatedSources = effectiveProfile.sources.map((item) =>
-          item.driveFileId === digitizationDraft.source.id
+          item.driveFileId === draft.source.id
             ? { ...item, status: 'processed' as const, digitizedAt: new Date().toISOString() }
             : item
         );
@@ -1820,9 +2066,11 @@ export function HealthDashboard({
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
-        forgetOcrRecoveryJob(digitizationDraft.source.id);
+        forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
+        selectedMemberIdRef.current = effectiveMember.id;
         setDigitizationDraft(null);
+        setIdentityResolutionDraft(null);
         setDigitizationError('');
         showToast(
           `Đã cập nhật ghi đè hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
@@ -1830,22 +2078,28 @@ export function HealthDashboard({
         );
         setActiveTab('timeline');
         processNextInQueue();
-        return;
+        return true;
       } else {
         // 3. Tạo sự kiện mới độc lập
         const nextProfile = digitizeHealthSource(effectiveProfile, nextEvent);
         const merged = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: merged }));
-        forgetOcrRecoveryJob(digitizationDraft.source.id);
+        forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
+        selectedMemberIdRef.current = effectiveMember.id;
         setDigitizationDraft(null);
+        setIdentityResolutionDraft(null);
         setDigitizationError('');
         showToast(`Đã lưu hồ sơ sức khỏe cho ${effectiveMember.name} lên Google Drive.`, 'success');
         setActiveTab('timeline');
         processNextInQueue();
+        return true;
       }
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Không thể lưu hồ sơ.', 'error');
+      const message = error instanceof Error ? error.message : 'Không thể lưu hồ sơ.';
+      setDigitizationError(message);
+      showToast(message, 'error');
+      return false;
     }
   }
 
@@ -1888,7 +2142,7 @@ export function HealthDashboard({
     if (!selectedMember || !selectedProfile) return;
     setIsSummarizing(true);
     setAnalysisError('');
-    digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu (${model}) cho ${selectedMember.name}`);
+    digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu (${model})`, { memberId: selectedMember.id });
     
     try {
       // Step 1: Narrative Summary (3.5-flash-lite)
@@ -1909,7 +2163,7 @@ export function HealthDashboard({
       
       const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      digitizationLogger.log('info', 'analysis', `Hoàn tất phân tích chuyên sâu cho ${selectedMember.name}`);
+      digitizationLogger.log('info', 'analysis', 'Hoàn tất phân tích chuyên sâu', { memberId: selectedMember.id });
       showToast(`Đã hoàn tất phân tích 4 lớp y khoa chuyên sâu bằng AI!`, 'success');
     } catch (error) {
       const rawMsg = error instanceof Error ? error.message : 'Không thể tạo tổng kết bệnh án.';
@@ -1925,7 +2179,7 @@ export function HealthDashboard({
         }
       }
       setAnalysisError(friendlyMsg);
-      digitizationLogger.log('error', 'analysis', `Lỗi phân tích chuyên sâu: ${friendlyMsg}`, { error });
+      digitizationLogger.log('error', 'analysis', 'Lỗi phân tích chuyên sâu');
       showToast(friendlyMsg, 'error');
     } finally {
       setIsSummarizing(false);
@@ -2731,60 +2985,9 @@ export function HealthDashboard({
                       </div>
                     </div>
 
-                    {chartData.length > 1 ? (
-                      <div className="h-56 w-full pt-2">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <AreaChart
-                            data={chartData}
-                            margin={{ top: 10, right: 10, left: -15, bottom: 0 }}
-                          >
-                            <defs>
-                              <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#059669" stopOpacity={0.25} />
-                                <stop offset="95%" stopColor="#059669" stopOpacity={0} />
-                              </linearGradient>
-                            </defs>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                            <XAxis
-                              dataKey="date"
-                              tick={{ fontSize: 11, fill: '#64748b' }}
-                              stroke="#cbd5e1"
-                            />
-                            <YAxis
-                              tick={{ fontSize: 11, fill: '#64748b' }}
-                              stroke="#cbd5e1"
-                              domain={['auto', 'auto']}
-                            />
-                            <Tooltip
-                              contentStyle={{
-                                backgroundColor: '#0f172a',
-                                borderRadius: '12px',
-                                color: '#fff',
-                                border: 'none',
-                                fontSize: '12px',
-                                boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)',
-                              }}
-                              formatter={(value: any) => [
-                                `${value} ${chartData[0]?.unit || ''}`,
-                                selectedMetric,
-                              ]}
-                            />
-                            <Area
-                              type="monotone"
-                              dataKey="value"
-                              stroke="#059669"
-                              strokeWidth={3}
-                              fillOpacity={1}
-                              fill="url(#colorMetric)"
-                            />
-                          </AreaChart>
-                        </ResponsiveContainer>
-                      </div>
-                    ) : (
-                      <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
-                        Cần ghi nhận ít nhất 2 mốc thời gian để vẽ biểu đồ diễn biến {selectedMetric}.
-                      </div>
-                    )}
+                    <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
+                      <HealthMetricsChart data={chartData} metricName={selectedMetric} />
+                    </Suspense>
                   </div>
                 )}
 
@@ -2872,7 +3075,7 @@ export function HealthDashboard({
                                     </span>
                                   )}
                                   <span aria-hidden="true">·</span>
-                                  <span className="font-mono tabular-nums">{formatDateVN(event.date)}</span>
+                                  <span className="font-mono tabular-nums">{formatDateVN(event.date) || 'Chưa rõ ngày'}</span>
                                 </div>
                                 <h4 className="text-base font-extrabold text-slate-900 mt-0.5">
                                   {event.title}
@@ -3300,7 +3503,19 @@ export function HealthDashboard({
                             >
                               Mở hồ sơ
                             </button>
-                            {driveAuthorized && (
+                            {driveAuthorized && isWorkspaceAdmin && (
+                              <button
+                                type="button"
+                                disabled={isLoading || isSavingMember}
+                                onClick={() => setEditingMember(m)}
+                                aria-label={`Chỉnh sửa thông tin của ${m.name}`}
+                                title="Chỉnh sửa thông tin thành viên"
+                                className="p-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </button>
+                            )}
+                            {driveAuthorized && isWorkspaceAdmin && (
                               <button
                                 type="button"
                                 disabled={isLoading}
@@ -3691,7 +3906,6 @@ export function HealthDashboard({
           isOpen={trackerState.isOpen}
           file={trackerState.file}
           member={trackerMember}
-          members={members}
           step={trackerState.step}
           progressPercent={trackerState.progressPercent}
           progressMessage={trackerState.progressMessage}
@@ -3699,8 +3913,6 @@ export function HealthDashboard({
           modelUsed={trackerState.modelUsed}
           partialExtracted={trackerState.partialExtracted}
           error={trackerState.error}
-          detectedMemberMatch={trackerState.detectedMemberMatch}
-          isRoutingDecisionRequired={trackerState.isRoutingDecisionRequired}
           onReview={() => {
             if (trackerState.driveFile) {
               setDigitizationDraft({
@@ -3709,107 +3921,6 @@ export function HealthDashboard({
               });
             }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
-          }}
-          onSaveToDetected={async () => {
-            if (trackerState.detectedMemberMatch && trackerState.driveFile) {
-              const matched = trackerState.detectedMemberMatch;
-              const file = trackerState.file!;
-              const driveFileId = trackerState.driveFile.id;
-              
-              setTrackerState(prev => ({
-                ...prev,
-                progressMessage: `Đang chuyển hồ sơ sang: ${matched.name}...`,
-                progressPercent: 92,
-                step: 'matching_patient'
-              }));
-              
-              try {
-                await autoCommitAndRefineDigitization(trackerState.partialExtracted, file, matched, driveFileId);
-              } catch (err) {
-                showToast(err instanceof Error ? err.message : 'Lỗi khi chuyển hồ sơ.', 'error');
-                processNextInQueue();
-              }
-            } else {
-              processNextInQueue();
-            }
-          }}
-          onCreateNewMember={async () => {
-            if (!workspace || !trackerState.partialExtracted.patientName || !trackerState.driveFile) {
-              setTrackerState(prev => ({ ...prev, isOpen: false }));
-              processNextInQueue();
-              return;
-            }
-            const name = trackerState.partialExtracted.patientName;
-            const birthDate = trackerState.partialExtracted.patientBirthDate;
-            const genderRaw = trackerState.partialExtracted.patientGender as any;
-            const gender = (genderRaw === 'Nam' || genderRaw === 'male') ? 'male' : (genderRaw === 'Nữ' || genderRaw === 'female') ? 'female' : 'other';
-            const file = trackerState.file!;
-            const driveFileId = trackerState.driveFile.id;
-
-            setTrackerState(prev => ({
-              ...prev,
-              progressMessage: `Đang khởi tạo hồ sơ cho: ${name}...`,
-              progressPercent: 92,
-              step: 'matching_patient'
-            }));
-            
-            try {
-              const currentMemberId = trackerState.memberId;
-              const currentMember = members.find(m => m.id === currentMemberId);
-              const currentProfile = currentMember ? profiles[currentMember.id] : null;
-              
-              let targetMember: FamilyMember | null = null;
-              let freshProfiles: Record<string, HealthProfile> | undefined;
-
-              // Tối ưu: Nếu thành viên hiện tại chỉ là placeholder vừa tạo (chưa có sự kiện nào)
-              // thì cập nhật thông tin luôn cho mượt, tránh tạo người thứ 2 dư thừa
-              if (currentMember && currentProfile && currentProfile.timeline.length <= 0 && members.length === 1) {
-                const next = await updateDriveFamilyMember(workspace, currentMember.id, {
-                  name: name.trim(),
-                  birthDate: birthDate || undefined,
-                  gender,
-                });
-                workspaceRef.current = next;
-                setWorkspace(next);
-                targetMember = next.family.members.find(m => m.id === currentMemberId) || null;
-                freshProfiles = await reloadProfiles(next);
-                if (freshProfiles) {
-                  profilesRef.current = freshProfiles;
-                }
-                selectedMemberIdRef.current = currentMemberId;
-                setSelectedMemberId(currentMemberId);
-              } else {
-                // Tạo người mới bình thường
-                const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
-                const next = await addDriveFamilyMember(workspace, {
-                  id: memberId,
-                  name: name.trim(),
-                  birthDate: birthDate || undefined,
-                  gender,
-                  role: 'other',
-                });
-                workspaceRef.current = next;
-                setWorkspace(next);
-                targetMember = next.family.members.find(m => m.id === memberId) || null;
-                freshProfiles = await reloadProfiles(next);
-                if (freshProfiles) {
-                  profilesRef.current = freshProfiles;
-                }
-                selectedMemberIdRef.current = memberId;
-                setSelectedMemberId(memberId);
-              }
-
-              if (targetMember) {
-                await autoCommitAndRefineDigitization(trackerState.partialExtracted, file, targetMember, driveFileId, freshProfiles);
-              } else {
-                throw new Error('Không thể xác định hồ sơ đích sau khi khởi tạo.');
-              }
-            } catch (err) {
-              console.error('[Create New Member Error]:', err);
-              showToast(err instanceof Error ? err.message : 'Không thể xử lý hồ sơ mới.', 'error');
-              setTrackerState(prev => ({ ...prev, isOpen: false }));
-              processNextInQueue();
-            }
           }}
           onRetry={() => {
             void retryDigitization();
@@ -3828,9 +3939,6 @@ export function HealthDashboard({
               showToast('Tài liệu vẫn đang được xử lý. Hãy đợi hoàn tất hoặc hủy các tệp còn trong hàng đợi.', 'info');
               return;
             }
-            if (trackerState.step === 'completed' && trackerState.driveFile) {
-              forgetOcrRecoveryJob(trackerState.driveFile.id);
-            }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
             if (queueStatus) processNextInQueue();
           }}
@@ -3846,11 +3954,29 @@ export function HealthDashboard({
           profiles={profiles}
           selectedMemberId={selectedMemberId}
           onClose={() => {
-            if (digitizationDraft) forgetOcrRecoveryJob(digitizationDraft.source.id);
             setDigitizationDraft(null);
             processNextInQueue();
           }}
-          onSave={(e, targetMemberId) => void handleSaveDigitization(e, targetMemberId)}
+          onSave={(e, targetMemberId) =>
+            void handleSaveDigitization(e, { targetMemberId })
+          }
+        />
+      )}
+
+      {identityResolutionDraft && (
+        <SubjectResolutionModal
+          fileName={identityResolutionDraft.source.name}
+          members={members}
+          isSaving={isResolvingSubject}
+          error={digitizationError}
+          onClose={() => {
+            setIdentityResolutionDraft(null);
+            setDigitizationError('');
+            showToast('Tài liệu vẫn nằm trên Drive; có thể chạy lại OCR để gán hồ sơ sau.', 'info');
+            processNextInQueue();
+          }}
+          onSelectMember={(memberId) => void resolveUnknownSubject(memberId)}
+          onCreateMember={(name) => void resolveUnknownSubject(undefined, name)}
         />
       )}
 
@@ -3900,13 +4026,9 @@ export function HealthDashboard({
             modelUsed: 'gemini-3.5-flash-lite',
             partialExtracted: {},
             error: null,
-            detectedMemberMatch: member,
-            isRoutingDecisionRequired: false,
           });
 
-          const res = await extractHealthEventWithProgress(file, member, applyExtractionProgress);
-          await autoCommitAndRefineDigitization(res.extracted, file, member, source.driveFileId);
-          await reloadProfiles(workspace!);
+          await runDocumentExtraction(file, member, source.driveFileId);
         }}
         showToast={showToast}
       />
@@ -3919,6 +4041,14 @@ export function HealthDashboard({
         onFactoryReset={handleFactoryReset}
         showToast={showToast}
       />
+      {editingMember && (
+        <MemberEditModal
+          member={editingMember}
+          isSaving={isSavingMember}
+          onClose={() => setEditingMember(null)}
+          onSave={(updates) => void handleSaveMember(updates)}
+        />
+      )}
     </div>
   );
 }
@@ -4225,7 +4355,7 @@ function DigitizationReviewModal({
               name="date"
               type="date"
               required
-              defaultValue={validDate(extracted.date)}
+              defaultValue={validDateOrEmpty(extracted.date)}
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
@@ -4377,12 +4507,6 @@ function parseMetricLines(value: string): HealthEvent['metrics'] {
       if (!name || !Number.isFinite(metricValue)) return [];
       return [{ name: sanitizeMetricName(name), value: metricValue, unit: unit || '' }];
     });
-}
-
-function validDate(value?: string): string {
-  return value && /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? value
-    : new Date().toISOString().slice(0, 10);
 }
 
 function validDateOrEmpty(value?: string): string {

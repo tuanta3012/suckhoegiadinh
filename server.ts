@@ -219,10 +219,22 @@ function parseJsonSafely(text: string): Record<string, unknown> {
   try {
     const parsed = parseRobustJson(text);
     return cleanExtractedJson(parsed);
-  } catch (e) {
-    digitizationLogger.log('error', 'server-parser', 'Lỗi parse JSON an toàn', { error: e, text: text.substring(0, 500) });
-    throw e;
+  } catch (error) {
+    digitizationLogger.log('error', 'server-parser', 'Lỗi parse JSON an toàn');
+    throw error;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isRecordArray(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value) && value.every(isRecord);
 }
 
 interface ExecuteOptions {
@@ -395,8 +407,8 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
         digitizationLogger.log(
           'warn',
           'task-executor',
-          `Task ${options.task} thất bại với Key ${project.id} trên ${currentModel} (${details.status || 'network'}): ${details.message}.`,
-          { task: options.task, projectId: project.id, model: currentModel, error: details.message }
+          `Task ${options.task} thất bại với Key ${project.id} trên ${currentModel} (${details.status || 'network'}).`,
+          { task: options.task, projectId: project.id, model: currentModel, status: details.status }
         );
         
         options.onProgress?.(`Key ${project.id} gặp sự cố; chuyển sang Key tiếp theo trong pool...`);
@@ -481,8 +493,8 @@ async function executeDigitizationWithFailover(
       digitizationLogger.log(
         'warn',
         'worker',
-        `Key ${project.id} lỗi OCR (${details.status || 'network'}): ${details.message}; tự động xoay sang Key tiếp theo với cùng model ${targetModel}...`,
-        { projectId: project.id, model: targetModel, error: details.message },
+        `Key ${project.id} lỗi OCR (${details.status || 'network'}); chuyển sang Key tiếp theo với cùng model ${targetModel}...`,
+        { projectId: project.id, model: targetModel, status: details.status },
       );
       options.onProgress?.(
         `Key ${project.id} gặp sự cố; chuyển tức thì sang Key khả dụng kế tiếp trong pool...`,
@@ -553,7 +565,7 @@ async function startServer() {
       res.locals.firebaseUid = uid;
       next();
     } catch (error) {
-      console.error('[Gemini Auth] Token verification service unavailable.', error);
+      console.error('[Gemini Auth] Token verification service unavailable.');
       res.status(503).json({ error: 'Chưa thể xác minh phiên đăng nhập. Vui lòng thử lại.' });
     }
   });
@@ -801,7 +813,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
               
               if (isRetryable && attempt < maxBatchRetries - 1) {
                 const delay = Math.pow(2, attempt + 1) * 2000; // 4s, 8s, 16s
-                digitizationLogger.log('warn', 'worker', `Lỗi batch ${batchIndex + 1} (${details.status}). Thử lại sau ${delay/1000}s (Lần ${attempt + 1}/${maxBatchRetries})`, { error: details.message });
+                digitizationLogger.log('warn', 'worker', `Lỗi batch ${batchIndex + 1} (${details.status}). Thử lại sau ${delay/1000}s (Lần ${attempt + 1}/${maxBatchRetries})`);
                 await sleep(delay);
                 continue;
               }
@@ -854,7 +866,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
               batch,
             );
           } catch (error) {
-            digitizationLogger.log('error', 'worker', `Thất bại vĩnh viễn tại batch ${i + 1} sau khi thử lại`, { error });
+            digitizationLogger.log('error', 'worker', `Thất bại vĩnh viễn tại batch ${i + 1} sau khi thử lại`);
             if (!signal?.aborted) modelAbortController?.abort(error);
             throw error;
           }
@@ -939,7 +951,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
     } catch (error) {
       if (heartbeat) clearInterval(heartbeat);
       if (extractionTimeout) clearTimeout(extractionTimeout);
-      console.error('[Gemini Server Extract Error]:', error);
+      console.error('[Gemini Server Extract Error]', { status: describeGeminiError(error).status });
       const message = error instanceof Error ? error.message : 'Lỗi khi số hóa tài liệu y tế qua server Gemini API.';
       if (res.headersSent) {
         writeSse(res, { type: 'error', error: message });
@@ -995,7 +1007,7 @@ Hãy:
         modelUsed,
       });
     } catch (error) {
-      console.error('[Gemini Server Refine Error]:', error);
+      console.error('[Gemini Server Refine Error]', { status: describeGeminiError(error).status });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Lỗi khi chuẩn hóa dữ liệu.',
       });
@@ -1037,7 +1049,7 @@ Trình bày bằng tiếng Việt rõ ràng, ân cần.`;
       const parsed = parseJsonSafely(text) as { summary?: string };
       res.json({ success: true, summary: parsed.summary || text, modelUsed });
     } catch (error) {
-      console.error('[Gemini Server Summary Error]:', error);
+      console.error('[Gemini Server Summary Error]', { status: describeGeminiError(error).status });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Lỗi khi tổng kết hồ sơ y tế.',
       });
@@ -1054,7 +1066,7 @@ function pruneProfileForAnalysis(member: any, profile: any) {
       const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
       const pruned = pruneProfileForAnalysis(member, profile);
-      digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu cho ${memberName}`, { eventCount: profile?.timeline?.length });
+      digitizationLogger.log('info', 'analysis', 'Bắt đầu phân tích chuyên sâu', { memberId: member?.id, eventCount: profile?.timeline?.length });
       const prompt = `Bạn là Hội đồng Chuyên gia Y khoa Gia đình & AI Deep-Dive cấp cao.
 Nhiệm vụ: Phân tích 4 lớp y khoa chuyên sâu cho thành viên ${memberName}.
 
@@ -1063,12 +1075,12 @@ ${JSON.stringify(pruned, null, 2)}
 (Chú thích: p=patient, n=name, g=gender, b=birthDate, h=history, tm=timeline, d=date, t=title, diag=diagnoses, img=imaging, phys=physicalExam, bp=bloodPressure, st=status, val=value)
 
 YÊU CẦU PHÂN TÍCH (BẮT BUỘC):
-1. LỚP 1 - Tương quan chéo (crossCorrelations): Đối chiếu chéo giữa các chỉ số xét nghiệm và chẩn đoán hình ảnh (VD: Acid Uric + Thận; Men gan + Siêu âm bụng).
-2. LỚP 2 - Biến động lịch sử (velocityTrends): So sánh xu hướng và tốc độ thay đổi của các chỉ số quan trọng qua thời gian.
-3. LỚP 3 - Giám sát mạn tính (chronicSurveillance): Theo dõi các nốt, polyp, bệnh mạn tính và tình trạng phục hồi sau phẫu thuật.
+1. LỚP 1 - Tương quan chéo (crossCorrelations): Chỉ đối chiếu dữ liệu thực sự có trong hồ sơ; nếu thiếu dữ liệu, nêu rõ chưa đủ thông tin.
+2. LỚP 2 - Biến động lịch sử (velocityTrends): Chỉ mô tả xu hướng khi có đủ phép đo theo thời gian; không suy ra ổn định từ dữ liệu thiếu.
+3. LỚP 3 - Giám sát mạn tính (chronicSurveillance): Chỉ kết luận ổn định/lành tính khi được dữ liệu hỗ trợ; nếu thiếu, nêu rõ chưa đủ thông tin.
 4. LỚP 4 - Lộ trình hành động (roadmap): Đưa ra Cảnh báo đỏ, Khám chuyên khoa cần thiết, và Lịch kiểm tra 3-6-12 tháng.
 
-LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ số trong sự kiện cũ, nghĩa là nó bình thường. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
+LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên hoặc chưa được số hóa; không có dữ liệu KHÔNG đồng nghĩa với bình thường. Không tự suy diễn kết quả, chẩn đoán, điểm sức khỏe hay khuyến nghị. Nếu không đủ căn cứ, mô tả rõ là chưa đủ dữ liệu. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
 
       const responseSchema = {
         type: Type.OBJECT,
@@ -1151,52 +1163,95 @@ LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ s�
       });
 
       const parsed = parseJsonSafely(text) as Record<string, unknown>;
-      const healthScore = typeof parsed.healthScore === 'number' && Number.isFinite(parsed.healthScore)
-        ? Math.min(100, Math.max(0, parsed.healthScore))
-        : 85;
-      const overallAssessment = typeof parsed.overallAssessment === 'string' && parsed.overallAssessment.trim()
-        ? parsed.overallAssessment.trim()
-        : 'Đã tổng hợp ma trận hồ sơ sức khỏe và hoàn tất phân tích y khoa 4 lớp.';
+      if (
+        typeof parsed.healthScore !== 'number' ||
+        !Number.isFinite(parsed.healthScore) ||
+        parsed.healthScore < 0 ||
+        parsed.healthScore > 100 ||
+        typeof parsed.overallAssessment !== 'string' ||
+        !parsed.overallAssessment.trim()
+      ) {
+        throw new Error('Phản hồi phân tích AI thiếu điểm số hoặc đánh giá tổng quan hợp lệ.');
+      }
+      const healthScore = parsed.healthScore;
+      const overallAssessment = parsed.overallAssessment.trim();
+
+      const crossRaw = parsed.crossCorrelations;
+      const velocityRaw = parsed.velocityTrends;
+      const chronicRaw = parsed.chronicSurveillance;
+      const roadmapRaw = parsed.roadmap;
+      const timeBoundPlanRaw = isRecord(roadmapRaw) ? roadmapRaw.timeBoundPlan : undefined;
+      if (
+        !isRecordArray(crossRaw) ||
+        !crossRaw.every((item) =>
+          isStringArray(item.parameters) &&
+          typeof item.findings === 'string' &&
+          ['critical', 'warning', 'info'].includes(String(item.severity)),
+        ) ||
+        !isRecordArray(velocityRaw) ||
+        !velocityRaw.every((item) =>
+          typeof item.metricName === 'string' &&
+          ['increasing', 'decreasing', 'stable', 'fluctuating'].includes(String(item.trendDirection)) &&
+          typeof item.velocityDescription === 'string' &&
+          typeof item.riskProjection === 'string',
+        ) ||
+        !isRecordArray(chronicRaw) ||
+        !chronicRaw.every((item) =>
+          typeof item.conditionName === 'string' &&
+          ['stable_benign', 'monitored', 'progressing', 'resolved'].includes(String(item.status)) &&
+          typeof item.comparisonOverTime === 'string' &&
+          typeof item.recommendation === 'string',
+        ) ||
+        !isRecord(roadmapRaw) ||
+        !isStringArray(roadmapRaw.criticalAlerts) ||
+        !isRecordArray(roadmapRaw.specialistReferrals) ||
+        !roadmapRaw.specialistReferrals.every((item) =>
+          typeof item.specialty === 'string' && typeof item.reason === 'string',
+        ) ||
+        !isRecord(timeBoundPlanRaw) ||
+        !isStringArray(timeBoundPlanRaw.next3Months) ||
+        !isStringArray(timeBoundPlanRaw.next6Months) ||
+        !isStringArray(timeBoundPlanRaw.next12Months)
+      ) {
+        throw new Error('Phản hồi phân tích AI thiếu dữ liệu bắt buộc hoặc không đúng cấu trúc.');
+      }
 
       const crossCorrelations = Array.isArray(parsed.crossCorrelations)
-        ? (parsed.crossCorrelations as any[]).map((item) => ({
-            parameters: Array.isArray(item.parameters) ? item.parameters.map(String) : [],
-            findings: String(item.findings || ''),
-            severity: (item.severity === 'critical' || item.severity === 'warning' ? item.severity : 'info') as 'critical' | 'warning' | 'info',
+        ? crossRaw.map((item) => ({
+            parameters: item.parameters as string[],
+            findings: item.findings as string,
+            severity: item.severity as 'critical' | 'warning' | 'info',
           }))
         : [];
 
       const velocityTrends = Array.isArray(parsed.velocityTrends)
-        ? (parsed.velocityTrends as any[]).map((item) => ({
-            metricName: String(item.metricName || ''),
-            trendDirection: (['increasing', 'decreasing', 'stable', 'fluctuating'].includes(item.trendDirection) ? item.trendDirection : 'stable') as any,
-            velocityDescription: String(item.velocityDescription || ''),
-            riskProjection: String(item.riskProjection || ''),
+        ? velocityRaw.map((item) => ({
+            metricName: item.metricName as string,
+            trendDirection: item.trendDirection as 'increasing' | 'decreasing' | 'stable' | 'fluctuating',
+            velocityDescription: item.velocityDescription as string,
+            riskProjection: item.riskProjection as string,
           }))
         : [];
 
       const chronicSurveillance = Array.isArray(parsed.chronicSurveillance)
-        ? (parsed.chronicSurveillance as any[]).map((item) => ({
-            conditionName: String(item.conditionName || ''),
-            status: (['stable_benign', 'monitored', 'progressing', 'resolved'].includes(item.status) ? item.status : 'monitored') as any,
-            comparisonOverTime: String(item.comparisonOverTime || ''),
-            recommendation: String(item.recommendation || ''),
+        ? chronicRaw.map((item) => ({
+            conditionName: item.conditionName as string,
+            status: item.status as 'stable_benign' | 'monitored' | 'progressing' | 'resolved',
+            comparisonOverTime: item.comparisonOverTime as string,
+            recommendation: item.recommendation as string,
           }))
         : [];
 
-      const roadmapRaw = (parsed.roadmap && typeof parsed.roadmap === 'object' ? parsed.roadmap : {}) as any;
       const roadmap = {
-        criticalAlerts: Array.isArray(roadmapRaw.criticalAlerts) ? roadmapRaw.criticalAlerts.map(String) : [],
-        specialistReferrals: Array.isArray(roadmapRaw.specialistReferrals)
-          ? roadmapRaw.specialistReferrals.map((item: any) => ({
-              specialty: String(item.specialty || 'Nội khoa tổng quát'),
-              reason: String(item.reason || ''),
-            }))
-          : [],
+        criticalAlerts: roadmapRaw.criticalAlerts as string[],
+        specialistReferrals: roadmapRaw.specialistReferrals.map((item) => ({
+          specialty: item.specialty as string,
+          reason: item.reason as string,
+        })),
         timeBoundPlan: {
-          next3Months: Array.isArray(roadmapRaw.timeBoundPlan?.next3Months) ? roadmapRaw.timeBoundPlan.next3Months.map(String) : [],
-          next6Months: Array.isArray(roadmapRaw.timeBoundPlan?.next6Months) ? roadmapRaw.timeBoundPlan.next6Months.map(String) : [],
-          next12Months: Array.isArray(roadmapRaw.timeBoundPlan?.next12Months) ? roadmapRaw.timeBoundPlan.next12Months.map(String) : [],
+          next3Months: timeBoundPlanRaw.next3Months as string[],
+          next6Months: timeBoundPlanRaw.next6Months as string[],
+          next12Months: timeBoundPlanRaw.next12Months as string[],
         },
       };
 
@@ -1208,8 +1263,7 @@ LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ s�
         /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(item),
       );
       const followUpScheduleStr =
-        roadmap.timeBoundPlan.next3Months.find((item) => /tái khám|kiểm tra lại|xét nghiệm lại/i.test(item)) ||
-        'Tái khám kiểm tra lại chỉ số bất thường sau 3 tháng.';
+        roadmap.timeBoundPlan.next3Months.find((item) => /tái khám|kiểm tra lại|xét nghiệm lại/i.test(item));
 
       const aiAnalysisBlock = {
         lastAnalyzedDate: todayStr,
@@ -1222,17 +1276,10 @@ LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ s�
           (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`,
         ),
         actionRoadmap: {
-          specialistConsultation:
-            specialistConsultationList.length > 0 ? specialistConsultationList : ['Nội khoa tổng quát'],
+          specialistConsultation: specialistConsultationList,
           dietaryModifications:
-            dietaryModificationsList.length > 0
-              ? dietaryModificationsList
-              : [
-                  'Kiêng tuyệt đối thực phẩm giàu purin (thịt đỏ, hải sản, nội tạng).',
-                  'Tuyệt đối không sử dụng rượu bia.',
-                  'Uống nhiều nước (trên 2.5 - 3 lít/ngày).',
-                ],
-          followUpSchedule: followUpScheduleStr,
+            dietaryModificationsList,
+          followUpSchedule: followUpScheduleStr || '',
         },
       };
 
@@ -1251,7 +1298,7 @@ LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ s�
         modelUsed,
       });
     } catch (error) {
-      console.error('[Gemini Server Analyze Error]:', error);
+      console.error('[Gemini Server Analyze Error]', { status: describeGeminiError(error).status });
       const { status, message } = describeGeminiError(error);
       let userFriendlyMessage = message;
       if (status === 503 || /high demand|temporarily unavailable|overloaded/i.test(message)) {
@@ -1368,7 +1415,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
                 const shouldRetry = recordProjectFailure(scheduler, lease.project.id, model, error);
                 if (hasOutput || controller.signal.aborted) throw lastError;
                 console.warn(
-                  `[Gemini assistant] ${model} failed for configured project ${lease.project.id} (${details.status || 'network'}): ${details.message}`,
+                  `[Gemini assistant] ${model} failed for configured project ${lease.project.id} (${details.status || 'network'}).`,
                 );
                 if (!shouldRetry) throw lastError;
               } finally {
@@ -1402,7 +1449,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
 
       res.json({ success: true, answer: text, modelUsed });
     } catch (error) {
-      console.error('[Gemini Server Assistant Error]:', error);
+      console.error('[Gemini Server Assistant Error]', { status: describeGeminiError(error).status });
       if (res.headersSent) {
         writeSse(res, {
           type: 'error',
@@ -1430,7 +1477,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
       res.status(400).json({ error: 'Dữ liệu yêu cầu không phải JSON hợp lệ.' });
       return;
     }
-    console.error('[HTTP] Unhandled server error.', error);
+    console.error('[HTTP] Unhandled server error.');
     res.status(500).json({ error: 'Máy chủ chưa thể xử lý yêu cầu.' });
   });
 

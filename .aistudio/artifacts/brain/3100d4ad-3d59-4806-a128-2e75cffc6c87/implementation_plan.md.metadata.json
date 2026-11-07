@@ -1,6 +1,0 @@
-{
-  "summary": "Cập nhật kế hoạch kiến trúc với cơ chế xử lý thích ứng linh hoạt (Adaptive Fallback & Dynamic Schema) cho các tài liệu y tế không thuộc danh mục chuẩn: sử dụng type: 'other', túi dữ liệu động extractedData (Key-Value), trường ghi chú tổng thuật (notes/summaryContent) và thẻ hiển thị thích ứng (Dynamic Adaptive Card) giúp không bao giờ bị bỏ sót thông tin hay từ chối tài liệu lạ.",
-  "updatedAt": "2026-11-06T11:31:05.897536926Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

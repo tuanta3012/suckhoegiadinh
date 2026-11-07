@@ -126,6 +126,14 @@ export async function removeSecureItem(key: string): Promise<void> {
 export async function autoCleanupStartupCache(): Promise<void> {
   try {
     await removeSecureItem(LEGACY_GEMINI_KEYS_STORAGE_KEY);
+    if (typeof localStorage !== 'undefined') {
+      if (!isNative) {
+        localStorage.removeItem('health_offline_workspace_v2');
+        localStorage.removeItem('health_offline_profiles_v2');
+      }
+      localStorage.removeItem('health_google_drive_access_token');
+      localStorage.removeItem('health_google_drive_access_token_expiry');
+    }
     if (isNative) {
       try {
         await Preferences.remove({ key: LEGACY_GEMINI_KEYS_STORAGE_KEY });

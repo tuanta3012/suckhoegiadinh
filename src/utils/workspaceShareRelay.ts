@@ -165,13 +165,8 @@ export async function readHealthWorkspaceAssignment(
   try {
     invites = await getDocs(collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces'));
   } catch (error) {
-    // Khi chưa phát sinh bản ghi chia sẻ folderId từ admin hoặc lần đầu đăng nhập,
-    // Firestore có thể từ chối quyền hoặc trả về rỗng. Coi đây là trạng thái bình thường của user/admin mới.
-    console.info(
-      '[WorkspaceRelay] Chưa phát sinh bản ghi chia sẻ folderId từ Admin (hoặc người dùng mới):',
-      error,
-    );
-    return null;
+    if (isFirestorePermissionDenied(error)) return null;
+    throw new Error('Không thể tải lời mời Workspace. Hãy kiểm tra kết nối rồi thử lại.');
   }
 
   if (!invites || invites.empty) {
@@ -201,7 +196,7 @@ export async function readHealthWorkspaceAssignment(
   }
 
   if (matchingAssignments.length > 1) {
-    matchingAssignments.sort((a, b) => b.updatedAt - a.updatedAt);
+    throw new Error('Tài khoản có nhiều lời mời Workspace. Hãy mở Workspace bằng liên kết hoặc thư mục Drive cụ thể.');
   }
   return matchingAssignments[0] || null;
 }

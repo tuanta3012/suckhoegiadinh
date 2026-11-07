@@ -11,12 +11,10 @@ import {
   RefreshCw,
   Scan,
   Sparkles,
-  UserCheck,
   X,
 } from 'lucide-react';
 import type { FamilyMember, HealthEvent } from '../types';
 import type { DriveFile } from '../utils/healthDriveService';
-import { isSamePersonName } from '../utils/formatters';
 
 export type TrackerStep =
   | 'uploading_drive'
@@ -30,7 +28,6 @@ interface DigitizationProgressTrackerModalProps {
   isOpen: boolean;
   file: File | null;
   member: FamilyMember;
-  members: FamilyMember[];
   step: TrackerStep;
   progressPercent: number;
   progressMessage: string;
@@ -38,13 +35,9 @@ interface DigitizationProgressTrackerModalProps {
   modelUsed?: string;
   partialExtracted: Partial<HealthEvent>;
   error?: string | null;
-  detectedMemberMatch?: FamilyMember | null;
-  isRoutingDecisionRequired?: boolean;
   onReview: () => void;
   onRetry: () => void;
   onManualEntry: () => void;
-  onSaveToDetected?: () => void;
-  onCreateNewMember?: () => void;
   onClose: () => void;
 }
 
@@ -52,7 +45,6 @@ export function DigitizationProgressTrackerModal({
   isOpen,
   file,
   member,
-  members,
   step,
   progressPercent,
   progressMessage,
@@ -60,13 +52,9 @@ export function DigitizationProgressTrackerModal({
   modelUsed = 'gemini-3.5-flash-lite',
   partialExtracted,
   error,
-  detectedMemberMatch,
-  isRoutingDecisionRequired,
   onReview,
   onRetry,
   onManualEntry,
-  onSaveToDetected,
-  onCreateNewMember,
   onClose,
 }: DigitizationProgressTrackerModalProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -105,19 +93,6 @@ export function DigitizationProgressTrackerModal({
     file.size > 1024 * 1024
       ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
       : `${Math.round(file.size / 1024)} KB`;
-
-  // Matched member calculation using intelligent Vietnamese name matching
-  const patientNameOnDoc = partialExtracted.patientName?.trim() || '';
-  const isMatchCurrent = !patientNameOnDoc || isSamePersonName(patientNameOnDoc, member.name);
-
-  // Check if matches another existing family member
-  const otherMatch = members.find(
-    (m) => m.id !== member.id && isSamePersonName(patientNameOnDoc, m.name)
-  );
-  const effectiveDetectedMatch = detectedMemberMatch || otherMatch || null;
-
-  const isMismatch = Boolean(!isMatchCurrent && effectiveDetectedMatch && effectiveDetectedMatch.id !== member.id);
-  const isNewPersonDetected = Boolean(!isMatchCurrent && !effectiveDetectedMatch && patientNameOnDoc.length > 3);
 
   return (
     <div
@@ -287,75 +262,6 @@ export function DigitizationProgressTrackerModal({
                   Nhập thông tin thủ công
                 </button>
               </div>
-            </div>
-          )}
-
-          {/* Smart Routing Decision Banners */}
-          {step === 'matching_patient' && isRoutingDecisionRequired && (
-            <div className="animate-in slide-in-from-bottom-2 duration-300">
-              {isMismatch && detectedMemberMatch && (
-                <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 space-y-2.5 shadow-sm">
-                  <div className="flex items-start gap-2.5">
-                    <div className="p-1.5 rounded-xl bg-amber-100 shrink-0 mt-0.5">
-                      <UserCheck className="w-4 h-4 text-amber-700" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-amber-900">Phát hiện hồ sơ không khớp thành viên đang chọn</h4>
-                      <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
-                        Tên trên phiếu là <b>{patientNameOnDoc}</b>. Hệ thống khuyên bạn nên lưu vào hồ sơ của <b>{detectedMemberMatch.name}</b>.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={onSaveToDetected}
-                      className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md transition-all active:scale-95"
-                    >
-                      Chuyển sang: {detectedMemberMatch.name}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onReview}
-                      className="px-3.5 py-1.5 rounded-xl bg-white border border-amber-300 text-amber-700 font-bold text-xs hover:bg-amber-100 transition-all"
-                    >
-                      Vẫn lưu vào: {member.name}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {isNewPersonDetected && !detectedMemberMatch && (
-                <div className="p-3.5 rounded-2xl bg-blue-50 border border-blue-200 space-y-2.5 shadow-sm">
-                  <div className="flex items-start gap-2.5">
-                    <div className="p-1.5 rounded-xl bg-blue-100 shrink-0 mt-0.5">
-                      <Sparkles className="w-4 h-4 text-blue-700" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-blue-900">Phát hiện người bệnh mới</h4>
-                      <p className="text-[11px] text-blue-800 mt-0.5 leading-relaxed">
-                        Tên <b>{patientNameOnDoc}</b> chưa có trong danh sách gia đình. Tạo hồ sơ mới cho người này?
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={onCreateNewMember}
-                      className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md transition-all active:scale-95"
-                    >
-                      Tạo hồ sơ mới: {patientNameOnDoc}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onReview}
-                      className="px-3.5 py-1.5 rounded-xl bg-white border border-blue-300 text-blue-700 font-bold text-xs hover:bg-amber-100 transition-all"
-                    >
-                      Lưu tạm vào: {member.name}
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 

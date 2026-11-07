@@ -42,7 +42,7 @@ const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).c
 export function getGoogleAccessToken(): string | null {
   if (cachedAccessToken) return cachedAccessToken;
   if (typeof window !== 'undefined') {
-    return sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY);
+    return sessionStorage.getItem(ACCESS_TOKEN_KEY);
   }
   return null;
 }
@@ -64,8 +64,6 @@ async function storeAccessToken(token: string, expiresAt = Date.now() + ACCESS_T
       setAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt)),
     ]);
   } else if (typeof window !== 'undefined') {
-    localStorage.setItem(ACCESS_TOKEN_KEY, token);
-    localStorage.setItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt));
     sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
     sessionStorage.setItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt));
   }
@@ -97,8 +95,8 @@ export async function restoreGoogleAuthSession(): Promise<boolean> {
           getAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY),
         ])
       : [
-          sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY),
-          sessionStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY) || localStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY),
+          sessionStorage.getItem(ACCESS_TOKEN_KEY),
+          sessionStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY),
         ];
     if (!token) {
       return false;
@@ -173,7 +171,7 @@ export async function getValidGoogleAccessToken(): Promise<string> {
   // Google Drive will return 401 if it has truly expired.
   const candidate = cachedAccessToken ||
     (typeof window !== 'undefined'
-      ? sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY)
+      ? sessionStorage.getItem(ACCESS_TOKEN_KEY)
       : null);
 
   if (candidate) {

@@ -7,6 +7,7 @@ import type {
 } from '../types';
 
 const EVENT_TYPES = new Set<HealthEvent['type']>([
+  'comprehensive_exam',
   'medical_report',
   'prescription',
   'test_result',
@@ -23,8 +24,8 @@ function isHealthMetric(value: unknown): value is HealthMetric {
   return Boolean(
     isJsonRecord(value) &&
       isNonEmptyString(value.name) &&
-      typeof value.value === 'number' &&
-      Number.isFinite(value.value) &&
+      ((typeof value.value === 'number' && Number.isFinite(value.value)) ||
+        (typeof value.value === 'string' && value.value.trim().length > 0)) &&
       typeof value.unit === 'string',
   );
 }
@@ -55,7 +56,7 @@ function isHealthEvent(value: unknown): value is HealthEvent {
       typeof value.type === 'string' &&
       EVENT_TYPES.has(value.type as HealthEvent['type']) &&
       isNonEmptyString(value.title) &&
-      isNonEmptyString(value.date) &&
+      typeof value.date === 'string' &&
       Array.isArray(value.diagnoses) &&
       value.diagnoses.every((item) => typeof item === 'string') &&
       Array.isArray(value.medications) &&
@@ -81,6 +82,7 @@ function isHealthSource(value: unknown): value is HealthSource {
       (value.status === 'pending' || value.status === 'processed') &&
       (value.digitizedAt === undefined || typeof value.digitizedAt === 'string') &&
       (value.rawDeletedAt === undefined || typeof value.rawDeletedAt === 'string') &&
+      (value.relocatedToMemberId === undefined || typeof value.relocatedToMemberId === 'string') &&
       (value.fileSize === undefined ||
         (typeof value.fileSize === 'number' && Number.isFinite(value.fileSize))) &&
       (value.fileHash === undefined || typeof value.fileHash === 'string') &&
@@ -119,6 +121,7 @@ export function mergeFamilyMembers(
     members.set(member.id, {
       id: latest.id,
       name: member.name !== previous.name ? member.name : latest.name,
+      email: member.email !== previous.email ? member.email : latest.email,
       gender: member.gender !== previous.gender ? member.gender : latest.gender,
       birthDate: member.birthDate !== previous.birthDate ? member.birthDate : latest.birthDate,
       role: member.role !== previous.role ? member.role : latest.role,
@@ -143,7 +146,11 @@ export function mergeHealthProfiles(
   for (const event of [...current.timeline, ...incoming.timeline]) {
     const previous = events.get(event.id);
     if (previous && !sameHealthEventContent(previous, event)) {
-      throw new Error(`Xung đột đồng bộ: sự kiện "${event.title}" có cùng mã nhưng nội dung khác nhau. Hãy tải lại hồ sơ và kiểm tra trước khi thử lại.`);
+      if (event.recordedAt === previous.recordedAt) {
+        throw new Error(`Xung đột đồng bộ: sự kiện "${event.title}" có cùng mã nhưng nội dung khác nhau. Hãy tải lại hồ sơ và kiểm tra trước khi thử lại.`);
+      }
+      if (event.recordedAt > previous.recordedAt) events.set(event.id, event);
+      continue;
     }
     if (!previous || event.recordedAt > previous.recordedAt) events.set(event.id, event);
   }
@@ -161,6 +168,7 @@ export function mergeHealthProfiles(
       ...previous,
       ...selected,
       rawDeletedAt: previous.rawDeletedAt || source.rawDeletedAt,
+      relocatedToMemberId: source.relocatedToMemberId || previous.relocatedToMemberId,
     });
   }
 
@@ -200,7 +208,7 @@ export function digitizeHealthSource(
 ): HealthProfile {
   const source = profile.sources.find((item) => item.driveFileId === event.sourceFileId);
   if (!source) throw new Error('Không tìm thấy tài liệu gốc trong hồ sơ thành viên.');
-  if (!event.title.trim() || !event.date) throw new Error('Cần nhập tiêu đề và ngày của tài liệu y tế.');
+  if (!event.title.trim()) throw new Error('Cần nhập tiêu đề của tài liệu y tế.');
   if (profile.timeline.some((item) => item.id === event.id)) {
     throw new Error('Sự kiện này đã có trong dòng thời gian.');
   }
@@ -227,6 +235,7 @@ export function canDeleteRawSource(profile: HealthProfile, sourceFileId: string)
   return Boolean(
     source &&
       source.status === 'processed' &&
+      !source.relocatedToMemberId &&
       source.digitizedAt &&
       profile.timeline.some((event) => event.sourceFileId === sourceFileId),
   );
@@ -238,12 +247,14 @@ export function summarizeTimeline(
   timeline: HealthEvent[],
   narrative?: string,
 ): HealthProfile['summary'] {
-  const latest = [...timeline].sort((a, b) => b.date.localeCompare(a.date))[0];
+  const latest = [...timeline]
+    .filter((event) => event.date)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
   const latestMetrics: Record<string, HealthMetric & { date: string }> = {};
   
   for (const event of timeline) {
     if (!event || !Array.isArray(event.metrics)) continue;
-    const eventDate = event.date || new Date().toISOString().slice(0, 10);
+    const eventDate = event.date || '';
 
     for (const metric of event.metrics) {
       if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
@@ -297,7 +308,7 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
     sourceFileName: String(raw.sourceFileName || 'Tài liệu y tế'),
     type,
     title: String(raw.title || 'Kết quả khám y tế'),
-    date: String(raw.date || new Date().toISOString().slice(0, 10)),
+    date: typeof raw.date === 'string' ? raw.date : '',
     diagnoses: Array.isArray(raw.diagnoses) ? raw.diagnoses.map(String) : [],
     medications: Array.isArray(raw.medications) ? raw.medications : [],
     metrics: Array.isArray(raw.metrics) ? raw.metrics : [],
@@ -324,6 +335,7 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
     status: raw.status === 'processed' ? 'processed' : 'pending',
     digitizedAt: raw.digitizedAt ? String(raw.digitizedAt) : undefined,
     rawDeletedAt: raw.rawDeletedAt ? String(raw.rawDeletedAt) : undefined,
+    relocatedToMemberId: raw.relocatedToMemberId ? String(raw.relocatedToMemberId) : undefined,
     fileSize: typeof raw.fileSize === 'number' ? raw.fileSize : undefined,
     fileHash: raw.fileHash ? String(raw.fileHash) : undefined,
     totalPages: typeof raw.totalPages === 'number' ? raw.totalPages : undefined,
@@ -334,16 +346,42 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
 export function parseHealthProfile(value: unknown, member: FamilyMember): HealthProfile {
   if (!value || typeof value !== 'object') throw new Error('Tệp hồ sơ trên Drive không phải JSON hợp lệ.');
   const data = value as any;
+  if (data.timeline !== undefined && !Array.isArray(data.timeline)) {
+    throw new Error('Danh sách sự kiện trong hồ sơ không hợp lệ.');
+  }
+  if (data.sources !== undefined && !Array.isArray(data.sources)) {
+    throw new Error('Danh sách tài liệu nguồn trong hồ sơ không hợp lệ.');
+  }
   const rawTimeline = Array.isArray(data.timeline) ? data.timeline : [];
   const rawSources = Array.isArray(data.sources) ? data.sources : [];
 
-  const timeline: HealthEvent[] = rawTimeline
-    .map((item: any) => sanitizeTimelineEvent(item))
-    .filter((item: HealthEvent | null): item is HealthEvent => item !== null);
+  const timeline: HealthEvent[] = rawTimeline.map((item: any) => {
+    if (!isJsonRecord(item) || (item.metrics !== undefined && !Array.isArray(item.metrics)) ||
+      (item.diagnoses !== undefined && !Array.isArray(item.diagnoses)) ||
+      (item.medications !== undefined && !Array.isArray(item.medications)) ||
+      (item.imagingResults !== undefined && !Array.isArray(item.imagingResults))) {
+      throw new Error('Hồ sơ có sự kiện thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+    }
+    const event = sanitizeTimelineEvent(item);
+    if (!event || !isHealthEvent(event)) {
+      throw new Error('Hồ sơ có sự kiện thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+    }
+    return event;
+  });
 
-  const sources: HealthSource[] = rawSources
-    .map((item: any) => sanitizeHealthSource(item))
-    .filter((item: HealthSource | null): item is HealthSource => item !== null);
+  const sources: HealthSource[] = rawSources.map((item: any) => {
+    if (!isJsonRecord(item) || !isNonEmptyString(item.driveFileId) ||
+      !isNonEmptyString(item.fileName) || !isNonEmptyString(item.mimeType) ||
+      !isNonEmptyString(item.uploadedAt) ||
+      (item.status !== 'pending' && item.status !== 'processed')) {
+      throw new Error('Hồ sơ có tài liệu nguồn thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+    }
+    const source = sanitizeHealthSource(item);
+    if (!source || !isHealthSource(source)) {
+      throw new Error('Hồ sơ có tài liệu nguồn thiếu trường bắt buộc hoặc chứa dữ liệu không hợp lệ.');
+    }
+    return source;
+  });
 
   const normalized: HealthProfile = {
     schemaVersion: 2,

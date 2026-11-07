@@ -33,7 +33,7 @@ const event: HealthEvent = {
 
 describe('health profile', () => {
   it('applies member updates while retaining members added concurrently on another device', () => {
-    const updatedMember = { ...member, name: 'Mẹ mới', avatarUrl: 'avatar.png' };
+    const updatedMember = { ...member, name: 'Mẹ mới', email: 'me@example.com', avatarUrl: 'avatar.png' };
     const remotelyUpdatedMember = { ...member, gender: 'female' as const };
     const concurrentMember = { ...member, id: 'member-2', name: 'Bố' };
 
@@ -149,6 +149,16 @@ describe('health profile', () => {
         member,
       ),
     ).toThrow('sự kiện thiếu trường bắt buộc');
+  });
+
+  it('preserves health events with an unknown date without assigning the current date', () => {
+    const profile = createHealthProfile(member);
+    const parsed = parseHealthProfile(
+      { ...profile, timeline: [{ ...event, date: '' }] },
+      member,
+    );
+    expect(parsed.timeline[0].date).toBe('');
+    expect(parsed.summary.latestEventDate).toBeUndefined();
   });
 
   it('rejects malformed source records', () => {

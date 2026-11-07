@@ -32,7 +32,9 @@ export function prepareDataForDeepDive(member: any, profile: any) {
   const timeline = Array.isArray(profile?.timeline) ? profile.timeline : [];
   // Sắp xếp theo ngày tăng dần và lấy tối đa 15 mốc khám gần nhất
   const sortedEvents = [...timeline].sort(
-    (a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    (a: any, b: any) =>
+      new Date(a.date || a.recordedAt).getTime() -
+      new Date(b.date || b.recordedAt).getTime()
   );
   const relevantEvents = sortedEvents.slice(-15);
 
@@ -133,6 +135,23 @@ export function standardizeMetricKey(rawKey: string, unit: string, metricName: s
   let key = rawKey.trim().toUpperCase();
   const lowerUnit = (unit || '').trim().toLowerCase();
   const lowerName = (metricName || '').trim().toLowerCase();
+  const compactKey = key.replace(/[_\s-]+/g, ' ').trim();
+  const canonicalAliases: Record<string, string> = {
+    'BLOOD GLUCOSE': 'GLUCOSE',
+    GLUCOZA: 'GLUCOSE',
+    GLU: 'GLUCOSE',
+    GLUCOSE: 'GLUCOSE',
+    'FASTING BLOOD GLUCOSE': 'GLUCOSE',
+    'HEMOGLOBIN A1C': 'HBA1C',
+    'GLYCATED HEMOGLOBIN': 'HBA1C',
+    CREATININE: 'CREATININ',
+    'URIC ACID': 'ACID_URIC',
+    'TOTAL CHOLESTEROL': 'CHOLESTEROL',
+    TRIGLYCERIDES: 'TRIGLYCERIDE',
+    'SGOT (AST)': 'AST',
+    'SGPT (ALT)': 'ALT',
+  };
+  key = canonicalAliases[compactKey] || key;
 
   // 1. Xử lý lỗi hậu tố số đếm từ LLM (VD: NEU_1, LYM_2, MONO_#)
   if (/^(NEU|LYM|MONO|EOS|BASO)(_|\s)*\d+$/.test(key)) {
@@ -215,7 +234,7 @@ export function parseRobustJson(text: string): Record<string, any> {
       try {
         return JSON.parse(match[0]);
       } catch (innerErr) {
-        digitizationLogger.log('error', 'parser', 'Không thể cứu vãn JSON payload', { text: cleaned.substring(0, 200) });
+        digitizationLogger.log('error', 'parser', 'Không thể cứu vãn JSON payload');
         throw new Error('Dữ liệu AI trả về không đúng định dạng JSON.');
       }
     }

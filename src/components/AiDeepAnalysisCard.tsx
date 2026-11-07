@@ -119,7 +119,7 @@ export function AiDeepAnalysisCard({
     );
   }
 
-  const healthScore = analysis?.healthScore ?? 85;
+  const healthScore = analysis?.healthScore;
   const overallAssessment = aiAnalysis?.overviewSummary || analysis?.overallAssessment || narrativeSummary;
   const crossCorrelations = analysis?.crossCorrelations || [];
   const velocityTrends = analysis?.velocityTrends || [];
@@ -127,13 +127,14 @@ export function AiDeepAnalysisCard({
   const roadmap = analysis?.roadmap;
 
   const scoreColor =
+    healthScore === undefined ? 'text-slate-500 bg-slate-50 border-slate-200' :
     healthScore >= 80 ? 'text-emerald-600 bg-emerald-50 border-emerald-200' :
     healthScore >= 60 ? 'text-amber-600 bg-amber-50 border-amber-200' :
     'text-rose-600 bg-rose-50 border-rose-200';
 
   const formattedDate = analysis?.analyzedAt
     ? new Date(analysis.analyzedAt).toLocaleDateString('vi-VN')
-    : new Date().toLocaleDateString('vi-VN');
+    : 'Chưa có';
 
   return (
     <div className="rounded-3xl border border-emerald-200/80 bg-white p-4 sm:p-6 shadow-sm space-y-5">
@@ -143,7 +144,7 @@ export function AiDeepAnalysisCard({
           <div
             className={`w-12 h-12 rounded-2xl border flex flex-col items-center justify-center font-black text-base shadow-xs shrink-0 ${scoreColor}`}
           >
-            <span>{healthScore}</span>
+            <span>{healthScore ?? '—'}</span>
             <span className="text-[8px] font-bold uppercase tracking-wider text-slate-500">Điểm AI</span>
           </div>
           <div className="min-w-0">
@@ -220,7 +221,7 @@ export function AiDeepAnalysisCard({
                   ) : item.severity === 'warning' ? (
                     <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold text-[10px]">🟡 Theo dõi</span>
                   ) : (
-                    <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">🔵 Bình thường</span>
+                    <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">🔵 Thông tin</span>
                   )}
                 </div>
                 <p className="text-xs font-medium leading-relaxed">{item.findings}</p>

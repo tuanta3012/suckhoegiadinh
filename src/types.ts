@@ -105,6 +105,7 @@ export interface HealthSource {
   status: 'pending' | 'processed';
   digitizedAt?: string;
   rawDeletedAt?: string;
+  relocatedToMemberId?: string;
   fileSize?: number;
   fileHash?: string;
   totalPages?: number;

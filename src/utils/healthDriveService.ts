@@ -487,11 +487,31 @@ export async function updateDriveFamilyMember(
   memberId: string,
   updates: Partial<FamilyMember>,
 ): Promise<HealthDriveWorkspace> {
+  const existingMember = workspace.family.members.find((member) => member.id === memberId);
+  if (!existingMember) throw new Error('Không tìm thấy thành viên cần cập nhật.');
   const members = workspace.family.members.map((m) =>
-    m.id === memberId ? { ...m, ...updates } : m
+    m.id === memberId ? { ...m, ...updates, name: updates.name?.trim() || m.name } : m
   );
-  const family = { ...workspace.family, members };
-  return saveHealthFamily(workspace, family);
+  const updatedMember = members.find((member) => member.id === memberId);
+  if (!updatedMember) throw new Error('Không tìm thấy thành viên cần cập nhật.');
+  const profileData = await loadHealthProfile(updatedMember.profileFileId);
+  const profile = parseHealthProfile(profileData, existingMember);
+  const updatedProfile = { ...profile, member: updatedMember };
+  await saveHealthProfile(updatedMember.profileFileId, updatedProfile);
+  try {
+    return await saveHealthFamily(workspace, { ...workspace.family, members });
+  } catch (manifestError) {
+    try {
+      await saveHealthProfile(updatedMember.profileFileId, profile);
+    } catch (rollbackError) {
+      const manifestMessage = manifestError instanceof Error ? manifestError.message : 'Lỗi chưa xác định.';
+      const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : 'Lỗi chưa xác định.';
+      throw new Error(
+        `Không thể đồng bộ cập nhật thành viên giữa family.json và hồ sơ Drive (${manifestMessage}). Cũng không thể khôi phục hồ sơ cũ (${rollbackMessage}). Hãy kiểm tra dữ liệu trên Drive trước khi tiếp tục.`,
+      );
+    }
+    throw manifestError;
+  }
 }
 
 export async function deleteDriveFamilyMember(
@@ -690,6 +710,30 @@ export async function uploadRawHealthFile(
   file: File,
 ): Promise<DriveFile> {
   return uploadContent(file.name, file.type || 'application/octet-stream', file, member.driveFolderId);
+}
+
+export async function moveDriveFileToMember(
+  fileId: string,
+  destinationMember: FamilyMember,
+): Promise<void> {
+  const metadata = await driveRequest<{ parents?: string[] }>(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=parents`,
+  );
+  const currentParents = metadata.parents || [];
+  if (currentParents.includes(destinationMember.driveFolderId)) return;
+  if (currentParents.length === 0) {
+    throw new Error('Không xác định được thư mục hiện tại của tài liệu trên Drive.');
+  }
+
+  const params = new URLSearchParams({
+    addParents: destinationMember.driveFolderId,
+    removeParents: currentParents.join(','),
+    fields: FILE_FIELDS,
+  });
+  await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?${params.toString()}`,
+    { method: 'PATCH' },
+  );
 }
 
 export async function downloadDriveFile(fileId: string): Promise<Blob> {
