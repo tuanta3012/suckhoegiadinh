@@ -251,7 +251,6 @@ export function HealthDashboard({
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [showRawFilesModal, setShowRawFilesModal] = useState(false);
-  const [analysisModel, setAnalysisModel] = useState('gemini-3.8-flash');
   const memberMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -417,9 +416,9 @@ export function HealthDashboard({
         timeline: organizedTimeline,
       };
 
-      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu (AI 4-Layer Assessment & Schema v2)
+      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-3.6-flash
       const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
-      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile);
+      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-3.6-flash');
       
       const updated: HealthProfile = {
         ...refinedProfile,
@@ -432,7 +431,8 @@ export function HealthDashboard({
       const saved = await saveHealthProfile(targetMember.profileFileId, updated);
       profilesRef.current = { ...profilesRef.current, [targetMember.id]: saved };
       setProfiles((prev) => ({ ...prev, [targetMember.id]: saved }));
-      showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp lên trang chính của ${targetMember.name}!`, 'success');
+      const modelLabel = deepRes.modelUsed || 'gemini-3.6-flash';
+      showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp (${modelLabel}) lên trang chính của ${targetMember.name}!`, 'success');
     } catch (error) {
       console.warn('[Auto Family Doctor Summary Warning]:', error);
       showToast(
@@ -1195,7 +1195,7 @@ export function HealthDashboard({
       const currentProfiles = overrideProfiles || profilesRef.current;
       let profile = currentProfiles[member.id] || createHealthProfile(member);
       
-      // 1. Filename-based Year Extraction
+      // 1. Filename & Content Frequency-based Year/Date Validation
       const extractYearFromFilename = (filename: string): string | null => {
         const match = filename.match(/\b(19|20)\d{2}\b/);
         return match ? match[0] : null;
@@ -1207,13 +1207,21 @@ export function HealthDashboard({
         eventDate = eventDate.replace(/^\d{4}/, year);
       }
 
-      // 2. Event Normalization & Conflict Check
+      // 2. Title Normalization: Lấy trực tiếp năm khám thực tế thay vì niên hạn công ty
+      let eventTitle = extracted.title || file.name || 'Hồ sơ y tế mới';
+      const eventYear = eventDate.substring(0, 4);
+      if (eventYear) {
+        // Thay thế mọi năm cũ trong tiêu đề (ví dụ 2023) thành năm thực hiện khám thực tế (ví dụ 2024)
+        eventTitle = eventTitle.replace(/\b(19|20)\d{2}\b/, eventYear);
+      }
+
+      // 3. Event Normalization & Conflict Check
       const rawEvent: HealthEvent = {
         id: crypto.randomUUID(), 
         sourceFileId: driveFileId,
         sourceFileName: file.name,
         type: validEventType(extracted.type || 'other'),
-        title: extracted.title || file.name || 'Hồ sơ y tế mới',
+        title: eventTitle,
         date: eventDate,
         facility: extracted.facility,
         doctorName: extracted.doctorName,
@@ -1709,20 +1717,20 @@ export function HealthDashboard({
     }
   }
 
-  async function handleAiSummary(model: string) {
+  async function handleAiSummary(model: string = 'gemini-3.6-flash') {
     if (!selectedMember || !selectedProfile) return;
     setIsSummarizing(true);
     setAnalysisError('');
     digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu (${model}) cho ${selectedMember.name}`);
     
     try {
-      // Step 1: Narrative Summary
+      // Step 1: Narrative Summary (3.5-flash-lite)
       showToast('Đang tạo đánh giá tổng quan...', 'info');
       const narrative = await summarizeHealthProfile(selectedMember, selectedProfile);
       
-      // Step 2: Comprehensive 4-Layer Analysis
-      showToast('Đang phân tích 4 lớp y khoa chuyên sâu...', 'info');
-      const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile, model);
+      // Step 2: Comprehensive 4-Layer Analysis (gemini-3.6-flash)
+      showToast('Đang phân tích 4 lớp y khoa chuyên sâu bằng gemini-3.6-flash...', 'info');
+      const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile, 'gemini-3.6-flash');
       
       const updated: HealthProfile = {
         ...selectedProfile,
@@ -1735,12 +1743,24 @@ export function HealthDashboard({
       const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
       digitizationLogger.log('info', 'analysis', `Hoàn tất phân tích chuyên sâu cho ${selectedMember.name}`);
-      showToast('Đã phân tích 4 lớp y khoa chuyên sâu bằng Gemini AI!', 'success');
+      const modelLabel = deepRes.modelUsed || 'gemini-3.6-flash';
+      showToast(`Đã phân tích 4 lớp y khoa chuyên sâu bằng Gemini AI (${modelLabel})!`, 'success');
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Không thể tạo tổng kết bệnh án.';
-      setAnalysisError(msg);
-      digitizationLogger.log('error', 'analysis', `Lỗi phân tích chuyên sâu: ${msg}`, { error });
-      showToast(msg, 'error');
+      const rawMsg = error instanceof Error ? error.message : 'Không thể tạo tổng kết bệnh án.';
+      let friendlyMsg = rawMsg;
+      if (rawMsg.includes('{') && rawMsg.includes('error')) {
+        try {
+          const parsed = JSON.parse(rawMsg);
+          if (parsed?.error?.message) {
+            friendlyMsg = `Máy chủ AI Google đang bận (${parsed.error.code || 503}): ${parsed.error.message}`;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setAnalysisError(friendlyMsg);
+      digitizationLogger.log('error', 'analysis', `Lỗi phân tích chuyên sâu: ${friendlyMsg}`, { error });
+      showToast(friendlyMsg, 'error');
     } finally {
       setIsSummarizing(false);
     }
@@ -1776,8 +1796,7 @@ export function HealthDashboard({
       };
       const saved = await saveHealthProfile(selectedMember.profileFileId, updatedProfile);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      showToast('Đã chuẩn hóa danh pháp y khoa thành công! Đang chạy phân tích 4 lớp y khoa...', 'success');
-      void handleAiSummary(analysisModel);
+      showToast('Đã chuẩn hóa danh pháp y khoa thành công! Bạn có thể bấm "Phân tích chuyên sâu" khi cần.', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Lỗi khi hiệu chỉnh dữ liệu.', 'error');
     } finally {
@@ -2477,12 +2496,10 @@ export function HealthDashboard({
                   medicalHistory={selectedProfile?.medicalHistory}
                   narrativeSummary={selectedProfile?.summary.narrative}
                   isAnalyzing={isSummarizing}
-                  onRefresh={(model) => void handleAiSummary(model)}
+                  onRetry={() => void handleAiSummary('gemini-3.6-flash')}
                   onRefine={() => void handleRefineAndOrganize()}
                   isRefining={isRefining}
                   error={analysisError}
-                  selectedModel={analysisModel}
-                  onModelChange={setAnalysisModel}
                 />
 
                 {/* Vital Metrics Trend Chart */}

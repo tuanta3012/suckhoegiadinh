@@ -1,0 +1,2328 @@
+{
+  "schemaVersion": 2,
+  "member": {
+    "id": "member_7173a9bc-59f",
+    "name": "Truong Anh Tuan",
+    "role": "other",
+    "driveFolderId": "19AjJNweFseCeM7gbrMLWRkurqdyRRubG",
+    "profileFileId": "1IDM_VArbSpmoN4z9SBswfITWA1KNxceb"
+  },
+  "timeline": [
+    {
+      "id": "c9e15fa7-3c6d-4c3f-8bd9-4370ffd8f6f0",
+      "sourceFileId": "1LtVMb4zQxcZl3cvOmFfPB9HM_hDXRH55",
+      "sourceFileName": "tuanta 2024.pdf",
+      "type": "other",
+      "title": "Khám sức khỏe định kỳ năm 2023",
+      "date": "2024-05-22",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "diagnoses": [
+        "Cắt tuyến giáp một phần",
+        "Nhịp chậm xoang",
+        "Polyp túi mật",
+        "Đã cắt một phần tuyến giáp. Phần còn lại cấu trúc không đồng nhất, có tăng sinh mạch máu nhẹ. Nang giáp thùy trái, TI-RADS 1.",
+        "Tật khúc xạ",
+        "Viêm amidan mạn tính",
+        "Z00.0 - Khám sức khỏe tổng quát",
+        "Nhân thùy trái, TI-RADS 1"
+      ],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "BC (BẠCH CẦU)",
+          "standardKey": "WBC",
+          "value": 6.41,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 43.4,
+          "unit": "%",
+          "status": "low"
+        },
+        {
+          "name": "NEU #",
+          "standardKey": "NEU_#",
+          "value": 2.78,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 44,
+          "unit": "%",
+          "status": "high"
+        },
+        {
+          "name": "LYM #",
+          "standardKey": "LYM_#",
+          "value": 2.82,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "MONO %",
+          "standardKey": "MONO_PCT",
+          "value": 10.1,
+          "unit": "%",
+          "status": "high"
+        },
+        {
+          "name": "MONO #",
+          "standardKey": "MONO_#",
+          "value": 0.65,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "RC (HỒNG CẦU)",
+          "standardKey": "RBC",
+          "value": 4.86,
+          "unit": "T/L",
+          "status": "normal"
+        },
+        {
+          "name": "HGB",
+          "standardKey": "HGB",
+          "value": 135,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.395,
+          "unit": "L/L",
+          "status": "normal"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 81.3,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 27.8,
+          "unit": "pG",
+          "status": "normal"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 342,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "PLT (TIÊU CẦU)",
+          "standardKey": "PLT",
+          "value": 246,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAg miễn dịch tự động",
+          "standardKey": "HBSAG",
+          "value": 0.514,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": 1000,
+          "unit": "IU/L",
+          "status": "high"
+        },
+        {
+          "name": "Định lượng HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.7,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng TSH",
+          "standardKey": "TSH",
+          "value": 4.23,
+          "unit": "mIU/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng FT4",
+          "standardKey": "FT4",
+          "value": 1.2,
+          "unit": "ng/dL",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng FT3",
+          "standardKey": "FT3",
+          "value": 2.78,
+          "unit": "pg/ml",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.9,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Urê",
+          "standardKey": "UREA",
+          "value": 5.07,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Creatinin",
+          "standardKey": "CREATININ",
+          "value": 88.56,
+          "unit": "umol/L",
+          "status": "normal"
+        },
+        {
+          "name": "eGFR (MDRD)",
+          "standardKey": "EGFR",
+          "value": 86.1,
+          "unit": "ml/min/1.73m2",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 3.92,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HDL-C",
+          "standardKey": "HDL_C",
+          "value": 1.14,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng LDL-C",
+          "standardKey": "LDL_C",
+          "value": 1.84,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.74,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ AST (GOT)",
+          "standardKey": "AST",
+          "value": 19.7,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 12.34,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ GGT",
+          "standardKey": "GGT",
+          "value": 13.29,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng SG (Nước tiểu)",
+          "standardKey": "URINE_SG",
+          "value": 1.01,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng PH (Nước tiểu)",
+          "standardKey": "URINE_PH",
+          "value": 7,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "Mạch (Pulse)",
+          "standardKey": "PULSE_BPM",
+          "value": 49,
+          "unit": "bpm",
+          "status": "low"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Polyp túi mật.; Thành túi mật có vài cấu trúc echo dày, không di động, không bóng lưng, dmax# 7 mm.",
+          "conclusion": "Chưa ghi nhận bất thường."
+        },
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Đã cắt một phần tuyến giáp. Phần còn lại cấu trúc không đồng nhất, có tăng sinh mạch máu nhẹ. Nang giáp thùy trái, TI-RADS 1.; Thùy phải: KT 12x25x9 mm, V=1.3 ml, cấu trúc không đồng nhất, không thương khu trú. Thùy trái: KT 22x41x13 mm, V=5.8 ml, có cấu trúc echo trống, bờ đều, giới hạn rõ, d#3 mm. Dày vỏ 2.0 mm, không thấy phì đại. Tiệm vùng cổ bình thường.",
+          "conclusion": "Đã cắt một phần tuyến giáp. Phần còn lại cấu trúc không đồng nhất, có tăng sinh mạch máu nhẹ. Nang giáp thùy trái, TI-RADS 1."
+        },
+        {
+          "modality": "Điện tâm đồ (ECG)",
+          "findings": "Nhịp chậm xoang 49l/ph; Nhịp xoang đều, tần số 49 bpm.",
+          "conclusion": "Nhịp chậm xoang # 49 l/p."
+        },
+        {
+          "modality": "X-quang Ngực thẳng",
+          "findings": "Tim không to. Quai ĐMC: Bình thường. Thân động mạch phổi: bình thường.",
+          "conclusion": "Lồng ngực bình thường."
+        }
+      ],
+      "vaccinations": [],
+      "advice": "Đề nghị khám chuyên khoa: Tim mạch. Định kỳ kiểm tra: Tiêu hóa gan mật, Nội tiết, Mắt, Tai mũi họng. Vệ sinh mũi họng, súc họng thường xuyên bằng nước muối sinh lý.",
+      "notes": "Mã BN: 230018116",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:39:39.680Z"
+    },
+    {
+      "id": "4f440b59-80eb-43ca-99a7-e12a7c88cd54",
+      "sourceFileId": "11Qc1eDWe0UsRpFdt6zmw3e-glNbFZ3uD",
+      "sourceFileName": "Xet nghiem mau 2025 tuanta.pdf",
+      "type": "test_result",
+      "title": "Phiếu kết quả xét nghiệm tổng quát",
+      "date": "2025-05-30",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "diagnoses": [
+        "Z00.0 - Khám sức khỏe tổng quát"
+      ],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "WBC (BẠCH CẦU)",
+          "standardKey": "WBC",
+          "value": 5.34,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "- NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 51.6,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- NEU #",
+          "standardKey": "NEU_#",
+          "value": 2.76,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- LYM #",
+          "standardKey": "LYM_#",
+          "value": 2.13,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- MONO %",
+          "standardKey": "MONO_PCT",
+          "value": 2.8,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- MONO #",
+          "standardKey": "MONO_#",
+          "value": 0.15,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "RBC (HỒNG CẦU)",
+          "standardKey": "RBC",
+          "value": 4.84,
+          "unit": "T/L",
+          "status": "normal"
+        },
+        {
+          "name": "- HGB",
+          "standardKey": "HGB",
+          "value": 139,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "- HCT",
+          "standardKey": "HCT",
+          "value": 0.422,
+          "unit": "L/L",
+          "status": "normal"
+        },
+        {
+          "name": "- MCV",
+          "standardKey": "MCV",
+          "value": 87.2,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "- MCH",
+          "standardKey": "MCH",
+          "value": 28.7,
+          "unit": "pG",
+          "status": "normal"
+        },
+        {
+          "name": "- MCHC",
+          "standardKey": "MCHC",
+          "value": 329,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "PLT (TIỂU CẦU)",
+          "standardKey": "PLT",
+          "value": 225,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAg miễn dịch tự động",
+          "standardKey": "HBSAG",
+          "value": 0.523,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": 1000,
+          "unit": "IU/L",
+          "status": "abnormal"
+        },
+        {
+          "name": "Định lượng HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.7,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng TSH (Thyroid Stimulating hormone)",
+          "standardKey": "TSH",
+          "value": 3.39,
+          "unit": "mIU/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng FT4 (Free Thyroxine)",
+          "standardKey": "FT4",
+          "value": 1.21,
+          "unit": "ng/dL",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng CEA (Carcino Embryonic Antigen)",
+          "standardKey": "CEA",
+          "value": 1.82,
+          "unit": "ng/mL",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Cyfra 21- 1",
+          "standardKey": "CYFRA_21_1",
+          "value": 4.02,
+          "unit": "ng/mL",
+          "status": "abnormal"
+        },
+        {
+          "name": "Định lượng CA 72 - 4 (Cancer Antigen 72- 4)",
+          "standardKey": "CA_72_4",
+          "value": 0.524,
+          "unit": "U/mL",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.56,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Urê",
+          "standardKey": "UREA",
+          "value": 3.96,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Creatinin",
+          "standardKey": "CREATININ",
+          "value": 89.96,
+          "unit": "µmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- eGFR (MDRD)",
+          "standardKey": "EGFR",
+          "value": 84.17,
+          "unit": "ml/ph/1.73 m2",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.37,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HDL-C",
+          "standardKey": "HDL_C",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng LDL - C",
+          "standardKey": "LDL_C",
+          "value": 2.28,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.9,
+          "unit": "mmol/L",
+          "status": "abnormal"
+        },
+        {
+          "name": "Đo hoạt độ AST (GOT)",
+          "standardKey": "AST",
+          "value": 19.76,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 14.63,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ GGT",
+          "standardKey": "GGT",
+          "value": 14.29,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "- SG",
+          "standardKey": "URINE_SG",
+          "value": 1.02,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- pH",
+          "standardKey": "URINE_PH",
+          "value": 6.5,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- BLOOD",
+          "standardKey": "URINE_BLOOD",
+          "value": 10,
+          "unit": "Ery/µL",
+          "status": "abnormal"
+        }
+      ],
+      "imagingResults": [],
+      "vaccinations": [],
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:38:49.015Z"
+    },
+    {
+      "id": "a4560d17-84f4-4e9a-9f1c-a31347ea5c5c",
+      "sourceFileId": "160gZpPdauovxmQKoYOAKz9ztTegxdSJy",
+      "sourceFileName": "tuanta 2025.pdf",
+      "type": "other",
+      "title": "Khám sức khỏe định kỳ năm 2024",
+      "date": "2025-06-03",
+      "facility": "PHÒNG KHÁM BỆNH VIỆN ĐẠI HỌC Y DƯỢC 1",
+      "diagnoses": [
+        "Mổ cắt một phần thùy phải tuyến giáp",
+        "Vẹo vách ngăn sang phải",
+        "Viêm Amidan mạn",
+        "Vôi răng vết dính",
+        "CYFRA tăng",
+        "Đa polyp túi mật",
+        "Rối loạn chức năng tâm trương thất trái",
+        "Hở van 3 lá 1/4",
+        "Phình giáp hạt hai thùy, TIRADS 1",
+        "Rối loạn chuyển hoá lipid máu",
+        "Khám sức khỏe tổng quát",
+        "Z00.0 - Khám sức khỏe tổng quát",
+        "Nhân giáp hạt hai thùy, TIRADS 1 / Đã cắt một phần thùy phải tuyến giáp",
+        "Polyp túi mật",
+        "Z00.0"
+      ],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "CYFRA_21_1",
+          "standardKey": "CYFRA_21_1",
+          "value": 4.02,
+          "unit": "ng/mL",
+          "status": "high"
+        },
+        {
+          "name": "TRIGLYCERID",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.9,
+          "unit": "mmol/L",
+          "status": "high"
+        },
+        {
+          "name": "WBC (Bạch cầu)",
+          "standardKey": "WBC",
+          "value": 5.34,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 51.6,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "NEU #",
+          "standardKey": "NEU_#",
+          "value": 2.76,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "LYM #",
+          "standardKey": "LYM_#",
+          "value": 2.13,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "MONO %",
+          "standardKey": "MONO_PCT",
+          "value": 2.8,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "MONO #",
+          "standardKey": "MONO_#",
+          "value": 0.15,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "EOS %",
+          "standardKey": "EOS_PCT",
+          "value": 5.1,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "EOS #",
+          "standardKey": "EOS_#",
+          "value": 0.27,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "BASO %",
+          "standardKey": "BASO_PCT",
+          "value": 0.6,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "BASO #",
+          "standardKey": "BASO_#",
+          "value": 0.03,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "RBC (Hồng cầu)",
+          "standardKey": "RBC",
+          "value": 4.84,
+          "unit": "T/L",
+          "status": "normal"
+        },
+        {
+          "name": "HGB",
+          "standardKey": "HGB",
+          "value": 139,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.422,
+          "unit": "L/L",
+          "status": "normal"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 87.2,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 28.7,
+          "unit": "pG",
+          "status": "normal"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 329,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "RDW",
+          "standardKey": "RDW",
+          "value": 13,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "PLT (Tiểu cầu)",
+          "standardKey": "PLT",
+          "value": 225,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "MPV",
+          "standardKey": "MPV",
+          "value": 9,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "HBA1C",
+          "standardKey": "HBA1C",
+          "value": 5.7,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "TSH",
+          "standardKey": "TSH",
+          "value": 3.39,
+          "unit": "mIU/L",
+          "status": "normal"
+        },
+        {
+          "name": "FT4",
+          "standardKey": "FT4",
+          "value": 1.21,
+          "unit": "ng/dL",
+          "status": "normal"
+        },
+        {
+          "name": "CEA",
+          "standardKey": "CEA",
+          "value": 1.82,
+          "unit": "ng/mL",
+          "status": "normal"
+        },
+        {
+          "name": "CA_72_4",
+          "standardKey": "CA_72_4",
+          "value": 0.524,
+          "unit": "U/mL",
+          "status": "normal"
+        },
+        {
+          "name": "GLUCOSE",
+          "standardKey": "GLUCOSE",
+          "value": 4.56,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "UREA",
+          "standardKey": "UREA",
+          "value": 3.96,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "CREATININ",
+          "standardKey": "CREATININ",
+          "value": 89.96,
+          "unit": "μmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "EGFR",
+          "standardKey": "EGFR",
+          "value": 84.17,
+          "unit": "ml/ph/1.73 m2",
+          "status": "normal"
+        },
+        {
+          "name": "CHOLESTEROL",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.37,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "HDL_C",
+          "standardKey": "HDL_C",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "LDL_C",
+          "standardKey": "LDL_C",
+          "value": 2.28,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "AST",
+          "standardKey": "AST",
+          "value": 19.76,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "ALT",
+          "standardKey": "ALT",
+          "value": 14.63,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "GGT",
+          "standardKey": "GGT",
+          "value": 14.29,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "URINE_SG",
+          "standardKey": "URINE_SG",
+          "value": 1.02,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "URINE_PH",
+          "standardKey": "URINE_PH",
+          "value": 6.5,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "URINE_PRO",
+          "standardKey": "URINE_PRO",
+          "value": 0.2,
+          "unit": "mg/dL",
+          "status": "normal"
+        },
+        {
+          "name": "URINE_BLOOD",
+          "standardKey": "URINE_BLOOD",
+          "value": 10,
+          "unit": "Ery/μL",
+          "status": "high"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Đa polyp túi mật.; Thành túi mật có vài chồi phản âm dày bám ở vách, không thay đổi theo tư thế, không bóng lưng, dmax 5 mm.",
+          "conclusion": "Đa polyp túi mật."
+        },
+        {
+          "modality": "Siêu âm Doppler tim",
+          "findings": "Chức năng tâm thu thất trái bình thường (EF = 75%). Hở van 3 lá 1/4, PAPs = 17 mmHg.; Các van tim mềm mại không sa. Các thành tim không dày. Vách liên thất và liên nhĩ nguyên vẹn. Các buồng tim không dãn. Chức năng tâm thu bình thường. Hông thấy rối loạn vận động vùng. Hở van 3 lá 1/4, PAPs= 17 mmHg.",
+          "conclusion": "Chức năng tâm thu thất trái bình thường (EF Teichholz = 75%). Rối loạn chức năng tâm trương thất trái. Hở van 3 lá 1/4, PAPs= 17 mmHg."
+        },
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Phình giáp hạt hai thùy, TIRADS 1. Đã cắt một phần thùy phải tuyến giáp.; Thùy phải: Đã cắt một phần. Có nốt dạng bọt biển, bờ giới hạn ít rõ, trục ngang, không vôi hóa, dmax 5x5 mm. Thùy trái: Không to, rải rác nhiều nốt dạng nang phản âm trống và dạng bọt biển, trong có nốt vôi xảo ảnh dạng đuôi sao chổi, bờ giới hạn rõ dmax 4 mm.",
+          "conclusion": "Nhân giáp hạt hai thùy, TIRADS 1 / Đã cắt một phần thùy phải tuyến giáp."
+        },
+        {
+          "modality": "X-quang ngực thẳng",
+          "findings": "Tổn thương nhu mô trong hai phổi: Không có. Tuần hoàn động mạch hai phổi: Bình thường. Cấu trúc các rốn phổi: Bình thường, không có hạch phì đại. Các khoang màng phổi: Bình thường. Hai cơ hoành: Bình thường. Tim và các mạch máu chính: Tim không to, quái ĐMC bình thường, thân động mạch phổi bình thường. Trung thất: Không mở rộng, không có hạch phì đại. Bộ xương và mô mềm ngực: Bình thường.",
+          "conclusion": "X-quang ngực bình thường."
+        },
+        {
+          "modality": "Điện tâm đồ (ECG)",
+          "findings": "Nhịp xoang đều, tần số 57 bpm, các khoảng P, PR, QRS, ST, T, QT trong giới hạn bình thường.",
+          "conclusion": "Nhịp xoang / Tần số = 57 bpm"
+        }
+      ],
+      "vaccinations": [],
+      "advice": "Định kỳ kiểm tra: Tiêu hóa gan mật, Tim mạch, Nội tiết, Tai mũi họng. Kiểm tra lại cyfra sau 1 tháng. Giảm ăn dầu mỡ, tăng cường vận động tập thể dục. Cạo vôi răng mỗi 6 tháng. Vệ sinh mũi họng, súc họng thường xuyên bằng nước muối sinh lý.",
+      "notes": "Đơn vị: CÔNG TY TNHH ĐẦU TƯ KINH DOANH HẠ TẦNG SCTV\nTrữ lượng Cyfra 21-1 và Triglycerid, Hồng cầu niệu hơi cao hơn giới hạn bình thường.\nTài liệu gồm kết quả chụp X-quang ngực thẳng và Điện tâm đồ (ECG) thực hiện ngày 30/05/2025.",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:40:27.222Z"
+    },
+    {
+      "id": "0a338e7b-2aa8-4936-9473-526a4d0c1c2d",
+      "sourceFileId": "1oOM7PtkhHm12YFq4C9-VJi9sUwhNtMoA",
+      "sourceFileName": "Xet nghiem mau 2026 tuanta.pdf",
+      "type": "test_result",
+      "title": "Phiếu kết quả xét nghiệm tổng quát",
+      "date": "2026-06-08",
+      "facility": "BỆNH VIỆN ĐẠI HỌC Y DƯỢC TP.HCM - PHÒNG KHÁM BỆNH VIỆN ĐẠI HỌC Y DƯỢC 1",
+      "diagnoses": [
+        "Z00.0 - Khám sức khỏe tổng quát"
+      ],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "WBC (BẠCH CẦU)",
+          "standardKey": "WBC",
+          "value": 5.47,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "- NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 55.6,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- NEU #",
+          "standardKey": "NEU_#",
+          "value": 3.04,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- LYM #",
+          "standardKey": "LYM_#",
+          "value": 2.18,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- MONO %",
+          "standardKey": "MONO_PCT",
+          "value": 2.7,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- MONO #",
+          "standardKey": "MONO_#",
+          "value": 0.15,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- EOS %",
+          "standardKey": "EOS_PCT",
+          "value": 1.3,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- EOS #",
+          "standardKey": "EOS_#",
+          "value": 0.07,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- BASO %",
+          "standardKey": "BASO_PCT",
+          "value": 0.5,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "- BASO #",
+          "standardKey": "BASO_#",
+          "value": 0.03,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "RBC (HỒNG CẦU)",
+          "standardKey": "RBC",
+          "value": 4.66,
+          "unit": "T/L",
+          "status": "normal"
+        },
+        {
+          "name": "- HGB",
+          "standardKey": "HGB",
+          "value": 136,
+          "unit": "g/L",
+          "status": "normal"
+        },
+        {
+          "name": "- HCT",
+          "standardKey": "HCT",
+          "value": 0.41,
+          "unit": "L/L",
+          "status": "normal"
+        },
+        {
+          "name": "- MCV",
+          "standardKey": "MCV",
+          "value": 88,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "- MCH",
+          "standardKey": "MCH",
+          "value": 29.2,
+          "unit": "pG",
+          "status": "normal"
+        },
+        {
+          "name": "- MCHC",
+          "standardKey": "MCHC",
+          "value": 332,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "- RDW",
+          "standardKey": "RDW",
+          "value": 13.1,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "PLT (TIỂU CẦU)",
+          "standardKey": "PLT",
+          "value": 267,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "- MPV",
+          "standardKey": "MPV",
+          "value": 8.7,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "- VS 1H",
+          "standardKey": "ESR_1H",
+          "value": 13,
+          "unit": "mm",
+          "status": "normal"
+        },
+        {
+          "name": "- VS 2H",
+          "standardKey": "ESR_2H",
+          "value": 25,
+          "unit": "mm",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAg miễn dịch tự động",
+          "standardKey": "HBSAG",
+          "value": 0.648,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": 1000,
+          "unit": "IU/L",
+          "status": "abnormal"
+        },
+        {
+          "name": "HCV Ab miễn dịch tự động",
+          "standardKey": "HCV_AB",
+          "value": 0.076,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.4,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.85,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Ure",
+          "standardKey": "UREA",
+          "value": 6.21,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Creatinin",
+          "standardKey": "CREATININ",
+          "value": 90.46,
+          "unit": "µmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- eGFR (CKD-EPI 2021)",
+          "standardKey": "EGFR",
+          "value": 91.44,
+          "unit": "ml/ph/1.73 m2",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Acid Uric",
+          "standardKey": "ACID_URIC",
+          "value": 933.88,
+          "unit": "µmol/L",
+          "status": "abnormal"
+        },
+        {
+          "name": "Định lượng Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.08,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HDL-C",
+          "standardKey": "HDL_C",
+          "value": 0.99,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng LDL - C",
+          "standardKey": "LDL_C",
+          "value": 1.94,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.46,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ AST (GOT)",
+          "standardKey": "AST",
+          "value": 21.75,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 13.41,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ GGT",
+          "standardKey": "GGT",
+          "value": 18.1,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "- Natri",
+          "standardKey": "NA",
+          "value": 137.6,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- Kali",
+          "standardKey": "K",
+          "value": 4.23,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- Clo",
+          "standardKey": "CL",
+          "value": 103.3,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- Calci ion hóa",
+          "standardKey": "CA_ION",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "- SG",
+          "standardKey": "URINE_SG",
+          "value": 1.015,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- pH",
+          "standardKey": "URINE_PH",
+          "value": 7,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "- PRO",
+          "standardKey": "URINE_PRO",
+          "value": 0.15,
+          "unit": "G/L",
+          "status": "abnormal"
+        }
+      ],
+      "imagingResults": [],
+      "vaccinations": [],
+      "notes": "Chỉ số Acid Uric tăng cao (933.88 µmol/L).",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:38:13.585Z"
+    },
+    {
+      "id": "1771bff3-2923-417f-87d8-dfe6fba7f112",
+      "sourceFileId": "15UyabWCz9HW2PfyD-oj6cp44ZgeJ67iT",
+      "sourceFileName": "tuanta 2026.pdf",
+      "type": "other",
+      "title": "Khám sức khỏe định kỳ năm 2026",
+      "date": "2026-06-11",
+      "facility": "BỆNH VIỆN ĐẠI HỌC Y DƯỢC TP.HCM - PHÒNG KHÁM BỆNH VIỆN ĐẠI HỌC Y DƯỢC 1",
+      "diagnoses": [
+        "Mổ nhân giáp",
+        "Đa polyp túi mật",
+        "Nang giáp keo hai thùy TI-RADS 1/ Đã cắt một phần thùy phải tuyến giáp",
+        "Tăng acid uric máu",
+        "Đạm niệu (+)",
+        "Vôi răng vết dính",
+        "Viêm amidan mạn tính",
+        "Khám sức khỏe tổng quát",
+        "Nang giáp keo hai thùy, TIRADS 1 / Đã cắt một phần thùy phải tuyến giáp",
+        "Polyp túi mật",
+        "Z00.0 - Khám sức khỏe tổng quát"
+      ],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "Định lượng Acid Uric",
+          "standardKey": "ACID_URIC",
+          "value": 933.88,
+          "unit": "umol/L",
+          "status": "high"
+        },
+        {
+          "name": "Glucose niệu",
+          "standardKey": "URINE_PRO",
+          "value": 0.15,
+          "unit": "G/L",
+          "status": "high"
+        },
+        {
+          "name": "WBC (BẠCH CẦU)",
+          "standardKey": "WBC",
+          "value": 5.47,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 55.6,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "NEU #",
+          "standardKey": "NEU_#",
+          "value": 3.04,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "LYM #",
+          "standardKey": "LYM_#",
+          "value": 2.18,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "MONO %",
+          "standardKey": "MONO_PCT",
+          "value": 2.7,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "MONO #",
+          "standardKey": "MONO_#",
+          "value": 0.15,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "RBC (HỒNG CẦU)",
+          "standardKey": "RBC",
+          "value": 4.66,
+          "unit": "T/L",
+          "status": "normal"
+        },
+        {
+          "name": "HGB",
+          "standardKey": "HGB",
+          "value": 136,
+          "unit": "g/L",
+          "status": "normal"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.41,
+          "unit": "L/L",
+          "status": "normal"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 88,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 29.2,
+          "unit": "pG",
+          "status": "normal"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 332,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "RDW",
+          "standardKey": "RDW",
+          "value": 13.1,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "PLT (TIỂU CẦU)",
+          "standardKey": "PLT",
+          "value": 267,
+          "unit": "G/L",
+          "status": "normal"
+        },
+        {
+          "name": "MPV",
+          "standardKey": "MPV",
+          "value": 8.7,
+          "unit": "fL",
+          "status": "normal"
+        },
+        {
+          "name": "VS 1H",
+          "standardKey": "ESR_1H",
+          "value": 13,
+          "unit": "mm",
+          "status": "normal"
+        },
+        {
+          "name": "VS 2H",
+          "standardKey": "ESR_2H",
+          "value": 25,
+          "unit": "mm",
+          "status": "normal"
+        },
+        {
+          "name": "HBSAG miễn dịch tự động",
+          "standardKey": "HBSAG",
+          "value": 0.648,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "HBSAB định lượng",
+          "standardKey": "HBSAB",
+          "value": 1000,
+          "unit": "IU/L",
+          "status": "high"
+        },
+        {
+          "name": "HCV AB miễn dịch tự động",
+          "standardKey": "HCV_AB",
+          "value": 0.076,
+          "unit": "COI",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.4,
+          "unit": "%",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.85,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Ure",
+          "standardKey": "UREA",
+          "value": 6.21,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Creatinin",
+          "standardKey": "CREATININ",
+          "value": 90.46,
+          "unit": "umol/L",
+          "status": "normal"
+        },
+        {
+          "name": "eGFR (CKD-EPI 2021)",
+          "standardKey": "EGFR",
+          "value": 91.44,
+          "unit": "ml/ph/1.73 m2",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.08,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng HDL-C",
+          "standardKey": "HDL_C",
+          "value": 0.99,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng LDL - C",
+          "standardKey": "LDL_C",
+          "value": 1.94,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.46,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ AST (GOT)",
+          "standardKey": "AST",
+          "value": 21.75,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 13.41,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Đo hoạt độ GGT",
+          "standardKey": "GGT",
+          "value": 18.1,
+          "unit": "U/L",
+          "status": "normal"
+        },
+        {
+          "name": "Natri",
+          "standardKey": "NA",
+          "value": 137.6,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Kali",
+          "standardKey": "K",
+          "value": 4.23,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Clo",
+          "standardKey": "CL",
+          "value": 103.3,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Calci ion hóa",
+          "standardKey": "CA_ION",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "pH nước tiểu",
+          "standardKey": "URINE_PH",
+          "value": 7,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "Tỷ trọng nước tiểu",
+          "standardKey": "URINE_SG",
+          "value": 1.015,
+          "unit": "",
+          "status": "normal"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Đa polyp túi mật.; Thành túi mật có nhiều cấu trúc echo dày, không bóng lưng, không thay đổi theo tư thế, dmax# 5 mm.; Khảo sát siêu âm bụng nam",
+          "conclusion": "Đa polyp túi mật."
+        },
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Nang giáp keo hai thùy, TI-RADS 1/ Đã cắt một phần thùy phải tuyến giáp.; Thùy phải: Đã cắt thuật 1 phần, độ hồi âm dày hơn so với cơ, có nhiều cấu trúc echo trống dmax 4mm. Thùy trái: Kích thước bình thường, độ hồi âm dày hơn so với cơ, có vài cấu trúc echo trống bên trong có cấu trúc echo dày xáo ảnh đuôi sao chổi dmax 4.5mm (TIRADS 1).",
+          "conclusion": "Nang giáp keo hai thùy, TI-RADS 1/ Đã cắt một phần thùy phải tuyến giáp."
+        },
+        {
+          "modality": "X-quang ngực thẳng",
+          "findings": "Các cấu trúc phổi, màng phơi, tim và trung thất trong giới hạn bình thường.",
+          "conclusion": "X-quang ngực bình thường."
+        },
+        {
+          "modality": "X-quang cột sống thắt lưng-cùng (T/N)",
+          "findings": "Độ cong, cấu trúc đốt sống và đĩa đệm bình thường.",
+          "conclusion": "X-quang cột sống thắt lưng trong giới hạn bình thường."
+        },
+        {
+          "modality": "X-quang cột sống cổ thẳng và nghiêng",
+          "findings": "Độ cong và cấu trúc các đốt sống cổ bình thường.",
+          "conclusion": "Cột sống cổ bình thường."
+        },
+        {
+          "modality": "Điện tâm đồ ECG",
+          "findings": "Nhịp xoang đều; ECG trong giới hạn bình thường",
+          "conclusion": "Điện tâm đồ bình thường"
+        }
+      ],
+      "vaccinations": [],
+      "advice": "Đề nghị khám chuyên khoa: Nội tiết, Nội thận. Định kỳ kiểm tra: Tiêu hóa gan mật, Tai mũi họng. Uống nhiều nước. Hạn chế ăn thịt đỏ, hải sản, tạng động vật, rượu bia. Vệ sinh mũi họng, súc họng thường xuyên bằng nước muối sinh lý. Khám răng, cạo vôi răng định kỳ 6 tháng/1 lần.\nKiểm tra định kỳ / Khám chuyên khoa giáp. Mang theo các kết quả để đối chiếu trong lần khám kế tiếp.",
+      "notes": "Mã số hồ sơ: KD HẠ TẦNG SCTV - 230018116\nChỉ số Acid Uric tăng cao (933.88 umol/L).",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:41:53.941Z"
+    },
+    {
+      "id": "87cc226a-427a-42e9-a993-089472f93f40",
+      "sourceFileId": "140FQy1bbcpnkKvtCzaTMjv93HiHm_o84",
+      "sourceFileName": "26020379765_vi.pdf",
+      "type": "test_result",
+      "title": "Kết quả xét nghiệm tổng quát",
+      "date": "2026-06-14",
+      "facility": "Công ty TNHH Lab Group International Vietnam - Medical Diag Center",
+      "diagnoses": [],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "Creatinin* [Huyết Thanh]",
+          "standardKey": "CREATININ",
+          "value": 77.5,
+          "unit": "µmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Độ Lọc Cầu Thận Ước Tính (eGFR)",
+          "standardKey": "EGFR",
+          "value": 107.92,
+          "unit": "mL/min/1.73m²",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Axit Uric [Huyết Thanh]*",
+          "standardKey": "ACID_URIC",
+          "value": 0.311,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng Protein Toàn Phần [Nước Tiểu]",
+          "standardKey": "URINE_PRO",
+          "value": 20,
+          "unit": "mg/L",
+          "status": "normal"
+        },
+        {
+          "name": "Tỉ Trọng (SG)",
+          "standardKey": "URINE_SG",
+          "value": 1.008,
+          "unit": "",
+          "status": "normal"
+        },
+        {
+          "name": "pH",
+          "standardKey": "URINE_PH",
+          "value": 6,
+          "unit": "",
+          "status": "normal"
+        }
+      ],
+      "imagingResults": [],
+      "vaccinations": [],
+      "advice": "Kết quả xét nghiệm là công cụ để giúp chẩn đoán và cần tương quan với lâm sàng bởi bác sĩ chỉ định.",
+      "notes": "Xét nghiệm đã được chứng nhận ISO 15189:2022",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:39:02.943Z"
+    },
+    {
+      "id": "f176f689-09af-4ad2-89fa-dc39930371b9",
+      "sourceFileId": "1BDgf-oOeDtb6EZt8-uy3VTHh0q2pZgFU",
+      "sourceFileName": "26020551115_vi.pdf",
+      "type": "test_result",
+      "title": "Kết quả xét nghiệm tổng quát",
+      "date": "2026-08-10",
+      "facility": "Phòng khám đa khoa – Trung tâm xét nghiệm và chẩn đoán y khoa – Medical Diag Center",
+      "diagnoses": [],
+      "medications": [],
+      "metrics": [
+        {
+          "name": "Định lượng Axit Uric [Huyết Thanh]",
+          "standardKey": "ACID_URIC",
+          "value": 0.317,
+          "unit": "mmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Hormone Kích Thích Tuyến Giáp (TSH) [Huyết Thanh]",
+          "standardKey": "TSH",
+          "value": 3.22,
+          "unit": "µIU/mL",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng FT4 (Free Thyroxine) [Huyết Thanh]",
+          "standardKey": "FT4",
+          "value": 12.27,
+          "unit": "pmol/L",
+          "status": "normal"
+        },
+        {
+          "name": "Định lượng FT3 (Free Triiodothyronine) [Huyết Thanh]",
+          "standardKey": "FT3",
+          "value": 4.21,
+          "unit": "pmol/L",
+          "status": "normal"
+        }
+      ],
+      "imagingResults": [],
+      "vaccinations": [],
+      "advice": "Kết quả xét nghiệm là công cụ để giúp chẩn đoán và cần tương quan với lâm sàng bởi bác sĩ chỉ định. Cần thận trọng khi diễn giải và theo dõi tương quan lâm sàng.",
+      "patientName": "TRƯƠNG ANH TUẤN",
+      "patientBirthDate": "1980-12-30",
+      "patientGender": "Nam",
+      "recordedAt": "2026-11-07T11:38:30.274Z"
+    }
+  ],
+  "sources": [
+    {
+      "driveFileId": "1oOM7PtkhHm12YFq4C9-VJi9sUwhNtMoA",
+      "fileName": "Xet nghiem mau 2026 tuanta.pdf",
+      "fileSize": 338503,
+      "fileHash": "168d2fbffe8357f9bbca4b9170cf56871987219ff18fcc65d94db9af6053f2c5",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:37:59.156Z",
+      "status": "processed",
+      "totalPages": 3,
+      "processedPages": 3,
+      "digitizedAt": "2026-11-07T11:38:13.585Z"
+    },
+    {
+      "driveFileId": "1BDgf-oOeDtb6EZt8-uy3VTHh0q2pZgFU",
+      "fileName": "26020551115_vi.pdf",
+      "fileSize": 549245,
+      "fileHash": "09ce57a5fd6b2972f365dfe093726fb266f7f4a90b42c1bf741f9cafabb670b2",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:38:20.777Z",
+      "status": "processed",
+      "totalPages": 1,
+      "processedPages": 1,
+      "digitizedAt": "2026-11-07T11:38:30.275Z"
+    },
+    {
+      "driveFileId": "11Qc1eDWe0UsRpFdt6zmw3e-glNbFZ3uD",
+      "fileName": "Xet nghiem mau 2025 tuanta.pdf",
+      "fileSize": 743916,
+      "fileHash": "d9efd49373b4d41640aed95ae0f05a9964e442fd1c179ef292de92d3ad7376fc",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:38:35.634Z",
+      "status": "processed",
+      "totalPages": 3,
+      "processedPages": 3,
+      "digitizedAt": "2026-11-07T11:38:49.016Z"
+    },
+    {
+      "driveFileId": "140FQy1bbcpnkKvtCzaTMjv93HiHm_o84",
+      "fileName": "26020379765_vi.pdf",
+      "fileSize": 798681,
+      "fileHash": "2d6bd7c0339fcdf4535547ded93c2004bd457c6107fc84aed3ab705f8453ca8e",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:38:54.387Z",
+      "status": "processed",
+      "totalPages": 3,
+      "processedPages": 3,
+      "digitizedAt": "2026-11-07T11:39:02.944Z"
+    },
+    {
+      "driveFileId": "1LtVMb4zQxcZl3cvOmFfPB9HM_hDXRH55",
+      "fileName": "tuanta 2024.pdf",
+      "fileSize": 8549575,
+      "fileHash": "fd9613f24571b15e4f950505b4eb30cc3079762ff76b4fea14ffe1cb50f5055a",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:39:10.028Z",
+      "status": "processed",
+      "totalPages": 15,
+      "processedPages": 15,
+      "digitizedAt": "2026-11-07T11:39:39.682Z"
+    },
+    {
+      "driveFileId": "160gZpPdauovxmQKoYOAKz9ztTegxdSJy",
+      "fileName": "tuanta 2025.pdf",
+      "fileSize": 10244338,
+      "fileHash": "572c1a56611612705ff0bdffeaee1bc977a43f00ec08e4a5888bb1887b6702f0",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:39:46.859Z",
+      "status": "processed",
+      "totalPages": 18,
+      "processedPages": 18,
+      "digitizedAt": "2026-11-07T11:40:27.222Z"
+    },
+    {
+      "driveFileId": "15UyabWCz9HW2PfyD-oj6cp44ZgeJ67iT",
+      "fileName": "tuanta 2026.pdf",
+      "fileSize": 13958398,
+      "fileHash": "36e6f42e6741e96844f0bf30f678703dbbe11e5664e52673ae2d360a5e9c793f",
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-11-07T11:40:33.971Z",
+      "status": "processed",
+      "totalPages": 16,
+      "processedPages": 16,
+      "digitizedAt": "2026-11-07T11:41:53.942Z"
+    }
+  ],
+  "summary": {
+    "latestEventDate": "2026-08-10",
+    "latestDiagnoses": [],
+    "latestMetrics": {
+      "WBC": {
+        "name": "WBC (BẠCH CẦU)",
+        "standardKey": "WBC",
+        "value": 5.47,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "NEU_PCT": {
+        "name": "NEU %",
+        "standardKey": "NEU_PCT",
+        "value": 55.6,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "NEU_#": {
+        "name": "NEU #",
+        "standardKey": "NEU_#",
+        "value": 3.04,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "LYM_PCT": {
+        "name": "LYM %",
+        "standardKey": "LYM_PCT",
+        "value": 39.9,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "LYM_#": {
+        "name": "LYM #",
+        "standardKey": "LYM_#",
+        "value": 2.18,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MONO_PCT": {
+        "name": "MONO %",
+        "standardKey": "MONO_PCT",
+        "value": 2.7,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MONO_#": {
+        "name": "MONO #",
+        "standardKey": "MONO_#",
+        "value": 0.15,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "RBC": {
+        "name": "RBC (HỒNG CẦU)",
+        "standardKey": "RBC",
+        "value": 4.66,
+        "unit": "T/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HGB": {
+        "name": "HGB",
+        "standardKey": "HGB",
+        "value": 136,
+        "unit": "g/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HCT": {
+        "name": "HCT",
+        "standardKey": "HCT",
+        "value": 0.41,
+        "unit": "L/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MCV": {
+        "name": "MCV",
+        "standardKey": "MCV",
+        "value": 88,
+        "unit": "fL",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MCH": {
+        "name": "MCH",
+        "standardKey": "MCH",
+        "value": 29.2,
+        "unit": "pG",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MCHC": {
+        "name": "MCHC",
+        "standardKey": "MCHC",
+        "value": 332,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "PLT": {
+        "name": "PLT (TIỂU CẦU)",
+        "standardKey": "PLT",
+        "value": 267,
+        "unit": "G/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HBSAG": {
+        "name": "HBSAG miễn dịch tự động",
+        "standardKey": "HBSAG",
+        "value": 0.648,
+        "unit": "COI",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HBSAB": {
+        "name": "HBSAB định lượng",
+        "standardKey": "HBSAB",
+        "value": 1000,
+        "unit": "IU/L",
+        "status": "high",
+        "date": "2026-06-11"
+      },
+      "HBA1C": {
+        "name": "Định lượng HbA1c",
+        "standardKey": "HBA1C",
+        "value": 5.4,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "TSH": {
+        "name": "Hormone Kích Thích Tuyến Giáp (TSH) [Huyết Thanh]",
+        "standardKey": "TSH",
+        "value": 3.22,
+        "unit": "µIU/mL",
+        "status": "normal",
+        "date": "2026-08-10"
+      },
+      "FT4": {
+        "name": "Định lượng FT4 (Free Thyroxine) [Huyết Thanh]",
+        "standardKey": "FT4",
+        "value": 12.27,
+        "unit": "pmol/L",
+        "status": "normal",
+        "date": "2026-08-10"
+      },
+      "FT3": {
+        "name": "Định lượng FT3 (Free Triiodothyronine) [Huyết Thanh]",
+        "standardKey": "FT3",
+        "value": 4.21,
+        "unit": "pmol/L",
+        "status": "normal",
+        "date": "2026-08-10"
+      },
+      "GLUCOSE": {
+        "name": "Định lượng Glucose",
+        "standardKey": "GLUCOSE",
+        "value": 4.85,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "UREA": {
+        "name": "Định lượng Ure",
+        "standardKey": "UREA",
+        "value": 6.21,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "CREATININ": {
+        "name": "Creatinin* [Huyết Thanh]",
+        "standardKey": "CREATININ",
+        "value": 77.5,
+        "unit": "µmol/L",
+        "status": "normal",
+        "date": "2026-06-14"
+      },
+      "EGFR": {
+        "name": "Độ Lọc Cầu Thận Ước Tính (eGFR)",
+        "standardKey": "EGFR",
+        "value": 107.92,
+        "unit": "mL/min/1.73m²",
+        "status": "normal",
+        "date": "2026-06-14"
+      },
+      "CHOLESTEROL": {
+        "name": "Định lượng Cholesterol toàn phần",
+        "standardKey": "CHOLESTEROL",
+        "value": 4.08,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HDL_C": {
+        "name": "Định lượng HDL-C",
+        "standardKey": "HDL_C",
+        "value": 0.99,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "LDL_C": {
+        "name": "Định lượng LDL - C",
+        "standardKey": "LDL_C",
+        "value": 1.94,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "TRIGLYCERID": {
+        "name": "Định lượng Triglycerid",
+        "standardKey": "TRIGLYCERID",
+        "value": 1.46,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "AST": {
+        "name": "Đo hoạt độ AST (GOT)",
+        "standardKey": "AST",
+        "value": 21.75,
+        "unit": "U/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "ALT": {
+        "name": "Đo hoạt độ ALT (GPT)",
+        "standardKey": "ALT",
+        "value": 13.41,
+        "unit": "U/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "GGT": {
+        "name": "Đo hoạt độ GGT",
+        "standardKey": "GGT",
+        "value": 18.1,
+        "unit": "U/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "URINE_SG": {
+        "name": "Tỉ Trọng (SG)",
+        "standardKey": "URINE_SG",
+        "value": 1.008,
+        "unit": "",
+        "status": "normal",
+        "date": "2026-06-14"
+      },
+      "URINE_PH": {
+        "name": "pH",
+        "standardKey": "URINE_PH",
+        "value": 6,
+        "unit": "",
+        "status": "normal",
+        "date": "2026-06-14"
+      },
+      "PULSE_BPM": {
+        "name": "Mạch (Pulse)",
+        "standardKey": "PULSE_BPM",
+        "value": 49,
+        "unit": "bpm",
+        "status": "low",
+        "date": "2024-05-22"
+      },
+      "CEA": {
+        "name": "CEA",
+        "standardKey": "CEA",
+        "value": 1.82,
+        "unit": "ng/mL",
+        "status": "normal",
+        "date": "2025-06-03"
+      },
+      "CYFRA_21_1": {
+        "name": "CYFRA_21_1",
+        "standardKey": "CYFRA_21_1",
+        "value": 4.02,
+        "unit": "ng/mL",
+        "status": "high",
+        "date": "2025-06-03"
+      },
+      "CA_72_4": {
+        "name": "CA_72_4",
+        "standardKey": "CA_72_4",
+        "value": 0.524,
+        "unit": "U/mL",
+        "status": "normal",
+        "date": "2025-06-03"
+      },
+      "URINE_BLOOD": {
+        "name": "URINE_BLOOD",
+        "standardKey": "URINE_BLOOD",
+        "value": 10,
+        "unit": "Ery/μL",
+        "status": "high",
+        "date": "2025-06-03"
+      },
+      "EOS_PCT": {
+        "name": "- EOS %",
+        "standardKey": "EOS_PCT",
+        "value": 1.3,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-08"
+      },
+      "EOS_#": {
+        "name": "- EOS #",
+        "standardKey": "EOS_#",
+        "value": 0.07,
+        "unit": "",
+        "status": "normal",
+        "date": "2026-06-08"
+      },
+      "BASO_PCT": {
+        "name": "- BASO %",
+        "standardKey": "BASO_PCT",
+        "value": 0.5,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-08"
+      },
+      "BASO_#": {
+        "name": "- BASO #",
+        "standardKey": "BASO_#",
+        "value": 0.03,
+        "unit": "",
+        "status": "normal",
+        "date": "2026-06-08"
+      },
+      "RDW": {
+        "name": "RDW",
+        "standardKey": "RDW",
+        "value": 13.1,
+        "unit": "%",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "MPV": {
+        "name": "MPV",
+        "standardKey": "MPV",
+        "value": 8.7,
+        "unit": "fL",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "URINE_PRO": {
+        "name": "Định lượng Protein Toàn Phần [Nước Tiểu]",
+        "standardKey": "URINE_PRO",
+        "value": 20,
+        "unit": "mg/L",
+        "status": "normal",
+        "date": "2026-06-14"
+      },
+      "ESR_1H": {
+        "name": "VS 1H",
+        "standardKey": "ESR_1H",
+        "value": 13,
+        "unit": "mm",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "ESR_2H": {
+        "name": "VS 2H",
+        "standardKey": "ESR_2H",
+        "value": 25,
+        "unit": "mm",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "HCV_AB": {
+        "name": "HCV AB miễn dịch tự động",
+        "standardKey": "HCV_AB",
+        "value": 0.076,
+        "unit": "COI",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "ACID_URIC": {
+        "name": "Định lượng Axit Uric [Huyết Thanh]",
+        "standardKey": "ACID_URIC",
+        "value": 0.317,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-08-10"
+      },
+      "NA": {
+        "name": "Natri",
+        "standardKey": "NA",
+        "value": 137.6,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "K": {
+        "name": "Kali",
+        "standardKey": "K",
+        "value": 4.23,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "CL": {
+        "name": "Clo",
+        "standardKey": "CL",
+        "value": 103.3,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      },
+      "CA_ION": {
+        "name": "Calci ion hóa",
+        "standardKey": "CA_ION",
+        "value": 1.22,
+        "unit": "mmol/L",
+        "status": "normal",
+        "date": "2026-06-11"
+      }
+    },
+    "narrative": "Chào anh Truong Anh Tuan, dựa trên kết quả khám sức khỏe định kỳ và các xét nghiệm gần đây của anh, tình hình sức khỏe tổng quan của anh đang được kiểm soát khá tốt nhưng cần chú ý một số điểm quan trọng. Về tiền sử, anh đã từng phẫu thuật một phần tuyến giáp và hiện có các nang giáp keo hai thùy (TI-RADS 1), chức năng tuyến giáp (TSH, FT3, FT4) hiện trong giới hạn bình thường, anh cần duy trì siêu âm giáp định kỳ hằng năm. Trong các năm trước, anh từng ghi nhận tình trạng tăng Acid Uric (lên đến 933 µmol/L vào tháng 6/2026) kèm đạm niệu nhẹ, tuy nhiên các xét nghiệm kiểm tra lại sau đó (tháng 6 và tháng 8/2026) tại Medical Diag Center đã cho thấy nồng độ Acid Uric và chức năng thận (Creatinin, eGFR) đã trở về mức hoàn toàn bình thường. Ngoài ra, siêu âm ổ bụng ghi nhận tình trạng đa polyp túi mật, tình trạng này cần theo dõi kích thước định kỳ mỗi 6-12 tháng. Về dinh dưỡng và sinh hoạt, anh nên duy trì chế độ ăn uống cân bằng, hạn chế các thực phẩm giàu purin (như nội tạng động vật, hải sản, thịt đỏ) để kiểm soát acid uric, uống đủ nước, hạn chế rượu bia và duy trì tập thể dục đều đặn. Lịch tái khám khuyến nghị là thực hiện tổng quát, siêu âm ổ bụng, siêu âm tuyến giáp và xét nghiệm máu (chức năng thận, acid uric, đường huyết, mỡ máu) định kỳ mỗi 6 tháng đến 1 năm để theo dõi sát sao tình trạng polyp túi mật và tuyến giáp."
+  },
+  "aiAnalysis": {
+    "lastAnalyzedDate": "2026-11-07",
+    "overviewSummary": "Sức khỏe tổng quát của bệnh nhân Trương Anh Tuấn ghi nhận trạng thái ổn định sau phẫu thuật cắt một phần tuyến giáp. Tuy có đợt tăng acid uric máu cấp tính (933.88 µmol/L) kèm đạm niệu vào tháng 6/2026, chỉ số này đã được kiểm soát trở lại mức bình thường (317 µmol/L) vào tháng 8/2026. Cần tiếp tục theo dõi đa polyp túi mật, biến động CYFRA 21-1 và chức năng tâm trương thất trái định kỳ.",
+    "criticalAlerts": [
+      "Theo dõi biến động chỉ số marker CYFRA 21-1 (4.02 ng/mL) và tầm soát Tai Mũi Họng/Phổi.",
+      "Giám sát sát sao Acid Uric máu phòng ngừa tái phát đợt tăng vọt trên 900 µmol/L.",
+      "Theo dõi kích thước đa polyp túi mật qua siêu âm ổ bụng định kỳ."
+    ],
+    "chronicConditionsTracking": [],
+    "actionRoadmap": {
+      "specialistConsultation": [
+        "Chuyên khoa Tai Mũi Họng & Hô Hấp",
+        "Chuyên khoa Tiêu hóa - Gan mật",
+        "Chuyên khoa Nội tiết - Thận"
+      ],
+      "dietaryModifications": [
+        "Kiểm tra lại xét nghiệm tổng phân tích nước tiểu để đảm bảo đạm niệu duy trì âm tính.",
+        "Duy trì uống đủ 2-2.5 lit nước mỗi ngày và hạn chế thực phẩm giàu purin, bia rượu."
+      ],
+      "followUpSchedule": "Kiểm tra lại xét nghiệm tổng phân tích nước tiểu để đảm bảo đạm niệu duy trì âm tính."
+    }
+  },
+  "aiDeepAnalysis": {
+    "analyzedAt": "2026-11-07T11:48:08.283Z",
+    "healthScore": 78,
+    "overallAssessment": "Sức khỏe tổng quát của bệnh nhân Trương Anh Tuấn ghi nhận trạng thái ổn định sau phẫu thuật cắt một phần tuyến giáp. Tuy có đợt tăng acid uric máu cấp tính (933.88 µmol/L) kèm đạm niệu vào tháng 6/2026, chỉ số này đã được kiểm soát trở lại mức bình thường (317 µmol/L) vào tháng 8/2026. Cần tiếp tục theo dõi đa polyp túi mật, biến động CYFRA 21-1 và chức năng tâm trương thất trái định kỳ.",
+    "crossCorrelations": [],
+    "velocityTrends": [
+      {
+        "metricName": "Acid Uric huyết thanh",
+        "trendDirection": "fluctuating",
+        "velocityDescription": "Tăng vọt từ mức bình thường lên 933.88 µmol/L (06/2026) sau đó giảm nhanh chóng về 311 - 317 µmol/L (08/2026).",
+        "riskProjection": "Nguy cơ đợt Gút cấp hoặc sỏi urat thận nếu không duy trì kiểm soát chế độ ăn uống sinh hoạt."
+      },
+      {
+        "metricName": "Chức năng tuyến giáp (TSH, FT4, FT3)",
+        "trendDirection": "stable",
+        "velocityDescription": "TSH giảm nhẹ từ 4.23 mIU/L (2024) xuống 3.39 mIU/L (2025) và 3.22 µIU/mL (08/2026); FT4 và FT3 duy trì ổn định.",
+        "riskProjection": "Chức năng mô giáp còn lại bù trừ tốt sau cắt một phần thùy giáp, duy trì trạng thái bình giáp."
+      },
+      {
+        "metricName": "Triglycerid",
+        "trendDirection": "fluctuating",
+        "velocityDescription": "Dao động từ 1.74 mmol/L (2024) lên 1.90 mmol/L (2025) rồi giảm về 1.46 mmol/L (2026).",
+        "riskProjection": "Nguy cơ rối loạn chuyển hóa lipid máu nhẹ, có đáp ứng tốt với điều chỉnh lối sống."
+      }
+    ],
+    "chronicSurveillance": [],
+    "roadmap": {
+      "criticalAlerts": [
+        "Theo dõi biến động chỉ số marker CYFRA 21-1 (4.02 ng/mL) và tầm soát Tai Mũi Họng/Phổi.",
+        "Giám sát sát sao Acid Uric máu phòng ngừa tái phát đợt tăng vọt trên 900 µmol/L.",
+        "Theo dõi kích thước đa polyp túi mật qua siêu âm ổ bụng định kỳ."
+      ],
+      "specialistReferrals": [
+        {
+          "specialty": "Chuyên khoa Tai Mũi Họng & Hô Hấp",
+          "reason": "Kiểm tra viêm amidan mạn tính và tầm soát nguyên nhân gây tăng nhẹ CYFRA 21-1."
+        },
+        {
+          "specialty": "Chuyên khoa Tiêu hóa - Gan mật",
+          "reason": "Đánh giá và theo dõi diễn tiến đa polyp túi mật."
+        },
+        {
+          "specialty": "Chuyên khoa Nội tiết - Thận",
+          "reason": "Đánh giá định kỳ chức năng tuyến giáp sau mổ và quản lý chuyển hóa acid uric, đạm niệu."
+        }
+      ],
+      "timeBoundPlan": {
+        "next3Months": [
+          "Kiểm tra lại xét nghiệm tổng phân tích nước tiểu để đảm bảo đạm niệu duy trì âm tính.",
+          "Tái khám Tai Mũi Họng đánh giá tình trạng viêm amidan mạn.",
+          "Duy trì uống đủ 2-2.5 lit nước mỗi ngày và hạn chế thực phẩm giàu purin, bia rượu."
+        ],
+        "next6Months": [
+          "Siêu âm ổ bụng tổng quát kiểm tra số lượng và kích thước đa polyp túi mật.",
+          "Xét nghiệm lại Acid Uric, Creatinin, eGFR, Triglycerid và CYFRA 21-1."
+        ],
+        "next12Months": [
+          "Siêu âm tuyến giáp và kiểm tra bộ hormone giáp (TSH, FT4, FT3).",
+          "Siêu âm Doppler tim và Điện tâm đồ theo dõi rối loạn chức năng tâm trương thất trái và nhịp chậm xoang.",
+          "Khám sức khỏe tổng quát định kỳ hàng năm."
+        ]
+      }
+    }
+  },
+  "createdAt": "2026-11-07T11:37:48.293Z",
+  "updatedAt": "2026-11-07T11:48:09.255Z"
+}

@@ -459,7 +459,7 @@ export async function refineAndOrganizeMemberData(
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 2: PHÂN TÍCH, ĐÁNH GIÁ TOÀN DIỆN HỒ SƠ Y TẾ & TƯ VẤN LỜI KHUYÊN (DEEP INSIGHT)
-// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.8-flash (Phân tích 4 lớp y khoa)
+// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.6-flash (Phân tích 4 lớp y khoa)
 // ============================================================================
 
 /**
@@ -564,17 +564,18 @@ export async function streamHealthAssistant(
 }
 
 /**
- * Đưa ra phân tích chuyên sâu đa chiều và cảnh báo rủi ro sức khỏe
+ * Đưa ra phân tích chuyên sâu đa chiều và cảnh báo rủi ro sức khỏe bằng gemini-3.6-flash
  */
 export async function analyzeComprehensiveHealth(
   member: FamilyMember,
   profile: HealthProfile,
-  model?: string
-): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock }> {
+  model: string = 'gemini-3.6-flash'
+): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock; modelUsed?: string }> {
   const data = await callServerGemini<{
     success: boolean;
     result: AiDeepAnalysisResult;
     aiAnalysis?: AiAnalysisBlock;
+    modelUsed?: string;
   }>('analyze-comprehensive', {
     member,
     profile,
@@ -620,6 +621,7 @@ export async function analyzeComprehensiveHealth(
   return {
     result,
     aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
+    modelUsed: data.modelUsed,
   };
 }
 

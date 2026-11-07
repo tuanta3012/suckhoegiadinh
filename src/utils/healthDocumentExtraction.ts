@@ -192,12 +192,107 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
   return result;
 }
 
-export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord {
+/**
+ * Thuật toán chọn ngày sự kiện dựa trên phân tích tần suất (Frequency-based Date Voting / Consensus)
+ * Giúp chọn chính xác ngày khám thực tế ngay cả khi trang bìa in sai niên độ hoặc có ngày in trôi nổi.
+ */
+export function resolveConsensusDate(
+  values: JsonRecord[],
+  patientBirthDate?: string,
+  preferredYear?: string
+): string | undefined {
+  const dateCounts = new Map<string, number>();
+  const yearCounts = new Map<string, number>();
+
+  const normalizeDateStr = (raw: string): string | null => {
+    const trimmed = raw.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return trimmed;
+    }
+    const dmy = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (dmy) {
+      const d = dmy[1].padStart(2, '0');
+      const m = dmy[2].padStart(2, '0');
+      const y = dmy[3];
+      return `${y}-${m}-${d}`;
+    }
+    const ymd = trimmed.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (ymd) {
+      const y = ymd[1];
+      const m = ymd[2].padStart(2, '0');
+      const d = ymd[3].padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    return null;
+  };
+
+  const addCandidate = (dateStr: unknown, weight = 1) => {
+    if (typeof dateStr !== 'string') return;
+    const normalized = normalizeDateStr(dateStr);
+    if (!normalized) return;
+
+    if (patientBirthDate && normalized === patientBirthDate) {
+      return;
+    }
+
+    const y = parseInt(normalized.substring(0, 4), 10);
+    const currentYear = new Date().getFullYear();
+    if (y < 1990 || y > currentYear + 1) return;
+
+    dateCounts.set(normalized, (dateCounts.get(normalized) || 0) + weight);
+    const yearStr = normalized.substring(0, 4);
+    yearCounts.set(yearStr, (yearCounts.get(yearStr) || 0) + weight);
+  };
+
+  for (const v of values) {
+    if (v.date) addCandidate(v.date, 3);
+    
+    const textToScan = `${v.notes || ''} ${v.advice || ''} ${v.title || ''}`;
+    const dateMatches = textToScan.matchAll(/\b(\d{1,2}[/-]\d{1,2}[/-](?:19|20)\d{2})\b/g);
+    for (const match of dateMatches) {
+      addCandidate(match[1], 1);
+    }
+    const isoMatches = textToScan.matchAll(/\b((?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2})\b/g);
+    for (const match of isoMatches) {
+      addCandidate(match[1], 1);
+    }
+  }
+
+  if (dateCounts.size === 0) return undefined;
+
+  let bestYear = preferredYear;
+  if (!bestYear) {
+    let maxYearWeight = -1;
+    for (const [year, weight] of yearCounts.entries()) {
+      if (weight > maxYearWeight) {
+        maxYearWeight = weight;
+        bestYear = year;
+      }
+    }
+  }
+
+  let bestDate: string | undefined;
+  let maxWeight = -1;
+
+  for (const [date, weight] of dateCounts.entries()) {
+    let effectiveWeight = weight;
+    if (bestYear && date.startsWith(bestYear)) {
+      effectiveWeight += 5;
+    }
+    if (effectiveWeight > maxWeight) {
+      maxWeight = effectiveWeight;
+      bestDate = date;
+    }
+  }
+
+  return bestDate;
+}
+
+export function mergeExtractedBatches(batches: ExtractedPageBatch[], preferredYear?: string): JsonRecord {
   const values = batches.map(({ extracted }) => cleanExtractedJson(extracted));
   const merged: JsonRecord = {};
   for (const key of [
     'title',
-    'date',
     'type',
     'patientName',
     'patientBirthDate',
@@ -209,6 +304,15 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord
   ]) {
     const entry = values.find((value) => typeof value[key] === 'string' && Boolean((value[key] as string).trim()));
     if (entry) merged[key] = entry[key];
+  }
+
+  const patientBirthDate = merged.patientBirthDate as string | undefined;
+  const consensusDate = resolveConsensusDate(values, patientBirthDate, preferredYear);
+  if (consensusDate) {
+    merged.date = consensusDate;
+  } else {
+    const fallbackDateEntry = values.find((value) => typeof value.date === 'string' && Boolean((value.date as string).trim()));
+    if (fallbackDateEntry) merged.date = fallbackDateEntry.date;
   }
 
   const physEntry = values.find((value) => isRecord(value.physicalExam) && Object.keys(value.physicalExam).length > 0);

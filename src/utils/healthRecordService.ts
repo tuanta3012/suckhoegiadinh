@@ -1,10 +1,128 @@
 import { digitizationLogger } from './digitizationLogger';
 
 /**
- * Làm sạch tên chỉ số: Loại bỏ dấu sao, ký tự đặc biệt, khoảng trắng thừa
+ * Làm sạch tên chỉ số: Loại bỏ dấu sao (*), ký tự rác, khoảng trắng thừa
+ * Ví dụ: "Creatinin* [Huyết Thanh]" -> "Creatinin [Huyết Thanh]"
  */
 export function sanitizeMetricName(name: string): string {
-  return name.replace(/\*/g, '').trim();
+  if (!name || typeof name !== 'string') return '';
+  return name
+    .replace(/[*#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Tiền xử lý dữ liệu trước khi gửi cho Phân tích Chuyên sâu (AI Deep-Dive):
+ * 1. Lọc chỉ số thông minh:
+ *    - Chỉ giữ các chỉ số bất thường (status !== 'normal').
+ *    - Hoặc nhóm chỉ số cốt lõi theo dõi định kỳ (Glucose, HbA1c, Creatinin, Acid Uric, TSH, Lipid máu, Men gan).
+ *    - Loại bỏ chỉ số bình thường lặp lại không cần thiết để tối ưu token & thời gian xử lý.
+ * 2. Rút gọn kết quả hình ảnh:
+ *    - Đối với siêu âm, X-quang: CHỈ giữ lại phần 'conclusion' (kết luận), loại bỏ 'findings' dài dòng.
+ * 3. Chuẩn hóa tên chỉ số:
+ *    - Tự động gọi sanitizeMetricName để loại bỏ dấu sao (*), ký tự thừa.
+ */
+export function prepareDataForDeepDive(member: any, profile: any) {
+  const memberName = member?.name || profile?.member?.name || 'Thành viên';
+  const gender = member?.gender || profile?.member?.gender || 'N/A';
+  const birthDate = member?.birthDate || profile?.member?.birthDate || 'N/A';
+  const medicalHistory = profile?.medicalHistory || { surgeries: [], chronicConditions: [] };
+
+  const timeline = Array.isArray(profile?.timeline) ? profile.timeline : [];
+  // Sắp xếp theo ngày tăng dần và lấy tối đa 15 mốc khám gần nhất
+  const sortedEvents = [...timeline].sort(
+    (a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  const relevantEvents = sortedEvents.slice(-15);
+
+  // Danh mục từ khóa các nhóm chỉ số cốt lõi theo dõi định kỳ
+  const coreKeywords = [
+    'GLUCOSE', 'GLU', 'HBA1C',
+    'CREATININ', 'CREATININE', 'EGFR', 'UREA',
+    'ACID_URIC', 'URIC_ACID', 'URIC',
+    'TSH', 'FT4', 'FT3',
+    'CHOLESTEROL', 'TRIGLYCERID', 'TRIGLYCERIDE', 'HDL_C', 'HDL', 'LDL_C', 'LDL',
+    'AST', 'ALT', 'GGT', 'SGOT', 'SGPT',
+  ];
+
+  const isCoreIndicator = (key: string, name: string): boolean => {
+    const normKey = key.toUpperCase();
+    const normName = name.toUpperCase();
+    return coreKeywords.some((kw) => normKey.includes(kw) || normName.includes(kw));
+  };
+
+  const prunedEvents = relevantEvents.map((evt: any, index: number) => {
+    // 3 mốc khám mới nhất giữ thêm chỉ số để so sánh xu hướng
+    const isRecent = index >= Math.max(0, relevantEvents.length - 3);
+
+    const metrics = Array.isArray(evt.metrics)
+      ? evt.metrics
+          .map((m: any) => {
+            const cleanName = sanitizeMetricName(String(m.name || ''));
+            const standardKey = String(m.standardKey || cleanName).toUpperCase();
+            const status = String(m.status || '').toLowerCase();
+            const isAbnormal =
+              status === 'high' ||
+              status === 'low' ||
+              status === 'abnormal' ||
+              status === 'critical' ||
+              (status !== 'normal' && status !== '');
+            const isCore = isCoreIndicator(standardKey, cleanName);
+
+            // Giữ nếu: bất thường HOẶC thuộc nhóm chỉ số cốt lõi
+            if (isAbnormal || isCore || (isRecent && status !== 'normal')) {
+              return {
+                name: cleanName,
+                key: standardKey,
+                val: m.value,
+                unit: m.unit || '',
+                st: isAbnormal ? (status || 'abnormal') : 'normal',
+                ref: m.refRange,
+              };
+            }
+            return null;
+          })
+          .filter((m: any): m is NonNullable<typeof m> => m !== null)
+      : [];
+
+    // Rút gọn kết luận hình ảnh (siêu âm, X-quang, CT...): CHỈ giữ conclusion, bỏ findings
+    const imagingResults = Array.isArray(evt.imagingResults)
+      ? evt.imagingResults
+          .map((img: any) => {
+            const conclusion = String(img.conclusion || img.findings || '').trim();
+            if (!conclusion) return null;
+            return {
+              mod: img.modality || 'Chẩn đoán hình ảnh',
+              con: conclusion.substring(0, 300), // Rút gọn súc tích
+            };
+          })
+          .filter((img: any): img is NonNullable<typeof img> => img !== null)
+      : [];
+
+    return {
+      d: evt.date,
+      t: evt.title,
+      type: evt.type,
+      facility: evt.facility,
+      diag: Array.isArray(evt.diagnoses) ? evt.diagnoses.slice(0, 10) : [],
+      metrics: metrics.slice(0, 40),
+      img: imagingResults.slice(0, 10),
+      phys: evt.physicalExam
+        ? {
+            bp: evt.physicalExam.bp_mmHg,
+            bmi: evt.physicalExam.bmi,
+            pulse: evt.physicalExam.pulse_bpm,
+          }
+        : undefined,
+    };
+  });
+
+  return {
+    p: { n: memberName, g: gender, b: birthDate },
+    h: medicalHistory,
+    tm: prunedEvents,
+  };
 }
 
 /**
