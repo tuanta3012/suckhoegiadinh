@@ -17,8 +17,7 @@ describe('mergeExtractedBatches', () => {
 
     expect(merged.metrics).toEqual([
       { name: 'Đường huyết', standardKey: 'GLUCOSE', value: 5.2, unit: 'mmol/L' },
-      { name: 'Đường huyết', standardKey: 'GLUCOSE', value: 6.1, unit: 'mmol/L' },
-      { name: 'HbA1c', standardKey: 'HbA1c', value: 6, unit: '%' },
+      { name: 'HbA1c', standardKey: 'HBA1C', value: 6, unit: '%' },
     ]);
   });
 
@@ -55,8 +54,7 @@ describe('mergeExtractedBatches', () => {
       { name: 'Thuốc A 10 mg', dosage: '1 viên', frequency: '2 lần/ngày', duration: undefined },
     ]);
     expect(merged.metrics).toHaveLength(2);
-    expect(merged.notes).toContain('Trang 1-3: Trang đầu.');
-    expect(merged.notes).toContain('Trang 4-6: Có dữ liệu được trích xuất');
+    expect(merged.notes).toContain('Trang đầu.');
     expect(merged.advice).toBe('Tái khám sau một tuần.\nUống đủ nước.');
   });
 });

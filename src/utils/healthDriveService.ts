@@ -41,6 +41,9 @@ async function authenticatedDriveFetch(url: string, init: RequestInit = {}): Pro
 
   const refreshedToken = await trySilentRefresh(true);
   if (!refreshedToken) {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('google-drive-auth-expired'));
+    }
     throw new Error('Google Drive từ chối phiên hiện tại. Hãy đăng nhập lại để cấp quyền Drive.');
   }
   headers.set('Authorization', `Bearer ${refreshedToken}`);

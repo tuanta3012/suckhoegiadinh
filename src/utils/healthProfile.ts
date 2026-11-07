@@ -83,7 +83,9 @@ function isHealthSource(value: unknown): value is HealthSource {
       (value.rawDeletedAt === undefined || typeof value.rawDeletedAt === 'string') &&
       (value.fileSize === undefined ||
         (typeof value.fileSize === 'number' && Number.isFinite(value.fileSize))) &&
-      (value.fileHash === undefined || typeof value.fileHash === 'string'),
+      (value.fileHash === undefined || typeof value.fileHash === 'string') &&
+      (value.totalPages === undefined || typeof value.totalPages === 'number') &&
+      (value.processedPages === undefined || typeof value.processedPages === 'number'),
   );
 }
 
@@ -230,19 +232,39 @@ export function canDeleteRawSource(profile: HealthProfile, sourceFileId: string)
   );
 }
 
+import { standardizeMetricKey } from './healthRecordService';
+
 export function summarizeTimeline(
   timeline: HealthEvent[],
   narrative?: string,
 ): HealthProfile['summary'] {
   const latest = [...timeline].sort((a, b) => b.date.localeCompare(a.date))[0];
   const latestMetrics: Record<string, HealthMetric & { date: string }> = {};
+  
   for (const event of timeline) {
+    if (!event || !Array.isArray(event.metrics)) continue;
+    const eventDate = event.date || new Date().toISOString().slice(0, 10);
+
     for (const metric of event.metrics) {
-      const key = metric.standardKey || metric.name;
-      const previous = latestMetrics[key];
-      if (!previous || event.date >= previous.date) latestMetrics[key] = { ...metric, date: event.date };
+      if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
+      
+      const rawKey = metric.standardKey || metric.name || '';
+      const stdKey = standardizeMetricKey(rawKey, metric.unit || '', metric.name);
+      
+      if (!stdKey) continue; 
+
+      const previous = latestMetrics[stdKey];
+      // Strictly one entry per standardized key, prioritized by latest date
+      if (!previous || eventDate >= previous.date) {
+        latestMetrics[stdKey] = {
+          ...metric,
+          standardKey: stdKey,
+          date: eventDate,
+        };
+      }
     }
   }
+
   const followUp = [...timeline]
     .reverse()
     .map((event) => event.nextFollowUp)

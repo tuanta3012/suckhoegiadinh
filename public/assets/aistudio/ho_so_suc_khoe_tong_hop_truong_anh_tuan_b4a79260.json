@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 2,
+  "member": {
+    "id": "member_beb2204c-3ac",
+    "name": "Trương Anh Tuấn",
+    "birthDate": "1980-12-30",
+    "gender": "Nam",
+    "phone": "0942074568",
+    "address": "46 Đường 81, Phường Tân Hưng, Thành phố Hồ Chí Minh",
+    "company": "CÔNG TY TNHH ĐẦU TƯ KINH DOANH HẠ TẦNG SCTV",
+    "chronicConditions": [
+      "Đã cắt một phần thùy phải tuyến giáp",
+      "Đa polyp túi mật",
+      "Nang giáp keo / Phình giáp hạt hai thùy (TI-RADS 1)",
+      "Viêm amidan mạn tính",
+      "Vôi răng vết dính",
+      "Tật khúc xạ"
+    ]
+  },
+  "sources": [
+    {
+      "fileName": "tuanta 2024_2.pdf",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "examDate": "2024-05-22",
+      "totalPages": 18
+    },
+    {
+      "fileName": "tuanta 2025_2.pdf",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "examDate": "2025-05-30",
+      "totalPages": 18
+    },
+    {
+      "fileName": "Xet nghiem mau 2025 tuanta_2.pdf",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "examDate": "2025-05-30",
+      "totalPages": 3
+    },
+    {
+      "fileName": "tuanta 2026_2.pdf",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "examDate": "2026-06-08",
+      "totalPages": 16
+    },
+    {
+      "fileName": "Xet nghiem mau 2026 tuanta_2.pdf",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "examDate": "2026-06-08",
+      "totalPages": 3
+    },
+    {
+      "fileName": "26020379765_vi.pdf",
+      "facility": "Medical Diag Center",
+      "examDate": "2026-06-14",
+      "totalPages": 3
+    },
+    {
+      "fileName": "26020551115_vi.pdf",
+      "facility": "Medical Diag Center",
+      "examDate": "2026-08-10",
+      "totalPages": 1
+    }
+  ],
+  "timeline": [
+    {
+      "id": "event_20240522",
+      "date": "2024-05-22",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "title": "Khám sức khỏe định kỳ năm 2024",
+      "physicalExam": {
+        "height_cm": 178,
+        "weight_kg": 77,
+        "bmi": 24.3,
+        "bp_mmHg": "124/80",
+        "pulse_bpm": 58,
+        "classification": "Loại I"
+      },
+      "diagnoses": [
+        "Tiền căn: Cắt tuyến giáp một phần",
+        "Nhịp chậm xoang (49 l/p)",
+        "Polyp túi mật",
+        "Nang giáp thùy trái TI-RADS 1 / Đã cắt một phần thùy phải, cấu trúc tăng sinh mạch máu nhẹ",
+        "Tật khúc xạ",
+        "Viêm amidan mạn tính"
+      ],
+      "metrics": [
+        {
+          "name": "Bạch cầu (WBC)",
+          "standardKey": "WBC",
+          "value": 6.41,
+          "unit": "G/L",
+          "refRange": "3.9-10"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 43.4,
+          "unit": "%",
+          "refRange": "45-75"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 44.0,
+          "unit": "%",
+          "refRange": "20-45"
+        },
+        {
+          "name": "Hồng cầu (RBC)",
+          "standardKey": "RBC",
+          "value": 4.86,
+          "unit": "T/L",
+          "refRange": "3.9-5.5"
+        },
+        {
+          "name": "Huyết sắc tố (HGB)",
+          "standardKey": "HGB",
+          "value": 135,
+          "unit": "g/L",
+          "refRange": "120-175"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.395,
+          "unit": "L/L",
+          "refRange": "0.350-0.530"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 81.3,
+          "unit": "fL",
+          "refRange": "78-100"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 27.8,
+          "unit": "pg",
+          "refRange": "26.7-32.5"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 342,
+          "unit": "g/L",
+          "refRange": "290-360"
+        },
+        {
+          "name": "Tiểu cầu (PLT)",
+          "standardKey": "PLT",
+          "value": 246,
+          "unit": "G/L",
+          "refRange": "150-450"
+        },
+        {
+          "name": "HBsAg",
+          "standardKey": "HBSAG",
+          "value": "NEG (0.514)",
+          "unit": "COI",
+          "refRange": "<1"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": ">1000",
+          "unit": "IU/L",
+          "refRange": ">10"
+        },
+        {
+          "name": "HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.7,
+          "unit": "%",
+          "refRange": "4.5-6.0"
+        },
+        {
+          "name": "TSH",
+          "standardKey": "TSH",
+          "value": 4.23,
+          "unit": "mIU/L",
+          "refRange": "0.270-4.3"
+        },
+        {
+          "name": "FT4",
+          "standardKey": "FT4",
+          "value": 1.2,
+          "unit": "ng/dL",
+          "refRange": "0.820-1.85"
+        },
+        {
+          "name": "FT3",
+          "standardKey": "FT3",
+          "value": 2.78,
+          "unit": "pg/mL",
+          "refRange": "2.10-4.4"
+        },
+        {
+          "name": "Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.9,
+          "unit": "mmol/L",
+          "refRange": "3.9-6.4"
+        },
+        {
+          "name": "Urea",
+          "standardKey": "UREA",
+          "value": 5.07,
+          "unit": "mmol/L",
+          "refRange": "2.8-7.2"
+        },
+        {
+          "name": "Creatinin",
+          "standardKey": "CREATININ",
+          "value": 88.56,
+          "unit": "µmol/L",
+          "refRange": "53-115"
+        },
+        {
+          "name": "eGFR (MDRD)",
+          "standardKey": "EGFR",
+          "value": 86.1,
+          "unit": "ml/ph/1.73m2",
+          "refRange": ">60"
+        },
+        {
+          "name": "Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 3.92,
+          "unit": "mmol/L",
+          "refRange": "<5.2"
+        },
+        {
+          "name": "HDL-C",
+          "standardKey": "HDL_C",
+          "value": 1.14,
+          "unit": "mmol/L",
+          "refRange": ">0.9"
+        },
+        {
+          "name": "LDL-C",
+          "standardKey": "LDL_C",
+          "value": 1.84,
+          "unit": "mmol/L",
+          "refRange": "<3.4"
+        },
+        {
+          "name": "Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.74,
+          "unit": "mmol/L",
+          "refRange": "<1.77"
+        },
+        {
+          "name": "AST (GOT)",
+          "standardKey": "AST",
+          "value": 19.7,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 12.34,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "GGT",
+          "standardKey": "GGT",
+          "value": 13.29,
+          "unit": "U/L",
+          "refRange": "<50"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Thùy phải KT# 12x25x9mm, Thùy trái KT# 22x41x13mm có cấu trúc echo trống bờ đều d# 3mm. Eo giáp 2.0mm.",
+          "conclusion": "Đã cắt 1 phần tuyến giáp. Phần còn lại cấu trúc không đồng nhất, tăng sinh mạch máu nhẹ. Nang giáp thùy trái TI-RADS 1."
+        },
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Thành túi mật có vài cấu trúc echo dày, không bóng lưng, dmax# 7mm.",
+          "conclusion": "Polyp túi mật."
+        },
+        {
+          "modality": "X-quang Ngực thẳng",
+          "findings": "Không tổn thương nhu mô, tim không to, trung thất bình thường.",
+          "conclusion": "X-quang ngực bình thường."
+        },
+        {
+          "modality": "Điện tâm đồ (ECG)",
+          "findings": "Nhịp xoang 49 lần/phút.",
+          "conclusion": "Nhịp chậm xoang# 49 l/p."
+        }
+      ]
+    },
+    {
+      "id": "event_20250530",
+      "date": "2025-05-30",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "title": "Khám sức khỏe định kỳ năm 2025",
+      "physicalExam": {
+        "height_cm": 178,
+        "weight_kg": 72,
+        "bmi": 22.72,
+        "bp_mmHg": "126/75",
+        "pulse_bpm": 67,
+        "classification": "Loại I"
+      },
+      "diagnoses": [
+        "CYFRA 21-1 tăng (4.02 ng/mL)",
+        "Đa polyp túi mật",
+        "Rối loạn chức năng tâm trương thất trái",
+        "Rối loạn chuyển hóa lipid máu (Triglycerid: 1.90 mmol/L)",
+        "Phình giáp hạt hai thùy TI-RADS 1 / Đã cắt một phần thùy phải",
+        "Vôi răng vết dính",
+        "Vẹo vách ngăn sang phải, Viêm amidan mạn"
+      ],
+      "metrics": [
+        {
+          "name": "Bạch cầu (WBC)",
+          "standardKey": "WBC",
+          "value": 5.34,
+          "unit": "G/L",
+          "refRange": "3.9-10"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 51.6,
+          "unit": "%",
+          "refRange": "45-75"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "refRange": "20-45"
+        },
+        {
+          "name": "Hồng cầu (RBC)",
+          "standardKey": "RBC",
+          "value": 4.84,
+          "unit": "T/L",
+          "refRange": "3.9-5.5"
+        },
+        {
+          "name": "HGB",
+          "standardKey": "HGB",
+          "value": 139,
+          "unit": "g/L",
+          "refRange": "120-175"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.422,
+          "unit": "L/L",
+          "refRange": "0.350-0.530"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 87.2,
+          "unit": "fL",
+          "refRange": "78-100"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 28.7,
+          "unit": "pg",
+          "refRange": "26.7-32.5"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 329,
+          "unit": "g/L",
+          "refRange": "290-360"
+        },
+        {
+          "name": "Tiểu cầu (PLT)",
+          "standardKey": "PLT",
+          "value": 225,
+          "unit": "G/L",
+          "refRange": "150-450"
+        },
+        {
+          "name": "HBsAg",
+          "standardKey": "HBSAG",
+          "value": "NEG (0.523)",
+          "unit": "COI",
+          "refRange": "<1"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": ">1000",
+          "unit": "IU/L",
+          "refRange": ">10"
+        },
+        {
+          "name": "HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.7,
+          "unit": "%",
+          "refRange": "4.0-6.0"
+        },
+        {
+          "name": "TSH",
+          "standardKey": "TSH",
+          "value": 3.39,
+          "unit": "mIU/L",
+          "refRange": "0.270-4.3"
+        },
+        {
+          "name": "FT4",
+          "standardKey": "FT4",
+          "value": 1.21,
+          "unit": "ng/dL",
+          "refRange": "0.820-1.85"
+        },
+        {
+          "name": "CEA",
+          "standardKey": "CEA",
+          "value": 1.82,
+          "unit": "ng/mL",
+          "refRange": "<5.2"
+        },
+        {
+          "name": "Cyfra 21-1",
+          "standardKey": "CYFRA_21_1",
+          "value": 4.02,
+          "unit": "ng/mL",
+          "refRange": "<3.3"
+        },
+        {
+          "name": "CA 72-4",
+          "standardKey": "CA_72_4",
+          "value": 0.524,
+          "unit": "U/mL",
+          "refRange": "<8.5"
+        },
+        {
+          "name": "Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.56,
+          "unit": "mmol/L",
+          "refRange": "3.9-6.4"
+        },
+        {
+          "name": "Urea",
+          "standardKey": "UREA",
+          "value": 3.96,
+          "unit": "mmol/L",
+          "refRange": "2.5-7.2"
+        },
+        {
+          "name": "Creatinin",
+          "standardKey": "CREATININ",
+          "value": 89.96,
+          "unit": "µmol/L",
+          "refRange": "62-120"
+        },
+        {
+          "name": "eGFR (MDRD)",
+          "standardKey": "EGFR",
+          "value": 84.17,
+          "unit": "ml/ph/1.73m2",
+          "refRange": ">60"
+        },
+        {
+          "name": "Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.37,
+          "unit": "mmol/L",
+          "refRange": "<5.2"
+        },
+        {
+          "name": "HDL-C",
+          "standardKey": "HDL_C",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "refRange": ">0.9"
+        },
+        {
+          "name": "LDL-C",
+          "standardKey": "LDL_C",
+          "value": 2.28,
+          "unit": "mmol/L",
+          "refRange": "<3.4"
+        },
+        {
+          "name": "Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.9,
+          "unit": "mmol/L",
+          "refRange": "<1.77"
+        },
+        {
+          "name": "AST (GOT)",
+          "standardKey": "AST",
+          "value": 19.76,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 14.63,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "GGT",
+          "standardKey": "GGT",
+          "value": 14.29,
+          "unit": "U/L",
+          "refRange": "<50"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Thành túi mật có vài chồi phản âm dày bám vách, dmax# 5mm.",
+          "conclusion": "Đa polyp túi mật."
+        },
+        {
+          "modality": "Siêu âm Doppler tim",
+          "findings": "EF Teichholz = 75%, Hở van 3 lá 1/4, PAPs 17 mmHg.",
+          "conclusion": "Chức năng tâm thu thất trái bình thường. Rối loạn chức năng tâm trương thất trái. Hở van 3 lá 1/4."
+        },
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Thùy phải đã cắt 1 phần có nốt bọt biển d# 5x5mm. Thùy trái rải rác nhiều nốt dạng nang/bọt biển, đuôi sao chổi dmax# 4mm.",
+          "conclusion": "Phình giáp hạt hai thùy TI-RADS 1 / Đã cắt một phần thùy phải."
+        },
+        {
+          "modality": "X-quang Ngực thẳng",
+          "findings": "Phổi và tim trung thất bình thường.",
+          "conclusion": "X-quang ngực bình thường."
+        },
+        {
+          "modality": "Điện tâm đồ (ECG)",
+          "findings": "Nhịp xoang 57 lần/phút.",
+          "conclusion": "Điện tâm đồ bình thường (57 l/p)."
+        }
+      ]
+    },
+    {
+      "id": "event_20260608",
+      "date": "2026-06-08",
+      "facility": "Phòng khám Bệnh viện Đại học Y Dược 1",
+      "title": "Khám sức khỏe định kỳ năm 2026",
+      "physicalExam": {
+        "height_cm": 178,
+        "weight_kg": 78,
+        "bmi": 24.62,
+        "bp_mmHg": "113/72",
+        "pulse_bpm": 68,
+        "classification": "Loại I"
+      },
+      "diagnoses": [
+        "Mổ nhân giáp (Tiền căn)",
+        "Đa polyp túi mật",
+        "Nang giáp keo hai thùy TI-RADS 1 / Đã cắt một phần thùy phải",
+        "Tăng acid uric máu (933.88 µmol/L)",
+        "Đạm niệu (+) (PRO: 0.15 G/L)",
+        "Vôi răng vết dính",
+        "Viêm amidan mạn tính"
+      ],
+      "metrics": [
+        {
+          "name": "Bạch cầu (WBC)",
+          "standardKey": "WBC",
+          "value": 5.47,
+          "unit": "G/L",
+          "refRange": "3.9-10"
+        },
+        {
+          "name": "NEU %",
+          "standardKey": "NEU_PCT",
+          "value": 55.6,
+          "unit": "%",
+          "refRange": "45-75"
+        },
+        {
+          "name": "LYM %",
+          "standardKey": "LYM_PCT",
+          "value": 39.9,
+          "unit": "%",
+          "refRange": "20-45"
+        },
+        {
+          "name": "Hồng cầu (RBC)",
+          "standardKey": "RBC",
+          "value": 4.66,
+          "unit": "T/L",
+          "refRange": "3.8-5.5"
+        },
+        {
+          "name": "HGB",
+          "standardKey": "HGB",
+          "value": 136,
+          "unit": "g/L",
+          "refRange": "120-175"
+        },
+        {
+          "name": "HCT",
+          "standardKey": "HCT",
+          "value": 0.41,
+          "unit": "L/L",
+          "refRange": "0.350-0.530"
+        },
+        {
+          "name": "MCV",
+          "standardKey": "MCV",
+          "value": 88.0,
+          "unit": "fL",
+          "refRange": "78-100"
+        },
+        {
+          "name": "MCH",
+          "standardKey": "MCH",
+          "value": 29.2,
+          "unit": "pg",
+          "refRange": "26.7-33.0"
+        },
+        {
+          "name": "MCHC",
+          "standardKey": "MCHC",
+          "value": 332,
+          "unit": "g/L",
+          "refRange": "315-360"
+        },
+        {
+          "name": "Tiểu cầu (PLT)",
+          "standardKey": "PLT",
+          "value": 267,
+          "unit": "G/L",
+          "refRange": "150-450"
+        },
+        {
+          "name": "VS 1H",
+          "standardKey": "ESR_1H",
+          "value": 13,
+          "unit": "mm",
+          "refRange": "<15"
+        },
+        {
+          "name": "VS 2H",
+          "standardKey": "ESR_2H",
+          "value": 25,
+          "unit": "mm",
+          "refRange": "<25"
+        },
+        {
+          "name": "HBsAg",
+          "standardKey": "HBSAG",
+          "value": "NEG (0.648)",
+          "unit": "COI",
+          "refRange": "<1"
+        },
+        {
+          "name": "HBsAb định lượng",
+          "standardKey": "HBSAB",
+          "value": ">1000",
+          "unit": "IU/L",
+          "refRange": ">10"
+        },
+        {
+          "name": "HCV Ab",
+          "standardKey": "HCV_AB",
+          "value": "NEG (0.076)",
+          "unit": "COI",
+          "refRange": "<1"
+        },
+        {
+          "name": "HbA1c",
+          "standardKey": "HBA1C",
+          "value": 5.4,
+          "unit": "%",
+          "refRange": "4.0-6.0"
+        },
+        {
+          "name": "Glucose",
+          "standardKey": "GLUCOSE",
+          "value": 4.85,
+          "unit": "mmol/L",
+          "refRange": "3.9-6.4"
+        },
+        {
+          "name": "Urea",
+          "standardKey": "UREA",
+          "value": 6.21,
+          "unit": "mmol/L",
+          "refRange": "2.5-7.2"
+        },
+        {
+          "name": "Creatinin",
+          "standardKey": "CREATININ",
+          "value": 90.46,
+          "unit": "µmol/L",
+          "refRange": "62-120"
+        },
+        {
+          "name": "eGFR (CKD-EPI 2021)",
+          "standardKey": "EGFR",
+          "value": 91.44,
+          "unit": "ml/ph/1.73m2",
+          "refRange": ">90"
+        },
+        {
+          "name": "Acid Uric",
+          "standardKey": "ACID_URIC",
+          "value": 933.88,
+          "unit": "µmol/L",
+          "refRange": "150-420"
+        },
+        {
+          "name": "Cholesterol toàn phần",
+          "standardKey": "CHOLESTEROL",
+          "value": 4.08,
+          "unit": "mmol/L",
+          "refRange": "<5.2"
+        },
+        {
+          "name": "HDL-C",
+          "standardKey": "HDL_C",
+          "value": 0.99,
+          "unit": "mmol/L",
+          "refRange": ">0.9"
+        },
+        {
+          "name": "LDL-C",
+          "standardKey": "LDL_C",
+          "value": 1.94,
+          "unit": "mmol/L",
+          "refRange": "<3.4"
+        },
+        {
+          "name": "Triglycerid",
+          "standardKey": "TRIGLYCERID",
+          "value": 1.46,
+          "unit": "mmol/L",
+          "refRange": "<1.77"
+        },
+        {
+          "name": "AST (GOT)",
+          "standardKey": "AST",
+          "value": 21.75,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "ALT (GPT)",
+          "standardKey": "ALT",
+          "value": 13.41,
+          "unit": "U/L",
+          "refRange": "<40"
+        },
+        {
+          "name": "GGT",
+          "standardKey": "GGT",
+          "value": 18.1,
+          "unit": "U/L",
+          "refRange": "<50"
+        },
+        {
+          "name": "Natri",
+          "standardKey": "NA",
+          "value": 137.6,
+          "unit": "mmol/L",
+          "refRange": "133-146"
+        },
+        {
+          "name": "Kali",
+          "standardKey": "K",
+          "value": 4.23,
+          "unit": "mmol/L",
+          "refRange": "3.5-5.5"
+        },
+        {
+          "name": "Clo",
+          "standardKey": "CL",
+          "value": 103.3,
+          "unit": "mmol/L",
+          "refRange": "90-110"
+        },
+        {
+          "name": "Calci ion hóa",
+          "standardKey": "CA_ION",
+          "value": 1.22,
+          "unit": "mmol/L",
+          "refRange": "1.17-1.29"
+        },
+        {
+          "name": "Protein nước tiểu (PRO)",
+          "standardKey": "URINE_PRO",
+          "value": 0.15,
+          "unit": "G/L",
+          "refRange": "Negative"
+        }
+      ],
+      "imagingResults": [
+        {
+          "modality": "Siêu âm tuyến giáp",
+          "findings": "Thùy phải phẫu thuật 1 phần, echo trống dmax# 4mm. Thùy trái echo trống có xảo ảnh đuôi sao chổi dmax# 4.5mm (TI-RADS 1).",
+          "conclusion": "Nang giáp keo hai thùy TI-RADS 1 / Đã cắt một phần thùy phải."
+        },
+        {
+          "modality": "Siêu âm ổ bụng",
+          "findings": "Thành túi mật có nhiều cấu trúc echo dày, không bóng lưng, dmax# 5mm.",
+          "conclusion": "Đa polyp túi mật."
+        },
+        {
+          "modality": "X-quang Ngực thẳng",
+          "findings": "Nhu mô phổi bình thường, tim không to.",
+          "conclusion": "X-quang ngực bình thường."
+        },
+        {
+          "modality": "X-quang Cột sống thắt lưng (T/N)",
+          "findings": "Độ cong, đốt sống, đĩa đệm bình thường.",
+          "conclusion": "X-quang cột sống thắt lưng trong giới hạn bình thường."
+        },
+        {
+          "modality": "X-quang Cột sống cổ (T/N)",
+          "findings": "Độ cong, đốt sống, đĩa đệm bình thường.",
+          "conclusion": "Cột sống cổ bình thường."
+        },
+        {
+          "modality": "Điện tâm đồ (ECG)",
+          "findings": "Nhịp xoang đều, 59 lần/phút.",
+          "conclusion": "ECG trong giới hạn bình thường."
+        }
+      ]
+    },
+    {
+      "id": "event_20260614",
+      "date": "2026-06-14",
+      "facility": "Medical Diag Center",
+      "title": "Xét nghiệm kiểm tra Sinh hóa & Nước tiểu",
+      "metrics": [
+        {
+          "name": "Creatinine [Huyết thanh]",
+          "standardKey": "CREATININ",
+          "value": 77.5,
+          "unit": "µmol/L",
+          "refRange": "53-114.9"
+        },
+        {
+          "name": "eGFR (CKD-EPI 2021)",
+          "standardKey": "EGFR",
+          "value": 107.92,
+          "unit": "mL/min/1.73m²",
+          "refRange": "≥90"
+        },
+        {
+          "name": "Axit Uric [Huyết thanh]",
+          "standardKey": "ACID_URIC",
+          "value": 0.311,
+          "unit": "mmol/L",
+          "refRange": "0.22-0.45"
+        },
+        {
+          "name": "Protein Toàn Phần [Nước tiểu]",
+          "standardKey": "URINE_PRO_QUANT",
+          "value": 20.0,
+          "unit": "mg/L",
+          "refRange": "10-140"
+        },
+        {
+          "name": "Tỉ Trọng (SG)",
+          "standardKey": "URINE_SG",
+          "value": 1.008,
+          "unit": "",
+          "refRange": "1.015-1.025"
+        },
+        {
+          "name": "pH nước tiểu",
+          "standardKey": "URINE_PH",
+          "value": 6.0,
+          "unit": "",
+          "refRange": "4.6-8"
+        },
+        {
+          "name": "Máu nước tiểu",
+          "standardKey": "URINE_BLOOD",
+          "value": "Âm Tính",
+          "unit": "",
+          "refRange": "Âm Tính"
+        },
+        {
+          "name": "Bạch cầu nước tiểu",
+          "standardKey": "URINE_LEU",
+          "value": "Âm Tính",
+          "unit": "",
+          "refRange": "Âm Tính"
+        },
+        {
+          "name": "Đạm nước tiểu",
+          "standardKey": "URINE_PRO_QUAL",
+          "value": "Âm Tính",
+          "unit": "",
+          "refRange": "Âm Tính"
+        },
+        {
+          "name": "Hồng cầu cặn lắng",
+          "standardKey": "URINE_RBC_SED",
+          "value": 5.1,
+          "unit": "/µL",
+          "refRange": "<23"
+        }
+      ]
+    },
+    {
+      "id": "event_20260810",
+      "date": "2026-08-10",
+      "facility": "Medical Diag Center",
+      "title": "Xét nghiệm theo dõi Axit Uric & Chức năng tuyến giáp",
+      "metrics": [
+        {
+          "name": "Axit Uric [Huyết thanh]",
+          "standardKey": "ACID_URIC",
+          "value": 0.317,
+          "unit": "mmol/L",
+          "refRange": "0.22-0.45"
+        },
+        {
+          "name": "TSH",
+          "standardKey": "TSH",
+          "value": 3.22,
+          "unit": "µIU/mL",
+          "refRange": "0.35-4.94"
+        },
+        {
+          "name": "FT4",
+          "standardKey": "FT4",
+          "value": 12.27,
+          "unit": "pmol/L",
+          "refRange": "9.01-19.05"
+        },
+        {
+          "name": "FT3",
+          "standardKey": "FT3",
+          "value": 4.21,
+          "unit": "pmol/L",
+          "refRange": "2.43-6.01"
+        }
+      ]
+    }
+  ],
+  "aiAnalysis": {
+    "lastAnalyzedDate": "2026-11-06",
+    "overviewSummary": "Tổng hợp chuỗi dữ liệu 3 năm (2024-2026) cho thấy sức khỏe tổng quát ổn định. Chuyển hóa đường (HbA1c 5.4%-5.7%), mỡ máu và men gan ở mức rất tốt. Tuy nhiên có đợt tăng vọt Acid Uric cấp tính vào tháng 6/2026 (933.88 µmol/L) kèm đạm niệu nhẹ, đã được kiểm soát trở lại ngưỡng bình thường (0.311 - 0.317 mmol/L) ở các xét nghiệm tái khám tháng 6 và tháng 8/2026.",
+    "criticalAlerts": [
+      "⚠️ Cần tiếp tục duy trì chế độ dinh dưỡng giảm purin do từng có đợt acid uric bùng nổ rất cao (933.88 µmol/L vào 08/06/2026).",
+      "✔️ Đạm niệu đã về âm tính ở xét nghiệm ngày 14/06/2026 (Protein nước tiểu: 20 mg/L)."
+    ],
+    "chronicConditionsTracking": [
+      "Đa polyp túi mật: Kích thước ổn định quanh mức 5-7 mm qua 3 năm (2024: 7mm, 2025: 5mm, 2026: 5mm).",
+      "Tuyến giáp: Thùy trái nang giáp keo TI-RADS 1 ổn định; thùy phải sau cắt một phần không có diễn tiến bất thường. TSH, FT3, FT4 hoàn toàn bình thường."
+    ],
+    "actionRoadmap": {
+      "specialistConsultation": [
+        "Nội tiết - Tiêu hóa gan mật (định kỳ)",
+        "Nội thận - Cơ xương khớp (khi có triệu chứng)"
+      ],
+      "dietaryModifications": [
+        "Hạn chế thực phẩm giàu purin (thịt đỏ, nội tạng, hải sản).",
+        "Tuyệt đối tránh rượu bia.",
+        "Duy trì uống 2.5 - 3 lit nước lọc mỗi ngày."
+      ],
+      "followUpSchedule": "Tái khám kiểm tra siêu âm ổ bụng & siêu âm tuyến giáp định kỳ 6 - 12 tháng/lần."
+    }
+  }
+}

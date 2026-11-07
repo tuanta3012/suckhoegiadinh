@@ -1,0 +1,299 @@
+[
+  {
+    "timestamp": "2026-11-07T04:06:59.223Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:06:59.295Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/1 (trang 1-3)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:14.821Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/1",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:24.644Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:24.797Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/1 (trang 1-1)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:28.744Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/1",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:38.040Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:38.070Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/1 (trang 1-3)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:45.848Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/1",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:55.375Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:07:55.450Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/1 (trang 1-3)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:00.350Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/1",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:15.340Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:15.535Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/3 (trang 1-6)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:21.704Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:24.206Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 2/3 (trang 7-12)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:29.900Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 2/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:32.404Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 3/3 (trang 13-15)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:35.195Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 3/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:49.796Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:50.014Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/3 (trang 1-6)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:56.794Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:08:59.296Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 2/3 (trang 7-12)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:09:06.374Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 2/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:09:08.877Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 3/3 (trang 13-18)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:09:12.601Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 3/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:09:29.357Z",
+    "level": "info",
+    "stage": "request",
+    "message": "Bắt đầu yêu cầu số hóa tài liệu",
+    "data": {
+      "memberId": "member_43552180-a03"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:09:29.750Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 1/3 (trang 1-6)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:11:47.243Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 1/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:11:49.747Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 2/3 (trang 7-12)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:12:08.580Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 2/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:12:11.082Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Bắt đầu OCR batch 3/3 (trang 13-16)",
+    "data": {
+      "preferredProjectId": "account-1"
+    }
+  },
+  {
+    "timestamp": "2026-11-07T04:12:28.874Z",
+    "level": "info",
+    "stage": "worker",
+    "message": "Hoàn tất OCR batch 3/3",
+    "data": {
+      "modelUsed": "gemini-3.5-flash-lite"
+    }
+  }
+]

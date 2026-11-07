@@ -4,8 +4,8 @@
  */
 export async function compressImageIfNeeded(
   file: File,
-  maxDimension = 2048,
-  quality = 0.85,
+  maxDimension = 1200,
+  quality = 0.75,
 ): Promise<File> {
   if (!file.type.startsWith('image/')) {
     return file;
@@ -20,7 +20,7 @@ export async function compressImageIfNeeded(
       let { width, height } = img;
 
       if (width <= maxDimension && height <= maxDimension) {
-        if (file.size < 800 * 1024) {
+        if (file.size < 500 * 1024) {
           resolve(file);
           return;
         }
@@ -47,6 +47,8 @@ export async function compressImageIfNeeded(
         return;
       }
 
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);

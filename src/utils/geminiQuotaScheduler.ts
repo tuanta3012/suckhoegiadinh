@@ -1,4 +1,4 @@
-export type GeminiTask = 'digitization' | 'analysis';
+export type GeminiTask = 'digitization' | 'analysis' | 'assistant' | 'refinement';
 
 export interface GeminiProject {
   id: string;

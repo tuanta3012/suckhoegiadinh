@@ -4,6 +4,7 @@ import type {
   HealthMetric,
   HealthProfile,
   HealthSource,
+  ImagingResult,
   Medication,
 } from '../types';
 
@@ -85,6 +86,20 @@ export function normalizeMetricName(name: string): string {
 }
 
 /**
+ * Chuẩn hóa modality key cho chẩn đoán hình ảnh (VD: "Siêu âm tuyến giáp" -> "sieuamtuyengiap")
+ */
+export function normalizeModalityKey(modality: string): string {
+  if (!modality) return 'chandan_hinhanh';
+  return modality
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    || 'chandan_hinhanh';
+}
+
+/**
  * Khử trùng lặp nội dung BÊN TRONG của một sự kiện y tế (diagnoses, medications, metrics)
  */
 export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(event: T): T {
@@ -116,7 +131,6 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
       if (!existing) {
         medMap.set(key, { ...med, name });
       } else {
-        // Hợp nhất thông tin nếu bản ghi sau có liều/tần suất chi tiết hơn
         medMap.set(key, {
           name: existing.name.length >= name.length ? existing.name : name,
           dosage: existing.dosage || med.dosage,
@@ -133,13 +147,71 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
   if (Array.isArray(event.metrics)) {
     const metricMap = new Map<string, HealthMetric>();
     for (const m of event.metrics) {
-      const name = m.name?.trim();
+      const name = m.name?.trim() || '';
       if (!name || typeof m.value !== 'number' || !Number.isFinite(m.value)) continue;
-      const key = normalizeMetricName(name);
-      // Ưu tiên giá trị hợp lệ, giữ tên gốc chuẩn
-      metricMap.set(key, { ...m, name });
+
+      let stdKey = m.standardKey ? m.standardKey.trim().toUpperCase() : undefined;
+      
+      // Sanitization: Fix common OCR mapping errors
+      if (stdKey) {
+        // 1. Fix accidental suffixes (e.g., NEU_1 -> NEU_#, LYM_# -> LYM_#)
+        stdKey = stdKey.replace(/_(\d|#)$/, '_#').replace(/_$/, '');
+        if (stdKey === 'NEU' || stdKey === 'LYM' || stdKey === 'MONO' || stdKey === 'EOS' || stdKey === 'BASO') {
+          // If it was just 'NEU', usually it means NEU_PCT or NEU_# depending on unit
+          // But for now just leave it or map to a base key
+        }
+
+        // 2. Fix Urine vs Blood collisions
+        const isUrine = name.toLowerCase().includes('nước tiểu') || name.toLowerCase().includes('cặn lắng');
+        if (isUrine) {
+          if (stdKey === 'AST' && name.toLowerCase().includes('trụ')) stdKey = undefined; // 'Trụ' is not AST
+          if (stdKey === 'WBC') stdKey = 'URINE_LEU';
+          if (stdKey === 'RBC') stdKey = 'URINE_RBC_SED';
+        }
+      }
+
+      const key = stdKey || normalizeMetricName(name);
+      const existing = metricMap.get(key);
+      if (!existing || (!existing.refRange && m.refRange)) {
+        metricMap.set(key, { ...m, name, standardKey: stdKey });
+      }
     }
     cleanedMetrics = Array.from(metricMap.values());
+  }
+
+  // 4. Khử trùng lặp Chẩn đoán hình ảnh (Imaging Results) - Đảm bảo DUY NHẤT 1 card mỗi Modality
+  let cleanedImagingResults: ImagingResult[] | undefined = undefined;
+  if (Array.isArray(event.imagingResults)) {
+    const imgMap = new Map<string, ImagingResult>();
+    for (const img of event.imagingResults) {
+      const modality = img.modality?.trim() || '';
+      const findings = img.findings?.trim() || '';
+      const conclusion = img.conclusion?.trim() || '';
+      if (!modality && !findings && !conclusion) continue;
+
+      const key = normalizeModalityKey(modality);
+      const existing = imgMap.get(key);
+      if (!existing) {
+        imgMap.set(key, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
+      } else {
+        let mergedFindings = existing.findings || '';
+        if (findings && findings !== mergedFindings) {
+          if (!mergedFindings) mergedFindings = findings;
+          else if (!mergedFindings.includes(findings) && !findings.includes(mergedFindings)) {
+            mergedFindings = `${mergedFindings}; ${findings}`;
+          } else if (findings.length > mergedFindings.length) {
+            mergedFindings = findings;
+          }
+        }
+        const mergedConclusion = conclusion.length > (existing.conclusion || '').length ? conclusion : (existing.conclusion || '');
+        imgMap.set(key, {
+          modality: existing.modality || modality,
+          findings: mergedFindings,
+          conclusion: mergedConclusion,
+        });
+      }
+    }
+    cleanedImagingResults = Array.from(imgMap.values());
   }
 
   return {
@@ -147,6 +219,7 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
     diagnoses: cleanedDiagnoses ?? event.diagnoses,
     medications: cleanedMedications ?? event.medications,
     metrics: cleanedMetrics ?? event.metrics,
+    imagingResults: cleanedImagingResults ?? event.imagingResults,
   };
 }
 
@@ -389,30 +462,77 @@ export function mergeHealthEvents(
     }
   }
 
-  // 3. Gộp chỉ số đo (Metrics)
+  // 3. Gộp chỉ số đo (Metrics) - Ưu tiên key theo standardKey nếu có
   const metricMap = new Map<string, HealthMetric>();
-  for (const m of cleanExisting.metrics) {
-    const key = normalizeMetricName(m.name);
-    metricMap.set(key, m);
-  }
-  for (const m of cleanIncoming.metrics) {
-    const key = normalizeMetricName(m.name);
-    metricMap.set(key, m);
+  for (const m of [...cleanExisting.metrics, ...cleanIncoming.metrics]) {
+    const key = m.standardKey
+      ? m.standardKey.trim().toUpperCase()
+      : normalizeMetricName(m.name);
+    const existing = metricMap.get(key);
+    if (!existing || (!existing.refRange && m.refRange)) {
+      metricMap.set(key, m);
+    }
   }
 
-  // 4. Lời dặn & Ghi chú
+  // 4. Gộp kết quả chẩn đoán hình ảnh (Imaging Results: Siêu âm, X-quang, CT, MRI, ECG...)
+  const imgMap = new Map<string, ImagingResult>();
+  for (const img of [...(cleanExisting.imagingResults || []), ...(cleanIncoming.imagingResults || [])]) {
+    const modality = img.modality?.trim() || '';
+    const findings = img.findings?.trim() || '';
+    const conclusion = img.conclusion?.trim() || '';
+    if (!modality && !findings && !conclusion) continue;
+
+    const key = normalizeModalityKey(modality);
+    const existing = imgMap.get(key);
+    if (!existing) {
+      imgMap.set(key, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
+    } else {
+      let mergedFindings = existing.findings || '';
+      if (findings && findings !== mergedFindings) {
+        if (!mergedFindings) mergedFindings = findings;
+        else if (!mergedFindings.includes(findings) && !findings.includes(mergedFindings)) {
+          mergedFindings = `${mergedFindings}; ${findings}`;
+        } else if (findings.length > mergedFindings.length) {
+          mergedFindings = findings;
+        }
+      }
+      const mergedConclusion = conclusion.length > (existing.conclusion || '').length ? conclusion : (existing.conclusion || '');
+      imgMap.set(key, {
+        modality: existing.modality || modality,
+        findings: mergedFindings,
+        conclusion: mergedConclusion,
+      });
+    }
+  }
+
+  // 5. Gộp Khám thể lực (Physical Exam)
+  const mergedPhysicalExam = cleanExisting.physicalExam || cleanIncoming.physicalExam
+    ? {
+        height_cm: cleanIncoming.physicalExam?.height_cm ?? cleanExisting.physicalExam?.height_cm,
+        weight_kg: cleanIncoming.physicalExam?.weight_kg ?? cleanExisting.physicalExam?.weight_kg,
+        bmi: cleanIncoming.physicalExam?.bmi ?? cleanExisting.physicalExam?.bmi,
+        bp_mmHg: cleanIncoming.physicalExam?.bp_mmHg || cleanExisting.physicalExam?.bp_mmHg,
+        pulse_bpm: cleanIncoming.physicalExam?.pulse_bpm ?? cleanExisting.physicalExam?.pulse_bpm,
+        classification: cleanIncoming.physicalExam?.classification || cleanExisting.physicalExam?.classification,
+      }
+    : undefined;
+
+  // 6. Lời dặn & Ghi chú (làm sạch trùng lặp)
   let mergedAdvice = cleanExisting.advice;
   if (cleanIncoming.advice && cleanIncoming.advice !== cleanExisting.advice) {
     mergedAdvice = cleanExisting.advice
-      ? `${cleanExisting.advice}\n• Cập nhật thêm: ${cleanIncoming.advice}`
+      ? Array.from(new Set([...cleanExisting.advice.split('\n'), ...cleanIncoming.advice.split('\n')]))
+          .filter(Boolean)
+          .join('\n')
       : cleanIncoming.advice;
   }
 
   let mergedNotes = cleanExisting.notes;
   if (cleanIncoming.notes && cleanIncoming.notes !== cleanExisting.notes) {
-    mergedNotes = cleanExisting.notes
-      ? `${cleanExisting.notes}\n• Ghi chú bổ sung: ${cleanIncoming.notes}`
-      : cleanIncoming.notes;
+    const rawNotes = [...(cleanExisting.notes?.split('\n') || []), ...(cleanIncoming.notes?.split('\n') || [])]
+      .map(n => n.trim())
+      .filter(n => n && !n.includes('Có dữ liệu được trích xuất'));
+    mergedNotes = Array.from(new Set(rawNotes)).join('\n') || undefined;
   }
 
   return {
@@ -421,9 +541,13 @@ export function mergeHealthEvents(
     date: cleanIncoming.date || cleanExisting.date,
     type: cleanIncoming.type || cleanExisting.type,
     facility: cleanIncoming.facility || cleanExisting.facility,
+    physicalExam: mergedPhysicalExam,
     diagnoses: mergedDiagnoses,
     medications: Array.from(medMap.values()),
     metrics: Array.from(metricMap.values()),
+    imagingResults: Array.from(imgMap.values()),
+    vaccinations: cleanIncoming.vaccinations?.length ? cleanIncoming.vaccinations : cleanExisting.vaccinations,
+    hospitalization: cleanIncoming.hospitalization || cleanExisting.hospitalization,
     advice: mergedAdvice,
     notes: mergedNotes,
     nextFollowUp: cleanIncoming.nextFollowUp || cleanExisting.nextFollowUp,

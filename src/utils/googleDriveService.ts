@@ -40,7 +40,11 @@ const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).c
 });
 
 export function getGoogleAccessToken(): string | null {
-  return cachedAccessToken;
+  if (cachedAccessToken) return cachedAccessToken;
+  if (typeof window !== 'undefined') {
+    return sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY);
+  }
+  return null;
 }
 
 export function isGoogleTokenValid(): boolean {
@@ -59,17 +63,17 @@ async function storeAccessToken(token: string, expiresAt = Date.now() + ACCESS_T
       setAuthSecureItem(ACCESS_TOKEN_KEY, token),
       setAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt)),
     ]);
-  } else {
+  } else if (typeof window !== 'undefined') {
+    localStorage.setItem(ACCESS_TOKEN_KEY, token);
+    localStorage.setItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt));
     sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
     sessionStorage.setItem(ACCESS_TOKEN_EXPIRY_KEY, String(expiresAt));
-    localStorage.removeItem(ACCESS_TOKEN_KEY);
-    localStorage.removeItem(ACCESS_TOKEN_EXPIRY_KEY);
   }
   cachedAccessToken = token;
   cachedTokenExpiresAt = expiresAt;
 }
 
-async function clearAccessToken(): Promise<void> {
+export async function clearAccessToken(): Promise<void> {
   cachedAccessToken = null;
   cachedTokenExpiresAt = null;
   if (isNative) {
@@ -77,7 +81,7 @@ async function clearAccessToken(): Promise<void> {
       removeAuthSecureItem(ACCESS_TOKEN_KEY),
       removeAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY),
     ]);
-  } else {
+  } else if (typeof window !== 'undefined') {
     sessionStorage.removeItem(ACCESS_TOKEN_KEY);
     sessionStorage.removeItem(ACCESS_TOKEN_EXPIRY_KEY);
     localStorage.removeItem(ACCESS_TOKEN_KEY);
@@ -93,21 +97,20 @@ export async function restoreGoogleAuthSession(): Promise<boolean> {
           getAuthSecureItem(ACCESS_TOKEN_EXPIRY_KEY),
         ])
       : [
-          sessionStorage.getItem(ACCESS_TOKEN_KEY),
-          sessionStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY),
+          sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY),
+          sessionStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY) || localStorage.getItem(ACCESS_TOKEN_EXPIRY_KEY),
         ];
-    const expiresAt = expiry ? Number(expiry) : NaN;
-    if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-      await clearAccessToken();
+    if (!token) {
       return false;
     }
 
+    const expiresAt = expiry ? Number(expiry) : NaN;
     cachedAccessToken = token;
-    cachedTokenExpiresAt = expiresAt;
+    cachedTokenExpiresAt = Number.isFinite(expiresAt) ? expiresAt : Date.now() + ACCESS_TOKEN_LIFETIME_MS;
     return true;
   } catch (error) {
     console.error('[Google Auth] Could not restore the Drive session.', error);
-    throw new Error('Không thể khôi phục phiên Drive an toàn trên thiết bị.');
+    return false;
   }
 }
 
@@ -155,9 +158,29 @@ export async function trySilentRefresh(force = false): Promise<string | null> {
 }
 
 export async function getValidGoogleAccessToken(): Promise<string> {
-  if (isGoogleTokenValid() && cachedAccessToken) return cachedAccessToken;
+  if (cachedAccessToken && isGoogleTokenValid()) return cachedAccessToken;
+
+  if (!cachedAccessToken) {
+    await restoreGoogleAuthSession().catch(() => false);
+    if (cachedAccessToken && isGoogleTokenValid()) return cachedAccessToken;
+  }
+
   const refreshed = await trySilentRefresh();
   if (refreshed) return refreshed;
+
+  // On Web / fallback: If we still have any token candidate in memory or storage,
+  // return it and let authenticatedDriveFetch perform the actual request.
+  // Google Drive will return 401 if it has truly expired.
+  const candidate = cachedAccessToken ||
+    (typeof window !== 'undefined'
+      ? sessionStorage.getItem(ACCESS_TOKEN_KEY) || localStorage.getItem(ACCESS_TOKEN_KEY)
+      : null);
+
+  if (candidate) {
+    cachedAccessToken = candidate;
+    return candidate;
+  }
+
   throw new Error('Phiên Google Drive đã hết hạn. Hãy đăng nhập lại để cấp quyền Drive.');
 }
 

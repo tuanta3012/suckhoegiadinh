@@ -1,3 +1,6 @@
+import { normalizeModalityKey } from './deduplicationService';
+import { standardizeMetricKey } from './healthRecordService';
+
 type JsonRecord = Record<string, unknown>;
 
 export interface ExtractedPageBatch {
@@ -10,37 +13,7 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function normalizeStandardKey(name: string): string {
-  const clean = name.trim().toLowerCase();
-  if (/acid\s*uric|uric\s*acid|axit\s*uric/.test(clean)) return 'ACID_URIC';
-  if (/hba1c|hb\s*a1c/.test(clean)) return 'HbA1c';
-  if (/glucose|đường\s*huyết|duong\s*huyet|\bglu\b/.test(clean)) return 'GLUCOSE';
-  if (/creatinin|creatinine|\bcre\b/.test(clean)) return 'CREATININ';
-  if (/egfr|\bgfr\b|lọc\s*cầu\s*thận/.test(clean)) return 'EGFR';
-  if (/wbc|bạch\s*cầu|bach\s*cau/.test(clean)) return 'WBC';
-  if (/rbc|hồng\s*cầu|hong\s*cau/.test(clean)) return 'RBC';
-  if (/hgb|\bhb\b|hemoglobin/.test(clean)) return 'HGB';
-  if (/hct|hematocrit/.test(clean)) return 'HCT';
-  if (/mcv/.test(clean)) return 'MCV';
-  if (/mchc/.test(clean)) return 'MCHC';
-  if (/mch/.test(clean)) return 'MCH';
-  if (/plt|tiểu\s*cầu|tieu\s*cau/.test(clean)) return 'PLT';
-  if (/triglycerid|triglyceride|\btri\b/.test(clean)) return 'TRIGLYCERID';
-  if (/cholesterol/.test(clean)) return 'CHOLESTEROL';
-  if (/hdl/.test(clean)) return 'HDL';
-  if (/ldl/.test(clean)) return 'LDL';
-  if (/ast|sgot|\bgot\b/.test(clean)) return 'AST';
-  if (/alt|sgpt|\bgpt\b/.test(clean)) return 'ALT';
-  if (/ggt/.test(clean)) return 'GGT';
-  if (/ure|urea/.test(clean)) return 'URE';
-  if (/đạm\s*niệu|protein\s*niệu|proteinuria/.test(clean)) return 'PROTEIN_URINE';
-  if (/sys|huyết\s*áp\s*tâm\s*thu/.test(clean)) return 'BLOOD_PRESSURE_SYS';
-  if (/dia|huyết\s*áp\s*tâm\s*trương/.test(clean)) return 'BLOOD_PRESSURE_DIA';
-  if (/spo2/.test(clean)) return 'SPO2';
-  if (/weight|cân\s*nặng/.test(clean)) return 'WEIGHT';
-  if (/height|chiều\s*cao/.test(clean)) return 'HEIGHT';
-  return name.trim().toUpperCase().replace(/\s+/g, '_');
-}
+
 
 export function cleanExtractedJson(value: unknown): JsonRecord {
   if (!isRecord(value)) throw new Error('Phản hồi Gemini không phải một JSON object.');
@@ -79,19 +52,29 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
           }
         : medication);
     }
-    result.medications = Array.from(medications.values());
+    result.medications = Array.from(medications.values()).map((m) => ({
+      name: m.name,
+      dosage: typeof m.dosage === 'string' ? m.dosage.trim() : undefined,
+      quantity: typeof m.quantity === 'string' ? m.quantity.trim() : undefined,
+      frequency: typeof m.frequency === 'string' ? m.frequency.trim() : undefined,
+      timing: typeof m.timing === 'string' ? m.timing.trim() : undefined,
+      duration: typeof m.duration === 'string' ? m.duration.trim() : undefined,
+      instructions: typeof m.instructions === 'string' ? m.instructions.trim() : undefined,
+    }));
   }
+
 
   if (Array.isArray(result.metrics)) {
     const metrics = new Map<string, JsonRecord>();
     for (const metric of result.metrics) {
       if (!isRecord(metric) || typeof metric.name !== 'string' || !metric.name.trim()) continue;
       const name = metric.name.trim();
-      const standardKey = normalizeStandardKey(
-        typeof metric.standardKey === 'string' && metric.standardKey.trim()
+      const rawKey = typeof metric.standardKey === 'string' && metric.standardKey.trim()
           ? metric.standardKey
-          : name,
-      );
+          : name;
+      
+      const standardKey = standardizeMetricKey(rawKey, String(metric.unit || ''), name);
+
       const cleanedMetric: JsonRecord = {
         ...metric,
         name,
@@ -100,31 +83,110 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
       if (typeof metric.status === 'string') {
         cleanedMetric.status = metric.status.trim();
       }
-      const identity = [
-        standardKey.toLowerCase(),
-        String(metric.value ?? ''),
-        typeof metric.unit === 'string' ? metric.unit.trim().toLowerCase() : '',
-      ].join('_');
-      metrics.set(identity, cleanedMetric);
+      if (typeof metric.refRange === 'string') {
+        cleanedMetric.refRange = metric.refRange.trim();
+      }
+      const identity = standardKey.toUpperCase();
+      const existing = metrics.get(identity);
+      if (!existing || (!existing.refRange && cleanedMetric.refRange)) {
+        metrics.set(identity, cleanedMetric);
+      }
     }
     result.metrics = Array.from(metrics.values());
   }
 
+  if (isRecord(result.physicalExam)) {
+    result.physicalExam = {
+      height_cm: typeof result.physicalExam.height_cm === 'number' ? result.physicalExam.height_cm : undefined,
+      weight_kg: typeof result.physicalExam.weight_kg === 'number' ? result.physicalExam.weight_kg : undefined,
+      bmi: typeof result.physicalExam.bmi === 'number' ? result.physicalExam.bmi : undefined,
+      bp_mmHg: typeof result.physicalExam.bp_mmHg === 'string' ? result.physicalExam.bp_mmHg.trim() : undefined,
+      pulse_bpm: typeof result.physicalExam.pulse_bpm === 'number' ? result.physicalExam.pulse_bpm : undefined,
+      classification: typeof result.physicalExam.classification === 'string' ? result.physicalExam.classification.trim() : undefined,
+    };
+  }
+
   if (Array.isArray(result.imagingResults)) {
-    const imagingList: JsonRecord[] = [];
-    const seen = new Set<string>();
+    const imagingMap = new Map<string, JsonRecord>();
     for (const item of result.imagingResults) {
       if (!isRecord(item)) continue;
       const modality = typeof item.modality === 'string' ? item.modality.trim() : '';
       const findings = typeof item.findings === 'string' ? item.findings.trim() : '';
       const conclusion = typeof item.conclusion === 'string' ? item.conclusion.trim() : '';
       if (!modality && !findings && !conclusion) continue;
-      const key = `${modality.toLowerCase()}_${conclusion.toLowerCase()}`;
+
+      const normModality = normalizeModalityKey(modality);
+      const existing = imagingMap.get(normModality);
+      if (!existing) {
+        imagingMap.set(normModality, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
+      } else {
+        const prevFindings = typeof existing.findings === 'string' ? existing.findings : '';
+        let mergedFindings = prevFindings;
+        if (findings && findings !== prevFindings) {
+          if (!prevFindings) mergedFindings = findings;
+          else if (!prevFindings.includes(findings) && !findings.includes(prevFindings)) {
+            mergedFindings = `${prevFindings}; ${findings}`;
+          } else if (findings.length > prevFindings.length) {
+            mergedFindings = findings;
+          }
+        }
+        const prevConclusion = typeof existing.conclusion === 'string' ? existing.conclusion : '';
+        const mergedConclusion = conclusion.length > prevConclusion.length ? conclusion : prevConclusion;
+
+        imagingMap.set(normModality, {
+          modality: (existing.modality as string) || modality,
+          findings: mergedFindings,
+          conclusion: mergedConclusion,
+        });
+      }
+    }
+    result.imagingResults = Array.from(imagingMap.values());
+  }
+
+  if (Array.isArray(result.vaccinations)) {
+    const vaxList: JsonRecord[] = [];
+    const seen = new Set<string>();
+    for (const item of result.vaccinations) {
+      if (!isRecord(item) || typeof item.vaccineName !== 'string' || !item.vaccineName.trim()) continue;
+      const vaccineName = item.vaccineName.trim();
+      const administeredDate = typeof item.administeredDate === 'string' ? item.administeredDate.trim() : '';
+      const key = `${vaccineName.toLowerCase()}_${administeredDate}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      imagingList.push({ modality, findings, conclusion });
+      vaxList.push({
+        vaccineName,
+        targetDisease: typeof item.targetDisease === 'string' ? item.targetDisease.trim() : undefined,
+        doseNumber: item.doseNumber !== undefined ? String(item.doseNumber) : undefined,
+        lotNumber: typeof item.lotNumber === 'string' ? item.lotNumber.trim() : undefined,
+        manufacturer: typeof item.manufacturer === 'string' ? item.manufacturer.trim() : undefined,
+        injectionSite: typeof item.injectionSite === 'string' ? item.injectionSite.trim() : undefined,
+        administeredDate: administeredDate || new Date().toISOString().slice(0, 10),
+        nextDoseDate: typeof item.nextDoseDate === 'string' && item.nextDoseDate.trim() ? item.nextDoseDate.trim() : null,
+        reactionNotes: typeof item.reactionNotes === 'string' ? item.reactionNotes.trim() : undefined,
+      });
     }
-    result.imagingResults = imagingList;
+    result.vaccinations = vaxList;
+  }
+
+  if (isRecord(result.hospitalization)) {
+    result.hospitalization = {
+      admissionDate: typeof result.hospitalization.admissionDate === 'string' ? result.hospitalization.admissionDate.trim() : undefined,
+      dischargeDate: typeof result.hospitalization.dischargeDate === 'string' ? result.hospitalization.dischargeDate.trim() : undefined,
+      department: typeof result.hospitalization.department === 'string' ? result.hospitalization.department.trim() : undefined,
+      treatmentSummary: typeof result.hospitalization.treatmentSummary === 'string' ? result.hospitalization.treatmentSummary.trim() : undefined,
+      surgicalNotes: typeof result.hospitalization.surgicalNotes === 'string' ? result.hospitalization.surgicalNotes.trim() : undefined,
+    };
+  }
+
+  if (isRecord(result.extractedData)) {
+    result.extractedData = { ...result.extractedData };
+  }
+
+  if (typeof result.doctorName === 'string') {
+    result.doctorName = result.doctorName.trim();
+  }
+  if (typeof result.customCategory === 'string') {
+    result.customCategory = result.customCategory.trim();
   }
 
   return result;
@@ -141,29 +203,41 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[]): JsonRecord
     'patientBirthDate',
     'patientGender',
     'facility',
+    'doctorName',
+    'customCategory',
     'nextFollowUp',
   ]) {
     const entry = values.find((value) => typeof value[key] === 'string' && Boolean((value[key] as string).trim()));
     if (entry) merged[key] = entry[key];
   }
 
+  const physEntry = values.find((value) => isRecord(value.physicalExam) && Object.keys(value.physicalExam).length > 0);
+  if (physEntry) merged.physicalExam = physEntry.physicalExam;
+
+  const hospEntry = values.find((value) => isRecord(value.hospitalization) && Object.keys(value.hospitalization).length > 0);
+  if (hospEntry) merged.hospitalization = hospEntry.hospitalization;
+
   merged.diagnoses = values.flatMap((value) => Array.isArray(value.diagnoses) ? value.diagnoses : []);
   merged.medications = values.flatMap((value) => Array.isArray(value.medications) ? value.medications : []);
   merged.metrics = values.flatMap((value) => Array.isArray(value.metrics) ? value.metrics : []);
   merged.imagingResults = values.flatMap((value) => Array.isArray(value.imagingResults) ? value.imagingResults : []);
+  merged.vaccinations = values.flatMap((value) => Array.isArray(value.vaccinations) ? value.vaccinations : []);
+
+  const mergedExtractedData: JsonRecord = {};
+  for (const val of values) {
+    if (isRecord(val.extractedData)) {
+      Object.assign(mergedExtractedData, val.extractedData);
+    }
+  }
+  if (Object.keys(mergedExtractedData).length > 0) {
+    merged.extractedData = mergedExtractedData;
+  }
 
   const notes = batches.map(({ firstPage, lastPage }, index) => {
     const note = typeof values[index].notes === 'string' ? values[index].notes.trim() : '';
-    const hasExtractedData = Object.entries(values[index]).some(([key, item]) => {
-      if (key === 'notes') return false;
-      if (Array.isArray(item)) return item.length > 0;
-      return typeof item === 'string' ? Boolean(item.trim()) : item !== undefined && item !== null;
-    });
-    return note || hasExtractedData
-      ? `Trang ${firstPage}-${lastPage}: ${note || 'Có dữ liệu được trích xuất trong phần này.'}`
-      : '';
+    return note && !note.includes('Có dữ liệu được trích xuất') ? note : '';
   }).filter(Boolean);
-  if (notes.length) merged.notes = notes.join('\n');
+  if (notes.length) merged.notes = Array.from(new Set(notes)).join('\n');
 
   const advice = Array.from(new Set(values
     .map((value) => value.advice)

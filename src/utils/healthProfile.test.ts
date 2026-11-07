@@ -27,7 +27,7 @@ const event: HealthEvent = {
   date: '2026-03-10',
   diagnoses: ['Thiếu máu'],
   medications: [],
-  metrics: [{ name: 'Hemoglobin', value: 12, unit: 'g/dL' }],
+  metrics: [{ name: 'Hemoglobin', standardKey: 'HGB', value: 12, unit: 'g/dL' }],
   recordedAt: '2026-03-10T09:00:00.000Z',
 };
 
@@ -86,7 +86,7 @@ describe('health profile', () => {
 
     expect(merged.timeline.map((item) => item.id)).toEqual(['older', 'event-1']);
     expect(merged.sources[0].status).toBe('processed');
-    expect(merged.summary.latestMetrics.Hemoglobin.value).toBe(12);
+    expect(merged.summary.latestMetrics.HGB.value).toBe(12);
   });
 
   it('preserves independent events added on two devices', () => {

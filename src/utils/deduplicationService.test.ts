@@ -62,7 +62,7 @@ describe('Deduplication Service', () => {
       };
       const cleaned = cleanAndDeduplicateEventData(event);
       expect(cleaned.metrics).toHaveLength(1);
-      expect(cleaned.metrics![0].value).toBe(125);
+      expect(cleaned.metrics![0].value).toBe(120);
     });
   });
 

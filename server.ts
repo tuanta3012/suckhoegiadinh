@@ -1,6 +1,6 @@
 import express, { NextFunction, Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import firebaseConfig from './firebase-applet-config.json';
@@ -18,6 +18,8 @@ import {
   type PdfPageBatch,
 } from './src/utils/pdfPageBatches.ts';
 import { cleanExtractedJson, mergeExtractedBatches } from './src/utils/healthDocumentExtraction.ts';
+import { digitizationLogger } from './src/utils/digitizationLogger.ts';
+import { parseRobustJson, sleep } from './src/utils/healthRecordService.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,20 +45,23 @@ const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(MAX_DOCUMENT_BYTES / 3) * 4;
 const GEMINI_RATE_LIMIT_PER_MINUTE = 20;
 const rateLimitWindows = new Map<string, { startedAt: number; count: number }>();
-const GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS = 18_000;
-const GEMINI_DIGITIZATION_ATTEMPT_TIMEOUT_MS = 45_000;
-const GEMINI_ANALYSIS_TIMEOUT_MS = 110_000;
+const GEMINI_ANALYSIS_ATTEMPT_TIMEOUT_MS = 180_000;
+const GEMINI_DIGITIZATION_ATTEMPT_TIMEOUT_MS = 300_000;
+const GEMINI_ANALYSIS_TIMEOUT_MS = 300_000;
 const GEMINI_OCR_TIMEOUT_MS = 600_000;
-const OCR_BATCH_PAGES = 3;
-const OCR_BATCH_CONCURRENCY = 6;
+const OCR_BATCH_PAGES = 5; // User requested 4-6 pages
+const OCR_BATCH_CONCURRENCY = 1; // Strictly sequential
 const GEMINI_OCR_PROJECT_COOLDOWN_MS = 10_000;
 let quotaScheduler: GeminiQuotaScheduler | null = null;
+let nextOcrProjectCursor = 0;
 
-// Quotas are tracked independently for each configured project and model.
+// Strict Model Allocation: Zero downgrade to 3.1 or older models
 const TASK_MODELS = {
-  digitization: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'],
-  analysis: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash'],
-};
+  digitization: ['gemini-3.5-flash-lite'],
+  analysis: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'],
+  assistant: ['gemini-3.5-flash-lite'],
+  refinement: ['gemini-3.5-flash-lite'],
+} as const;
 
 function getConfiguredProjects(): GeminiProject[] {
   return parseGeminiProjects(
@@ -71,9 +76,10 @@ function getQuotaScheduler(): GeminiQuotaScheduler {
 }
 
 function getTaskQuota(task: GeminiTask): GeminiQuota {
-  return task === 'digitization'
-    ? { rpm: 15, rpd: 500, maxConcurrent: 3 }
-    : { rpm: 5, rpd: 20, maxConcurrent: 2 };
+  if (task === 'digitization') return { rpm: 15, rpd: 1500, maxConcurrent: 3 };
+  if (task === 'analysis') return { rpm: 10, rpd: 50, maxConcurrent: 2 };
+  if (task === 'assistant') return { rpm: 15, rpd: 1500, maxConcurrent: 3 };
+  return { rpm: 15, rpd: 1500, maxConcurrent: 3 };
 }
 
 function describeGeminiError(error: unknown): { status?: number; message: string } {
@@ -180,15 +186,12 @@ function cleanJsonOutput(text: string): string {
 }
 
 function parseJsonSafely(text: string): Record<string, unknown> {
-  const cleaned = cleanJsonOutput(text);
   try {
-    return cleanExtractedJson(JSON.parse(cleaned));
-  } catch {
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) {
-      return cleanExtractedJson(JSON.parse(match[0]));
-    }
-    throw new Error('Không thể phân tích dữ liệu trả về từ mô hình AI.');
+    const parsed = parseRobustJson(text);
+    return cleanExtractedJson(parsed);
+  } catch (e) {
+    digitizationLogger.log('error', 'server-parser', 'Lỗi parse JSON an toàn', { error: e, text: text.substring(0, 500) });
+    throw e;
   }
 }
 
@@ -201,6 +204,9 @@ interface ExecuteOptions {
   timeoutMs?: number;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
+  preferredProjectId?: string;
+  preferredModel?: string;
+  responseSchema?: any;
 }
 
 async function callGeminiModel(
@@ -210,40 +216,64 @@ async function callGeminiModel(
   deadline: number,
   signal?: AbortSignal,
 ): Promise<string> {
-  const attemptController = new AbortController();
-  const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
-  signal?.addEventListener('abort', cancelAttempt, { once: true });
-  const attemptTimeout = setTimeout(
-    () => attemptController.abort(new Error('Gemini attempt timed out.')),
-    Math.min(getAttemptTimeout(options.task), Math.max(1_000, deadline - Date.now())),
-  );
-  try {
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        timeout: Math.min(getAttemptTimeout(options.task), Math.max(1_000, deadline - Date.now())),
-        headers: { 'User-Agent': 'aistudio-build' },
-      },
-    });
-    const config: Record<string, unknown> = { abortSignal: attemptController.signal };
-    if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
-    if (options.responseMimeType) config.responseMimeType = options.responseMimeType;
-    if (model.includes('flash-lite') && typeof options.temperature === 'number') {
-      config.temperature = options.temperature;
-    }
+  const maxRetries = 3;
+  let lastError: unknown;
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: options.contents as any,
-      config,
-    });
-    const text = response.text || '';
-    if (!text) throw new Error('Gemini returned an empty response.');
-    return text;
-  } finally {
-    clearTimeout(attemptTimeout);
-    signal?.removeEventListener('abort', cancelAttempt);
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (signal?.aborted) throw new Error('Gemini request was cancelled.');
+    if (Date.now() >= deadline) throw new Error('Gemini deadline exceeded.');
+
+    const attemptController = new AbortController();
+    const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
+    signal?.addEventListener('abort', cancelAttempt, { once: true });
+    const attemptTimeout = setTimeout(
+      () => attemptController.abort(new Error('Gemini attempt timed out.')),
+      Math.min(getAttemptTimeout(options.task), Math.max(1_000, deadline - Date.now())),
+    );
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          timeout: Math.min(getAttemptTimeout(options.task), Math.max(1_000, deadline - Date.now())),
+          headers: { 'User-Agent': 'aistudio-build' },
+        },
+      });
+      const config: Record<string, unknown> = { abortSignal: attemptController.signal };
+      if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
+      if (options.responseMimeType) config.responseMimeType = options.responseMimeType;
+      if (options.responseSchema) config.responseSchema = options.responseSchema;
+      if (model.includes('flash-lite') && typeof options.temperature === 'number') {
+        config.temperature = options.temperature;
+      }
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: options.contents as any,
+        config,
+      });
+      const text = response.text || '';
+      if (!text) throw new Error('Gemini returned an empty response.');
+      return text;
+    } catch (error) {
+      lastError = error;
+      const { status, message } = describeGeminiError(error);
+      const is503or429 = status === 503 || status === 429 || /503|service unavailable|high demand|overloaded|temporarily unavailable/i.test(message);
+
+      if (is503or429 && attempt < maxRetries - 1 && Date.now() < deadline - 5000) {
+        const backoffMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+        options.onProgress?.(`Model ${model} đang bận (HTTP 503); thử lại sau ${backoffMs / 1000}s (${attempt + 1}/${maxRetries})...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(attemptTimeout);
+      signal?.removeEventListener('abort', cancelAttempt);
+    }
   }
+
+  throw lastError || new Error(`Mô hình ${model} không phản hồi sau ${maxRetries} lần thử.`);
 }
 
 async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ text: string; modelUsed: string }> {
@@ -257,65 +287,34 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
     throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ.');
   }
 
-  const models = TASK_MODELS[options.task];
-  const primaryModel = models[0]; // 'gemini-3.5-flash-lite'
-  const failoverModels = models.slice(1); // ['gemini-3.1-flash-lite']
+  const targetModel = options.preferredModel && TASK_MODELS[options.task].includes(options.preferredModel as any)
+    ? options.preferredModel
+    : TASK_MODELS[options.task][0];
+
   const deadline = Date.now() + (options.timeoutMs || GEMINI_ANALYSIS_TIMEOUT_MS);
   const quota = getTaskQuota(options.task);
   let lastError: Error | null = null;
-
   const attemptedProjectIds = new Set<string>();
 
-  // Xoay vòng qua 6 keys độc lập chạy song song
+  // Xoay vòng qua 6 keys độc lập trong pool, giữ nguyên model (Zero downgrade)
   while (attemptedProjectIds.size < projects.length && Date.now() < deadline) {
     if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
 
-    // 1. Luôn ưu tiên acquire key cho model chính: gemini-3.5-flash-lite
-    let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>> | null = null;
-    let targetModel = primaryModel;
-
+    let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
     try {
       lease = await scheduler.acquire(
         options.task,
-        primaryModel,
+        targetModel,
         quota,
         attemptedProjectIds,
-        2_500, // Thử nhanh xem key nào đang rảnh model 3.5 flash lite
+        Math.min(5_000, deadline - Date.now()),
+        options.preferredProjectId && !attemptedProjectIds.has(options.preferredProjectId)
+          ? options.preferredProjectId
+          : undefined,
       );
-    } catch {
-      // Nếu tất cả các keys còn lại đều bận/hết quota 3.5 flash lite, mở đường sang failover model (3.1 flash lite)
-      for (const failover of failoverModels) {
-        try {
-          lease = await scheduler.acquire(
-            options.task,
-            failover,
-            quota,
-            attemptedProjectIds,
-            2_000,
-          );
-          targetModel = failover;
-          break;
-        } catch {
-          // tiếp tục tìm key
-        }
-      }
-    }
-
-    // Nếu vẫn chưa có slot, chờ tối đa với deadline cho primaryModel
-    if (!lease) {
-      try {
-        lease = await scheduler.acquire(
-          options.task,
-          primaryModel,
-          quota,
-          attemptedProjectIds,
-          Math.min(5_000, deadline - Date.now()),
-        );
-        targetModel = primaryModel;
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        break;
-      }
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      break;
     }
 
     const { project } = lease;
@@ -328,36 +327,24 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
     } catch (error) {
       const details = describeGeminiError(error);
       lastError = error instanceof Error ? error : new Error(String(error));
-      const shouldRetry = recordProjectFailure(scheduler, project.id, targetModel, error);
-      console.warn(
-        `[Gemini ${options.task}] ${targetModel} failed for Key ${project.id} (${details.status || 'network'}): ${details.message}`,
+      const shouldRetry = recordProjectFailure(scheduler, project.id, targetModel, error, true, false);
+      scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
+      
+      digitizationLogger.log(
+        'warn',
+        'task-executor',
+        `Task ${options.task} thất bại với Key ${project.id} (${details.status || 'network'}): ${details.message}. Đang xoay Key...`,
+        { task: options.task, projectId: project.id, model: targetModel, error: details.message }
       );
-
-      // FAILOVER NGAY TRÊN CHÍNH KEY ĐÓ: Nếu key này lỗi với 3.5 flash lite, lập tức failover sang 3.1 flash lite
-      if (targetModel === primaryModel && failoverModels.length > 0 && Date.now() < deadline) {
-        for (const failover of failoverModels) {
-          try {
-            options.onProgress?.(`Key ${project.id} gặp lỗi với ${primaryModel}. Đang failover tức thì sang ${failover}...`);
-            const fallbackText = await callGeminiModel(project.apiKey, failover, options, deadline, options.signal);
-            console.info(`[Gemini ${options.task}] Failover to ${failover} on Key ${project.id} THÀNH CÔNG!`);
-            return { text: fallbackText, modelUsed: failover };
-          } catch (failoverErr) {
-            recordProjectFailure(scheduler, project.id, failover, failoverErr);
-            console.warn(
-              `[Gemini ${options.task}] Failover ${failover} cũng thất bại trên Key ${project.id}:`,
-              describeGeminiError(failoverErr).message,
-            );
-          }
-        }
-      }
-
+      
+      options.onProgress?.(`Key ${project.id} gặp lỗi; tự động chuyển sang Key tiếp theo trong pool...`);
       if (!shouldRetry) throw lastError;
     } finally {
       lease.release();
     }
   }
 
-  throw lastError || new Error('Đã hết quota hoặc thời gian chờ cho các model Gemini đã cấu hình.');
+  throw lastError || new Error(`Đã hết quota hoặc thời gian chờ cho mô hình ${targetModel} trên các key đã cấu hình.`);
 }
 
 async function executeDigitizationWithFailover(
@@ -369,7 +356,7 @@ async function executeDigitizationWithFailover(
     throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ.');
   }
 
-  const [primaryModel, fallbackModel] = TASK_MODELS.digitization;
+  const targetModel = TASK_MODELS.digitization[0]; // Strictly 'gemini-3.5-flash-lite'
   const deadline = Date.now() + (options.timeoutMs || GEMINI_OCR_TIMEOUT_MS);
   const quota = getTaskQuota('digitization');
   const attemptedProjectIds = new Set<string>();
@@ -378,86 +365,60 @@ async function executeDigitizationWithFailover(
   while (attemptedProjectIds.size < projects.length && Date.now() < deadline) {
     if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
 
-    const lease = await scheduler.acquire(
-      'digitization',
-      primaryModel,
-      quota,
-      attemptedProjectIds,
-      Math.min(5_000, deadline - Date.now()),
-    );
+    const preferred = options.preferredProjectId && !attemptedProjectIds.has(options.preferredProjectId)
+      ? options.preferredProjectId
+      : undefined;
+
+    let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
+    try {
+      lease = await scheduler.acquire(
+        'digitization',
+        targetModel,
+        quota,
+        attemptedProjectIds,
+        Math.min(5_000, deadline - Date.now()),
+        preferred,
+      );
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      break;
+    }
+
     const { project } = lease;
     attemptedProjectIds.add(project.id);
 
     try {
-      try {
-        options.onProgress?.(`Đang xử lý bằng ${primaryModel} (Key: ${project.id})`);
-        const text = await callGeminiModel(
-          project.apiKey,
-          primaryModel,
-          options,
-          deadline,
-          options.signal,
-        );
-        return { text, modelUsed: primaryModel };
-      } catch (primaryError) {
-        if (options.signal?.aborted) throw primaryError;
-        lastError = primaryError instanceof Error ? primaryError : new Error(String(primaryError));
-        console.warn(
-          `[Gemini digitization] ${primaryModel} failed for Key ${project.id}: ${describeGeminiError(primaryError).message}`,
-        );
+      options.onProgress?.(`Đang OCR tài liệu bằng ${targetModel} (Key: ${project.id})`);
+      const text = await callGeminiModel(
+        project.apiKey,
+        targetModel,
+        options,
+        deadline,
+        options.signal,
+      );
+      return { text, modelUsed: targetModel };
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const details = describeGeminiError(error);
+      recordProjectFailure(scheduler, project.id, targetModel, error, false, false);
+      scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
 
-        let fallbackError: unknown;
-        let fallbackLease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>> | undefined;
-        try {
-          fallbackLease = await scheduler.acquire(
-            'digitization',
-            fallbackModel,
-            quota,
-            new Set(),
-            Math.min(5_000, deadline - Date.now()),
-            project.id,
-          );
-          options.onProgress?.(
-            `Key ${project.id} lỗi với ${primaryModel}; đang thử dự phòng ${fallbackModel} trên cùng key...`,
-          );
-          const text = await callGeminiModel(
-            project.apiKey,
-            fallbackModel,
-            options,
-            deadline,
-            options.signal,
-          );
-          recordProjectFailure(scheduler, project.id, primaryModel, primaryError, false, false);
-          console.info(
-            `[Gemini digitization] Fallback ${fallbackModel} succeeded for Key ${project.id}.`,
-          );
-          return { text, modelUsed: fallbackModel };
-        } catch (error) {
-          if (options.signal?.aborted) throw error;
-          fallbackError = error;
-          lastError = error instanceof Error ? error : new Error(String(error));
-          console.warn(
-            `[Gemini digitization] ${fallbackModel} failed for Key ${project.id}: ${describeGeminiError(error).message}`,
-          );
-        } finally {
-          fallbackLease?.release();
-        }
-
-        recordProjectFailure(scheduler, project.id, primaryModel, primaryError, false, false);
-        if (fallbackLease) {
-          recordProjectFailure(scheduler, project.id, fallbackModel, fallbackError, false, false);
-        }
-        scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
-        options.onProgress?.(
-          `Hai model đều lỗi với Key ${project.id}; tạm nghỉ key 10 giây và chuyển sang key khác...`,
-        );
-      }
+      digitizationLogger.log(
+        'warn',
+        'worker',
+        `Key ${project.id} lỗi OCR (${details.status || 'network'}): ${details.message}; tự động xoay sang Key tiếp theo với cùng model ${targetModel}...`,
+        { projectId: project.id, model: targetModel, error: details.message },
+      );
+      options.onProgress?.(
+        `Key ${project.id} gặp sự cố; chuyển tức thì sang Key khả dụng kế tiếp trong pool...`,
+      );
     } finally {
       lease.release();
     }
   }
 
-  throw lastError || new Error('Đã hết key Gemini khả dụng hoặc quá thời gian OCR.');
+  throw lastError || new Error(`Đã hết key khả dụng cho mô hình ${targetModel} hoặc quá thời gian chờ.`);
 }
 
 async function startServer() {
@@ -474,19 +435,22 @@ async function startServer() {
       supportedTasks: Object.keys(TASK_MODELS),
       taskModels: TASK_MODELS,
       quotasPerProject: {
-        digitization: { rpm: 15, rpd: 500, maxConcurrent: 3 },
-        analysis: { rpm: 5, rpd: 20, maxConcurrent: 2 },
+        digitization: { rpm: 15, rpd: 1500, maxConcurrent: 3 },
+        analysis: { rpm: 10, rpd: 50, maxConcurrent: 2 },
+        assistant: { rpm: 15, rpd: 1500, maxConcurrent: 3 },
       },
       ocr: {
         batchPages: OCR_BATCH_PAGES,
         concurrentBatchesPerRequest: OCR_BATCH_CONCURRENCY,
         failedKeyCooldownMs: GEMINI_OCR_PROJECT_COOLDOWN_MS,
         primaryModel: TASK_MODELS.digitization[0],
-        fallbackModel: TASK_MODELS.digitization[1],
+        zeroDowngradeEnforced: true,
       },
-      architecture: 'server-side-secure',
+      architecture: 'server-side-secure-three-tier',
     });
   });
+
+
 
   app.use('/api/gemini', async (req: Request, res: Response, next) => {
     const authorization = req.header('Authorization') || '';
@@ -515,10 +479,16 @@ async function startServer() {
     }
   });
 
+  // 0. Endpoint để lấy logs (Đã được bảo vệ bởi middleware phía trên)
+  app.get('/api/gemini/digitization-logs', (_req: Request, res: Response) => {
+    res.json({ success: true, logs: digitizationLogger.getLogs() });
+  });
+
   app.use(express.json({ limit: '36mb' }));
 
   // 1. Trích xuất tài liệu (OCR PDF / ảnh chụp khám bệnh)
   app.post('/api/gemini/extract-health-event', async (req: Request, res: Response) => {
+    digitizationLogger.log('info', 'request', 'Bắt đầu yêu cầu số hóa tài liệu', { memberId: req.body.member?.id });
     let extractionTimeout: ReturnType<typeof setTimeout> | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let modelAbortController: AbortController | undefined;
@@ -561,34 +531,134 @@ async function startServer() {
         throw error;
       }
 
-      const systemInstruction = `Bạn là trợ lý y tế chuyên số hóa, OCR nhận dạng tài liệu y khoa Việt Nam (đơn thuốc, kết quả xét nghiệm, phiếu khám bệnh, siêu âm, X-quang, giấy ra viện, sổ tiêm chủng).
-Nhiệm vụ: Trích xuất và chuẩn hóa thông tin từ tài liệu đính kèm. Đồng thời phát hiện Họ và tên người bệnh, Ngày sinh/Năm sinh và Giới tính trên tài liệu để hệ thống đối chiếu ghép với thành viên gia đình (${memberName} ${memberBirth}).
-QUY TẮC CHUẨN HÓA & KHỬ TRÙNG LẶP:
-- Chuẩn hóa mảng "metrics" với "standardKey" (VD: WBC, RBC, HGB, HbA1c, GLUCOSE, CREATININ, EGFR, ACID_URIC, CHOLESTEROL, TRIGLYCERID, AST, ALT, BLOOD_PRESSURE_SYS, BLOOD_PRESSURE_DIA, SPO2, WEIGHT, HEIGHT) và "status" ("normal" | "optimal" | "warning_high" | "warning_low" | "critical_high" | "critical_low").
-- Trích xuất mảng "imagingResults" cho các kết quả chẩn đoán hình ảnh, siêu âm, X-quang, MRI.
-- Khử trùng lặp tuyệt đối các chẩn đoán, tên thuốc, chỉ số đo và hình ảnh.
+      const systemInstruction = `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam cấp cao (sổ khám bệnh tổng quát, phiếu xét nghiệm, siêu âm/X-quang/CT/MRI/ECG, đơn thuốc, sổ tiêm chủng, giấy ra viện, hoặc các loại giấy tờ y tế khác).
+Nhiệm vụ: Trích xuất đầy đủ, trung thực, súc tích các dữ liệu y tế cốt lõi trên tài liệu đính kèm cho thành viên gia đình (${memberName} ${memberBirth}).
+Tên tệp tin đang xử lý: "${req.body.fileName || 'Không rõ tên tệp'}".
+NẾU tên tệp có chứa năm (VD: "2024"), BẮT BUỘC coi sự kiện này diễn ra trong năm đó. ƯU TIÊN NĂM TỪ TÊN TỆP HƠN LÀ VĂN BẢN TRÔI NỔI TRONG ẢNH/PDF.
+
+BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU (FAST OCR):
+1. TẬP TRỌNG TÂM Y TẾ: Chỉ trích xuất thông số xét nghiệm (metrics), kết quả chẩn đoán hình ảnh (imagingResults), chẩn đoán bệnh (diagnoses), tên cơ sở y tế và ngày khám.
+2. LOẠI BỎ ẢNH NẶNG & TRANG PHỤ: Bỏ qua hoàn toàn trang bìa, thủ tục hành chính, quy định bảo hiểm, hoặc các trang CHỈ CHỨA HÌNH ẢNH THÔ (siêu âm chụp màn hình, phim X-quang, hình minh họa giải phẫu). KHÔNG bóc tách nếu trang đó không có bảng số liệu hoặc văn bản kết luận.
+3. CÔ ĐỌNG CHẨN ĐOÁN HÌNH ẢNH: Trong "imagingResults", "findings" CHỈ GHI BẤT THƯỜNG QUAN TRỌNG hoặc KẾT LUẬN CỐT LÕI (dưới 2-3 câu súc tích). KHÔNG mô tả hình ảnh rườm rà.
+4. TRÁNH LẶP DỮ LIỆU & TOKEN THỊ GIÁC: Không sinh các đoạn mô tả hình ảnh, không lặp lại cùng tên chỉ số xét nghiệm giữa các trang/batch.
+
+QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
+1. PHÂN LOẠI TÀI LIỆU (type):
+   - "comprehensive_exam": Sổ/Phiếu khám sức khỏe định kỳ tổng quát, khám đoàn thể.
+   - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu...
+   - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG...).
+   - "prescription": Đơn thuốc, toa thuốc điều trị ngoại trú/nội trú.
+   - "vaccination": Phiếu tiêm chủng, sổ tiêm ngừa vắc xin.
+   - "discharge": Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án nội trú.
+   - "other": Tài liệu y tế khác (giấy chuyển tuyến, hóa đơn, giấy hẹn tái khám, bảng theo dõi huyết áp tại nhà...). Khi type là "other", BẮT BUỘC cung cấp "customCategory" (VD: "Giấy chuyển tuyến", "Bảng theo dõi huyết áp") và lưu các thông tin dạng key-value vào "extractedData".
+
+2. THÔNG TIN BÁC SĨ & ĐƠN VỊ:
+   - "facility": Tên bệnh viện, phòng khám, trung tâm y tế.
+   - "doctorName": Họ và tên bác sĩ khám, bác sĩ điều trị hoặc bác sĩ kê đơn nếu có.
+
+3. KHÁM THỂ LỰC (physicalExam):
+   - height_cm, weight_kg, bmi, bp_mmHg (huyết áp), pulse_bpm (mạch), classification (phân loại sức khỏe như "Loại I", "Loại II"...).
+
+4. CHẨN ĐOÁN & KẾT LUẬN (diagnoses):
+   - Toàn bộ chẩn đoán bệnh, tiền sử bệnh lý, tiền sử phẫu thuật, các kết luận bất thường.
+
+5. CHỈ SỐ XÉT NGHIỆM (metrics):
+   - Trích xuất TẤT CẢ các chỉ số xét nghiệm với "standardKey" chuẩn hóa.
+   - DANH SÁCH KEY CHUẨN: WBC, NEU_PCT, NEU_#, LYM_PCT, LYM_#, MONO_PCT, MONO_#, RBC, HGB, HCT, MCV, MCH, MCHC, PLT, ESR_1H, ESR_2H, HBSAG, HBSAB, HCV_AB, HBA1C, TSH, FT4, FT3, CEA, CYFRA_21_1, CA_72_4, GLUCOSE, UREA, CREATININ, EGFR, ACID_URIC, CHOLESTEROL, HDL_C, LDL_C, TRIGLYCERID, AST, ALT, GGT, NA, K, CL, CA_ION, URINE_PRO, URINE_SG, URINE_PH, URINE_BLOOD.
+   - BẮT BUỘC: Không tự ý thêm hậu tố như "_1", "_2" vào key. Sử dụng đúng NEU_# thay vì NEU_1.
+   - CẢNH BÁO: Phân biệt rõ "Bạch cầu" trong máu (WBC) và "Bạch cầu" trong cặn lắng nước tiểu (URINE_LEU). Không dùng key AST cho "Trụ" nước tiểu.
+
+6. CHẨN ĐOÁN HÌNH ẢNH (imagingResults):
+   - "modality" (kỹ thuật), "findings" (mô tả hình ảnh cô đọng bất thường), "conclusion" (kết luận chẩn đoán).
+
+7. ĐƠN THUỐC CHI TIẾT (medications):
+   - name: tên thuốc
+   - dosage: hàm lượng / liều dùng mỗi lần
+   - quantity: số lượng viên/gói/hộp cấp phát
+   - frequency: số lần uống trong ngày
+   - timing: thời điểm uống (sáng/trưa/chiều/tối, trước hay sau ăn)
+   - duration: thời gian dùng (số ngày/tuần)
+   - instructions: lời dặn chi tiết về cách dùng thuốc
+
+8. TIÊM CHỦNG VẮC XIN (vaccinations):
+   - vaccineName: tên vắc xin (VD: Phế cầu 13, Cúm tứ giá, Viêm gan B)
+   - targetDisease: bệnh phòng ngừa
+   - doseNumber: mũi tiêm thứ mấy
+   - lotNumber: số lô vắc xin
+   - manufacturer: hãng sản xuất / nước sản xuất
+   - administeredDate: ngày tiêm (YYYY-MM-DD)
+   - nextDoseDate: ngày hẹn tiêm mũi tiếp theo nếu có (YYYY-MM-DD)
+   - reactionNotes: ghi chú phản ứng sau tiêm
+
+9. NẰM VIỆN & RA VIỆN (hospitalization):
+   - admissionDate: ngày nhập viện (YYYY-MM-DD)
+   - dischargeDate: ngày ra viện (YYYY-MM-DD)
+   - department: khoa điều trị
+   - treatmentSummary: tóm tắt quá trình điều trị
+   - surgicalNotes: phẫu thuật hoặc thủ thuật đã can thiệp nếu có
 
 Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
 {
-  "title": "Tên ngắn gọn của sự kiện y tế (VD: Khám tổng quát & Xét nghiệm, Đơn thuốc tai mũi họng)",
-  "date": "YYYY-MM-DD (ngày khám trên tài liệu)",
-  "type": "medical_report" | "prescription" | "test_result" | "vaccination" | "discharge" | "comprehensive_exam" | "other",
+  "title": "Tên ngắn gọn của sự kiện y tế (VD: Khám sức khỏe định kỳ năm 2024, Đơn thuốc viêm xoang)",
+  "date": "YYYY-MM-DD",
+  "type": "comprehensive_exam" | "test_result" | "imaging" | "prescription" | "vaccination" | "discharge" | "other",
+  "customCategory": "Tên phân loại tự động nếu type là other",
   "patientName": "Họ và tên bệnh nhân ghi trên tài liệu (nếu có)",
   "patientBirthDate": "YYYY-MM-DD hoặc YYYY (ngày sinh/năm sinh nếu có)",
   "patientGender": "Nam" | "Nữ" | "Khác",
-  "facility": "Tên bệnh viện hoặc phòng khám",
+  "facility": "Tên cơ sở y tế",
+  "doctorName": "Tên bác sĩ khám/kê đơn nếu có",
+  "physicalExam": {
+    "height_cm": 178,
+    "weight_kg": 77,
+    "bmi": 24.3,
+    "bp_mmHg": "120/80",
+    "pulse_bpm": 60,
+    "classification": "Loại I"
+  },
   "diagnoses": ["Chẩn đoán 1", "Chẩn đoán 2"],
   "medications": [
-    { "name": "Tên thuốc", "dosage": "Liều dùng", "frequency": "Số lần/ngày", "duration": "Thời gian uống" }
+    {
+      "name": "Tên thuốc",
+      "dosage": "500mg",
+      "quantity": "20 viên",
+      "frequency": "2 lần/ngày",
+      "timing": "Sáng 1 viên, tối 1 viên sau ăn",
+      "duration": "10 ngày",
+      "instructions": "Uống nhiều nước khi dùng thuốc"
+    }
   ],
+  "vaccinations": [
+    {
+      "vaccineName": "Prevenar 13",
+      "targetDisease": "Phế cầu khuẩn",
+      "doseNumber": 1,
+      "lotNumber": "AB1234",
+      "manufacturer": "Pfizer",
+      "administeredDate": "2024-05-20",
+      "nextDoseDate": "2025-05-20",
+      "reactionNotes": "Bình thường"
+    }
+  ],
+  "hospitalization": {
+    "admissionDate": "2024-05-10",
+    "dischargeDate": "2024-05-15",
+    "department": "Khoa Tiêu hóa",
+    "treatmentSummary": "Điều trị nội khoa ổn định",
+    "surgicalNotes": "Nội soi can thiệp gắp polyp"
+  },
   "metrics": [
-    { "name": "Tên chỉ số", "standardKey": "WBC | GLUCOSE | ACID_URIC | CREATININ ...", "value": 120, "unit": "mmol/L", "status": "normal | critical_high" }
+    { "name": "Tên chỉ số", "standardKey": "WBC", "value": 6.41, "unit": "G/L", "refRange": "3.9-10", "status": "normal" }
   ],
   "imagingResults": [
-    { "modality": "Siêu âm ổ bụng | Siêu âm tuyến giáp ...", "findings": "Mô tả hình ảnh", "conclusion": "Kết luận chẩn đoán" }
+    { "modality": "Siêu âm tuyến giáp", "findings": "Mô tả hình ảnh", "conclusion": "Kết luận chẩn đoán" }
   ],
+  "extractedData": {
+    "noiChuyenDen": "Bệnh viện Chợ Rẫy",
+    "lyDoChuyenTuyen": "Đúng tuyến chuyên môn kỹ thuật"
+  },
   "advice": "Lời dặn của bác sĩ hoặc hướng dẫn điều trị",
-  "nextFollowUp": "YYYY-MM-DD nếu có hẹn tái khám",
+  "nextFollowUp": "YYYY-MM-DD",
   "notes": "Ghi chú bổ sung quan trọng"
 }`;
 
@@ -602,67 +672,100 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
         onModelProgress?: (message: string) => void,
         signal?: AbortSignal,
       ) => {
-        const results: Array<{
-          firstPage: number;
-          lastPage: number;
-          extracted: Record<string, unknown>;
-          modelUsed: string;
-        } | undefined> = new Array(pageBatches.length);
-        let nextBatchIndex = 0;
-        let nextBatchToEmitIndex = 0;
+        const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        const projects = getQuotaScheduler().getProjects();
+        const results: Array<{ firstPage: number; lastPage: number; extracted: Record<string, unknown>; modelUsed: string } | null> = new Array(pageBatches.length).fill(null);
         let completedBatches = 0;
-        const workers = Array.from(
-          { length: Math.min(OCR_BATCH_CONCURRENCY, pageBatches.length) },
-          async () => {
-            while (nextBatchIndex < pageBatches.length) {
-              if (signal?.aborted) throw new Error('OCR was cancelled.');
-              const batchIndex = nextBatchIndex++;
-              const batch = pageBatches[batchIndex];
-              try {
-                const { text, modelUsed } = await executeGeminiWithFailover({
-                  task: 'digitization',
-                  contents: [
-                    { inlineData: { mimeType: effectiveMime, data: batch.base64Data } },
-                    {
-                      text: `Đọc các trang ${batch.firstPage}-${batch.lastPage} trong phần tài liệu này của hồ sơ ${memberName}. Trích xuất đúng nội dung có trên các trang này, không suy đoán, không tự thêm dữ liệu từ trang khác. Nếu phần này không có trường nào thì trả JSON với các mảng rỗng. Trả về JSON chuẩn.`,
-                    },
-                  ],
-                  systemInstruction,
-                  responseMimeType: 'application/json',
-                  timeoutMs: 90_000,
-                  signal,
-                  onProgress: onModelProgress,
-                });
-                results[batchIndex] = {
-                  firstPage: batch.firstPage,
-                  lastPage: batch.lastPage,
-                  extracted: parseJsonSafely(text),
-                  modelUsed,
-                };
-                
-                // Emít tiến độ tuần tự theo thứ tự trang tăng dần để giao diện hiển thị mượt mà
-                while (nextBatchToEmitIndex < pageBatches.length && results[nextBatchToEmitIndex] !== undefined) {
-                  const currentEmittedIndex = nextBatchToEmitIndex++;
-                  completedBatches++;
-                  const completedBatch = pageBatches[currentEmittedIndex];
-                  const availableResults = results.slice(0, currentEmittedIndex + 1).filter(
-                    (r): r is NonNullable<typeof r> => Boolean(r),
-                  );
-                  onBatchComplete?.(
-                    completedBatches,
-                    mergeExtractedBatches(availableResults),
-                    Array.from(new Set(availableResults.map((r) => r.modelUsed))).join(', '),
-                    completedBatch,
-                  );
-                }
-              } catch (error) {
-                if (!signal?.aborted) modelAbortController?.abort(error);
-                throw error;
+        const fileAssignedProjectId = projects.length > 0 ? projects[0].id : undefined;
+
+        const callGeminiWithRetry = async (
+          batch: PdfPageBatch,
+          batchIndex: number,
+          preferredProjectId?: string,
+        ): Promise<{ text: string; modelUsed: string }> => {
+          const maxBatchRetries = 3;
+          let lastBatchError: any;
+          const promptText = pageBatches.length === 1
+            ? `Đọc toàn bộ tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ, chính xác, chi tiết tất cả các thông tin y tế gồm: Khám thể lực (physicalExam), Các chẩn đoán (diagnoses), Toàn bộ kết quả xét nghiệm (kèm standardKey, khoảng tham chiếu refRange), Toàn bộ kết quả chẩn đoán hình ảnh (siêu âm, X-quang, ECG...), Đơn thuốc và Lời dặn của bác sĩ. Trả về DUY NHẤT một JSON object chuẩn.`
+            : `Đọc các trang ${batch.firstPage}-${batch.lastPage} trong tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ nội dung có trên các trang này (Khám thể lực, chẩn đoán, xét nghiệm kèm standardKey & refRange, chẩn đoán hình ảnh, đơn thuốc, lời dặn). Trả về DUY NHẤT một JSON object chuẩn.`;
+
+          for (let attempt = 0; attempt < maxBatchRetries; attempt++) {
+            if (signal?.aborted) throw new Error('OCR was cancelled.');
+            try {
+              return await executeGeminiWithFailover({
+                task: 'digitization',
+                contents: [
+                  { inlineData: { mimeType: effectiveMime, data: batch.base64Data } },
+                  { text: promptText },
+                ],
+                systemInstruction,
+                responseMimeType: 'application/json',
+                timeoutMs: GEMINI_OCR_TIMEOUT_MS,
+                signal,
+                onProgress: onModelProgress,
+                preferredProjectId,
+              });
+            } catch (error) {
+              lastBatchError = error;
+              const details = describeGeminiError(error);
+              const isRetryable = details.status === 429 || details.status === 503 || details.status === 504 || /high demand|deadline|timeout|overload/i.test(details.message);
+              
+              if (isRetryable && attempt < maxBatchRetries - 1) {
+                const delay = Math.pow(2, attempt + 1) * 2000; // 4s, 8s, 16s
+                digitizationLogger.log('warn', 'worker', `Lỗi batch ${batchIndex + 1} (${details.status}). Thử lại sau ${delay/1000}s (Lần ${attempt + 1}/${maxBatchRetries})`, { error: details.message });
+                await sleep(delay);
+                continue;
               }
+              throw error;
             }
-          },
-        );
-        await Promise.all(workers);
+          }
+          throw lastBatchError;
+        };
+
+        // Xử lý TUẦN TỰ để chống Rate Limit và đảm bảo tính ổn định
+        for (let i = 0; i < pageBatches.length; i++) {
+          if (signal?.aborted) throw new Error('OCR was cancelled.');
+          
+          // Độ trễ tối thiểu 2.5 giây giữa các request để bảo vệ băng thông
+          if (i > 0) {
+            onModelProgress?.(`Chờ giây lát trước khi xử lý phần tiếp theo...`);
+            await sleep(2500);
+          }
+
+          const batch = pageBatches[i];
+          const preferredProjectId = fileAssignedProjectId || (projects.length > 0 ? projects[i % projects.length].id : undefined);
+          
+          digitizationLogger.log('info', 'worker', `Bắt đầu OCR batch ${i + 1}/${pageBatches.length} (trang ${batch.firstPage}-${batch.lastPage})`, { preferredProjectId });
+          
+          try {
+            const { text, modelUsed } = await callGeminiWithRetry(batch, i, preferredProjectId);
+            
+            digitizationLogger.log('info', 'worker', `Hoàn tất OCR batch ${i + 1}/${pageBatches.length}`, { modelUsed });
+            
+            results[i] = {
+              firstPage: batch.firstPage,
+              lastPage: batch.lastPage,
+              extracted: parseJsonSafely(text),
+              modelUsed,
+            };
+
+            completedBatches++;
+            const availableResults = results.slice(0, i + 1).filter(
+              (r): r is NonNullable<typeof r> => Boolean(r),
+            );
+            
+            onBatchComplete?.(
+              completedBatches,
+              mergeExtractedBatches(availableResults),
+              Array.from(new Set(availableResults.map((r) => r.modelUsed))).join(', '),
+              batch,
+            );
+          } catch (error) {
+            digitizationLogger.log('error', 'worker', `Thất bại vĩnh viễn tại batch ${i + 1} sau khi thử lại`, { error });
+            if (!signal?.aborted) modelAbortController?.abort(error);
+            throw error;
+          }
+        }
         const completeResults = results.filter(
           (result): result is NonNullable<typeof result> => Boolean(result),
         );
@@ -682,47 +785,50 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
         writeSse(res, {
           type: 'progress',
           progressPercent: 46,
-          message: effectiveMime === 'application/pdf'
-            ? `Đã chia PDF thành ${pageBatches.length} phần, xử lý tối đa 6 phần song song theo quota Gemini.`
-            : 'Đã nhận tài liệu. Đang xếp lượt theo quota Gemini còn khả dụng.',
+          message: `Đang xử lý tài liệu (0/${pageBatches.length} trang)`,
           totalPages: pageBatches.length,
         });
         heartbeat = setInterval(() => {
           writeSse(res, {
             type: 'progress',
-            message: 'Các trang tài liệu vẫn đang được xử lý song song; tiến độ được cập nhật mượt mà theo thứ tự trang.',
+            message: `AI đang phân tích các trang tài liệu...`,
           });
-        }, 15_000);
+        }, 8_000);
         res.on('close', () => {
           if (!res.writableEnded) modelAbortController?.abort(new Error('Client disconnected.'));
           if (heartbeat) clearInterval(heartbeat);
         });
         extractionTimeout = setTimeout(
-          () => modelAbortController?.abort(new Error('Tài liệu vượt quá thời gian OCR tối đa 5 phút.')),
+          () => modelAbortController?.abort(new Error('Tài liệu vượt quá thời gian OCR tối đa 10 phút.')),
           GEMINI_OCR_TIMEOUT_MS,
         );
 
+        const totalDocPages = pageBatches[pageBatches.length - 1].lastPage;
         const result = await extractDocument(
           (completed, extracted, modelUsed, batch) => {
+            const pageRange = batch.firstPage === batch.lastPage ? `trang ${batch.firstPage}` : `các trang ${batch.firstPage}-${batch.lastPage}`;
             writeSse(res, {
               type: 'progress',
-              progressPercent: Math.min(92, 48 + Math.floor((completed / pageBatches.length) * 42)),
-              message: pageBatches.length > 1
-                ? `Đang bóc tách AI... Hoàn tất trang ${batch.firstPage}/${pageBatches.length} (${completed}/${pageBatches.length} trang)`
-                : `Đã số hóa thành công dữ liệu tài liệu y tế.`,
+              progressPercent: Math.min(92, 48 + Math.floor((completed / pageBatches.length) * 44)),
+              message: pageBatches.length === 1
+                ? `AI (gemini-3.5-flash-lite) đang bóc tách kết quả y tế (Trang 1/1)...`
+                : `AI (gemini-3.5-flash-lite) đang bóc tách ${pageRange} (Đã xong ${batch.lastPage}/${totalDocPages} trang)...`,
               currentPage: batch.firstPage,
-              totalPages: pageBatches.length,
+              processedPages: batch.lastPage,
+              totalPages: totalDocPages,
               extracted,
               modelUsed,
             });
           },
-          (message) => writeSse(res, { type: 'progress', message }),
+          (msg) => writeSse(res, { type: 'progress', message: msg || 'AI đang xử lý tài liệu...' }),
           modelAbortController.signal,
         );
         writeSse(res, {
           type: 'complete',
           extracted: result.extracted,
           modelUsed: result.modelUsed,
+          processedPages: totalDocPages,
+          totalPages: totalDocPages,
         });
         if (heartbeat) clearInterval(heartbeat);
         if (extractionTimeout) clearTimeout(extractionTimeout);
@@ -730,8 +836,9 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
         return;
       }
 
+      const totalDocPages = pageBatches[pageBatches.length - 1].lastPage;
       const result = await extractDocument();
-      res.json({ success: true, ...result });
+      res.json({ success: true, ...result, processedPages: totalDocPages, totalPages: totalDocPages });
     } catch (error) {
       if (heartbeat) clearInterval(heartbeat);
       if (extractionTimeout) clearTimeout(extractionTimeout);
@@ -775,7 +882,7 @@ Hãy:
 }`;
 
       const { text, modelUsed } = await executeGeminiWithFailover({
-        task: 'analysis',
+        task: 'refinement',
         contents: [{ text: prompt }],
         responseMimeType: 'application/json',
       });
@@ -803,30 +910,35 @@ Hãy:
     try {
       const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
-      const eventsCount = profile?.timeline?.length || 0;
+      const pruned = pruneProfileForAnalysis(member, profile);
 
-      const prompt = `Bạn là bác sĩ gia đình và chuyên gia y tế cao cấp.
-Hãy đưa ra bản ĐÁNH GIÁ TOÀN DIỆN tình hình sức khỏe cho thành viên ${memberName}.
-Thông tin hồ sơ:
-- Tổng số sự kiện khám/điều trị đã ghi nhận: ${eventsCount}
-- Các chẩn đoán gần đây: ${(profile?.summary?.latestDiagnoses || []).join(', ') || 'Chưa ghi nhận'}
-- Các chỉ số sức khỏe gần nhất: ${JSON.stringify(profile?.summary?.latestMetrics || {})}
-- Lịch sử diễn tiến bệnh án chi tiết:
-${JSON.stringify((profile?.timeline || []).slice(-10), null, 2)}
+      const prompt = `Bạn là bác sĩ gia đình AI và chuyên gia y tế cao cấp.
+Nhiệm vụ: Đưa ra bản ĐÁNH GIÁ TÓM TẮT tình hình sức khỏe cho thành viên ${memberName} dựa trên hồ sơ matrix đính kèm.
 
-Yêu cầu phân tích chi tiết:
-1. Đánh giá tổng quan hiện trạng sức khỏe, tiến triển các bệnh lý mãn tính/cấp tính.
-2. Phân tích xu hướng các chỉ số sinh tồn và xét nghiệm quan trọng (huyết áp, đường huyết, v.v.).
-3. Đánh giá phác đồ thuốc hiện tại và lưu ý an toàn/tương tác thuốc.
-4. Lời khuyên cụ thể, khoa học về chế độ dinh dưỡng, vận động và lịch tái khám định kỳ.
-Trình bày bằng tiếng Việt rõ ràng, ân cần, chia theo các mục tiêu đề chuyên nghiệp.`;
+HỒ SƠ MATRIX (Đã tối ưu):
+${JSON.stringify(pruned, null, 2)}
+
+YÊU CẦU:
+1. Đánh giá tổng quan hiện trạng sức khỏe.
+2. Phân tích xu hướng các chỉ số xét nghiệm quan trọng.
+3. Lời khuyên cụ thể về dinh dưỡng, vận động và lịch tái khám.
+Trình bày bằng tiếng Việt rõ ràng, ân cần.`;
+
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          summary: { type: Type.STRING }
+        }
+      };
 
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'analysis',
         contents: [{ text: prompt }],
+        responseSchema,
       });
 
-      res.json({ success: true, summary: text, modelUsed });
+      const parsed = parseJsonSafely(text) as { summary?: string };
+      res.json({ success: true, summary: parsed.summary || text, modelUsed });
     } catch (error) {
       console.error('[Gemini Server Summary Error]:', error);
       res.status(500).json({
@@ -835,84 +947,162 @@ Trình bày bằng tiếng Việt rõ ràng, ân cần, chia theo các mục ti�
     }
   });
 
+function pruneProfileForAnalysis(member: any, profile: any) {
+  const memberName = member?.name || profile?.member?.name || 'Thành viên';
+  const gender = member?.gender || profile?.member?.gender || 'N/A';
+  const birthDate = member?.birthDate || profile?.member?.birthDate || 'N/A';
+  const medicalHistory = profile?.medicalHistory || { surgeries: [], chronicConditions: [] };
+
+  const timeline = Array.isArray(profile?.timeline) ? profile.timeline : [];
+  // Keep last 15 events max for better historical context
+  const relevantEvents = timeline.slice(-15);
+  
+  const prunedEvents = relevantEvents.map((evt: any, index: number) => {
+    // Aggressive Pruning: 
+    // For older events, only keep non-normal metrics or metrics with specific keys we want to track (like AST, ALT, Uric Acid)
+    const isRecent = index >= (relevantEvents.length - 6);
+    const criticalKeys = ['AST', 'ALT', 'GLUCOSE', 'HBA1C', 'ACID_URIC', 'CREATININ', 'EGFR', 'TSH', 'PRO', 'CHOLESTEROL', 'LDL_C'];
+    
+    const metrics = Array.isArray(evt.metrics)
+      ? evt.metrics
+          .filter((m: any) => {
+            const status = String(m.status || '').toLowerCase();
+            const key = String(m.standardKey || m.name || '').toUpperCase();
+            return isRecent || status !== 'normal' || criticalKeys.some(ck => key.includes(ck));
+          })
+          .map((m: any) => ({
+            key: m.standardKey || m.name,
+            val: m.value,
+            unit: m.unit,
+            st: m.status,
+          }))
+      : [];
+
+    const imagingResults = Array.isArray(evt.imagingResults)
+      ? evt.imagingResults.map((img: any) => ({
+          mod: img.modality,
+          con: img.conclusion || img.findings,
+        }))
+      : [];
+
+    return {
+      d: evt.date,
+      t: evt.title,
+      type: evt.type,
+      diag: evt.diagnoses || [],
+      metrics: metrics.slice(0, 50),
+      img: imagingResults,
+      phys: evt.physicalExam ? { bp: evt.physicalExam.bp_mmHg, bmi: evt.physicalExam.bmi } : undefined,
+    };
+  });
+
+  return {
+    p: { n: memberName, g: gender, b: birthDate },
+    h: medicalHistory,
+    tm: prunedEvents,
+  };
+}
+
   // 4. Phân tích chuyên sâu 4 lớp y khoa & Động học y sinh (AI Deep-Dive Engine)
   app.post('/api/gemini/analyze-comprehensive', async (req: Request, res: Response) => {
     try {
       const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
+      const pruned = pruneProfileForAnalysis(member, profile);
+      digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu cho ${memberName}`, { eventCount: profile?.timeline?.length });
+      const prompt = `Bạn là Hội đồng Chuyên gia Y khoa Gia đình & AI Deep-Dive cấp cao.
+Nhiệm vụ: Phân tích 4 lớp y khoa chuyên sâu cho thành viên ${memberName}.
 
-      const prompt = `Bạn là Hội đồng Chuyên gia Y khoa Gia đình & Động học Y sinh Cao cấp.
-Hãy thực hiện Thuật toán Phân tích Y khoa 4 Lớp chuyên sâu cho thành viên ${memberName}:
+DỮ LIỆU HỒ SƠ ĐÃ TỐI ƯU (Pruned Matrix):
+${JSON.stringify(pruned, null, 2)}
+(Chú thích: p=patient, n=name, g=gender, b=birthDate, h=history, tm=timeline, d=date, t=title, diag=diagnoses, img=imaging, phys=physicalExam, bp=bloodPressure, st=status, val=value)
 
-DỮ LIỆU ĐẦU VÀO:
-- Họ tên, năm sinh, giới tính: ${memberName} (${member?.gender || 'N/A'}, sinh ${member?.birthDate || 'N/A'})
-- Tiền sử bệnh lý nền & Phẫu thuật: ${JSON.stringify(profile?.medicalHistory || { surgeries: [], chronicConditions: [] }, null, 2)}
-- Chuỗi ma trận lịch sử khám & xét nghiệm (Timeline Matrix):
-${JSON.stringify((profile?.timeline || []).slice(-15), null, 2)}
+YÊU CẦU PHÂN TÍCH (BẮT BUỘC):
+1. LỚP 1 - Tương quan chéo (crossCorrelations): Đối chiếu chéo giữa các chỉ số xét nghiệm và chẩn đoán hình ảnh (VD: Acid Uric + Thận; Men gan + Siêu âm bụng).
+2. LỚP 2 - Biến động lịch sử (velocityTrends): So sánh xu hướng và tốc độ thay đổi của các chỉ số quan trọng qua thời gian.
+3. LỚP 3 - Giám sát mạn tính (chronicSurveillance): Theo dõi các nốt, polyp, bệnh mạn tính và tình trạng phục hồi sau phẫu thuật.
+4. LỚP 4 - Lộ trình hành động (roadmap): Đưa ra Cảnh báo đỏ, Khám chuyên khoa cần thiết, và Lịch kiểm tra 3-6-12 tháng.
 
-BẮT BUỘC THỰC HIỆN 4 LỚP PHÂN TÍCH Y KHOA:
+LƯU Ý: Dữ liệu đã được nén tối đa. Nếu không thấy chỉ số trong sự kiện cũ, nghĩa là nó bình thường. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
 
-LỚP 1: Phân tích Tương quan Chỉ số (Cross-Parameter Correlation)
-- Bắt buộc đối chiếu chéo các nhóm chỉ số có quan hệ nhân quả y học (VD: Acid Uric cao + Đạm niệu trong nước tiểu => nguy cơ tổn thương lọc thận; Glucose/HbA1c + Triglycerid/LDL-C + Huyết áp => Hội chứng chuyển hóa & xơ vữa; Men gan AST/ALT/GGT + BMI => Tổn thương tế bào gan do nhiễm mỡ).
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          analyzedAt: { type: Type.STRING },
+          healthScore: { type: Type.NUMBER },
+          overallAssessment: { type: Type.STRING },
+          crossCorrelations: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                parameters: { type: Type.ARRAY, items: { type: Type.STRING } },
+                findings: { type: Type.STRING },
+                severity: { type: Type.STRING, enum: ['critical', 'warning', 'info'] }
+              }
+            }
+          },
+          velocityTrends: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                metricName: { type: Type.STRING },
+                trendDirection: { type: Type.STRING, enum: ['increasing', 'decreasing', 'stable', 'fluctuating'] },
+                velocityDescription: { type: Type.STRING },
+                riskProjection: { type: Type.STRING }
+              }
+            }
+          },
+          chronicSurveillance: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                conditionName: { type: Type.STRING },
+                status: { type: Type.STRING, enum: ['stable_benign', 'monitored', 'progressing', 'resolved'] },
+                comparisonOverTime: { type: Type.STRING },
+                recommendation: { type: Type.STRING }
+              }
+            }
+          },
+          roadmap: {
+            type: Type.OBJECT,
+            properties: {
+              criticalAlerts: { type: Type.ARRAY, items: { type: Type.STRING } },
+              specialistReferrals: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    specialty: { type: Type.STRING },
+                    reason: { type: Type.STRING }
+                  }
+                }
+              },
+              timeBoundPlan: {
+                type: Type.OBJECT,
+                properties: {
+                  next3Months: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  next6Months: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  next12Months: { type: Type.ARRAY, items: { type: Type.STRING } }
+                }
+              }
+            }
+          }
+        }
+      };
 
-LỚP 2: Đánh giá Vận tốc Biến động Lịch sử (Velocity & Trend Tracking)
-- So sánh sự thay đổi các chỉ số cốt lõi qua các mốc thời gian (2024 -> 2025 -> 2026...).
-- Tính toán biên độ dao động và xu hướng tăng/giảm (%) để cảnh báo nguy cơ trước khi chỉ số vượt ngưỡng bệnh lý lâm sàng.
-
-LỚP 3: Giám sát Tiến triển Bệnh lý Mạn tính (Chronic Disease Surveillance)
-- Theo dõi sát sao các bệnh lý đã ghi nhận trong tiền sử (như cấu trúc thùy tuyến giáp sau phẫu thuật, phân độ TI-RADS 1/2/3, kích thước polyp túi mật, mảng xơ vữa...).
-- Ghi nhận sự ổn định lành tính qua các năm để người bệnh an tâm, đồng thời duy trì lịch nhắc kiểm tra định kỳ.
-
-LỚP 4: Lập Phác đồ Hành động Cá nhân hóa (Actionable Health Roadmap)
-- Tầng 1: Cảnh báo đỏ cấp thiết (criticalAlerts).
-- Tầng 2: Khuyến nghị chuyên khoa (chỉ định rõ khám Nội tiết, Nội thận - Xương khớp, Nội tim mạch...).
-- Tầng 3: Lộ trình mốc thời gian (3 tháng, 6 tháng, 12 tháng về dinh dưỡng, lối sống và lịch tái khám).
-
-Trả về DUY NHẤT một JSON chuẩn:
-{
-  "analyzedAt": "${new Date().toISOString()}",
-  "healthScore": 85,
-  "overallAssessment": "Đánh giá tổng quan sức khỏe...",
-  "crossCorrelations": [
-    {
-      "parameters": ["Acid Uric", "Đạm niệu"],
-      "findings": "Acid Uric tăng kết hợp đạm niệu dương tính cảnh báo nguy cơ ảnh hưởng chức năng lọc của thận.",
-      "severity": "critical"
-    }
-  ],
-  "velocityTrends": [
-    {
-      "metricName": "Acid Uric",
-      "trendDirection": "increasing",
-      "velocityDescription": "Tăng 18% từ năm 2024 (380) đến 2026 (450 µmol/L)",
-      "riskProjection": "Dự báo nguy cơ tiến triển gút và tổn thương cầu thận trước khi vượt ngưỡng."
-    }
-  ],
-  "chronicSurveillance": [
-    {
-      "conditionName": "Phình giáp hạt TI-RADS 1 / Polyp túi mật",
-      "status": "stable_benign",
-      "comparisonOverTime": "Kích thước 3mm duy trì ổn định qua 3 năm (2024-2026), hình ảnh lành tính.",
-      "recommendation": "Tiếp tục siêu âm định kỳ mỗi 12 tháng, không cần lo lắng."
-    }
-  ],
-  "roadmap": {
-    "criticalAlerts": ["Cảnh báo đỏ 1"],
-    "specialistReferrals": [
-      { "specialty": "Nội thận - Xương khớp", "reason": "Tầm soát ảnh hưởng Acid Uric lên thận" }
-    ],
-    "timeBoundPlan": {
-      "next3Months": ["Điều chỉnh chế độ ăn giảm đạm purin..."],
-      "next6Months": ["Xét nghiệm lại Acid Uric & Creatinin..."],
-      "next12Months": ["Siêu âm kiểm tra tuyến giáp & túi mật định kỳ..."]
-    }
-  }
-}`;
+      const requestedModel = typeof req.body.model === 'string' && TASK_MODELS.analysis.includes(req.body.model as any)
+        ? req.body.model
+        : TASK_MODELS.analysis[0];
 
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'analysis',
         contents: [{ text: prompt }],
         responseMimeType: 'application/json',
+        responseSchema,
+        preferredModel: requestedModel,
       });
 
       const parsed = parseJsonSafely(text) as Record<string, unknown>;
@@ -1072,15 +1262,15 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
         let streamed = false;
         let lastError: Error | null = null;
         try {
-          for (const model of TASK_MODELS.analysis) {
+          for (const model of TASK_MODELS.assistant) {
             const attemptedProjectIds = new Set<string>();
             while (attemptedProjectIds.size < projects.length && !controller.signal.aborted) {
               let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
               try {
                 lease = await scheduler.acquire(
-                  'analysis',
+                  'assistant',
                   model,
-                  getTaskQuota('analysis'),
+                  getTaskQuota('assistant'),
                   attemptedProjectIds,
                   2_000,
                 );
@@ -1154,7 +1344,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
 
       // Non-streaming response
       const { text, modelUsed } = await executeGeminiWithFailover({
-        task: 'analysis',
+        task: 'assistant',
         contents: [{ text: prompt }],
       });
 

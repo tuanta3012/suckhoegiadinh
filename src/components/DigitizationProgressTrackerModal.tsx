@@ -210,7 +210,10 @@ export function DigitizationProgressTrackerModal({
 
           {/* Sequential Multi-Page Page Badges for PDFs */}
           {(() => {
-            const pageMatch = progressMessage.match(/trang\s*(\d+)\/(\d+)/i);
+            const pageMatch =
+              progressMessage.match(/(?:xử lý|đã xong|trang)?\s*(\d+)\/(\d+)\s*trang/i) ||
+              progressMessage.match(/trang\s*(\d+)\/(\d+)/i) ||
+              progressMessage.match(/(\d+)\/(\d+)/);
             const curPage = pageMatch ? parseInt(pageMatch[1], 10) : (step === 'completed' ? (isPdf ? 1 : 1) : 0);
             const totPages = pageMatch ? parseInt(pageMatch[2], 10) : 0;
             

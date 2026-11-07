@@ -12,10 +12,10 @@ import type {
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './googleDriveService';
 
-const GEMINI_REQUEST_TIMEOUT_MS = 180_000;
-const OCR_REQUEST_TIMEOUT_MS = 300_000;
-const OCR_IDLE_TIMEOUT_MS = 120_000;
-const ASSISTANT_REQUEST_TIMEOUT_MS = 115_000;
+const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
+const OCR_REQUEST_TIMEOUT_MS = 600_000;
+const OCR_IDLE_TIMEOUT_MS = 240_000;
+const ASSISTANT_REQUEST_TIMEOUT_MS = 120_000;
 
 const EVENT_TYPES = new Set<HealthEvent['type']>([
   'medical_report',
@@ -40,6 +40,8 @@ export interface ExtractionProgressUpdate {
   modelUsed?: string;
   partialEvent?: Partial<HealthEvent>;
   rawChunk?: string;
+  totalPages?: number;
+  processedPages?: number;
 }
 
 async function getAuthenticatedUserToken(): Promise<string> {
@@ -100,7 +102,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 1: SỐ HÓA, OCR, NHẬN DẠNG TÀI LIỆU, HIỆU CHỈNH & SẮP XẾP DỮ LIỆU
-// Sử dụng Server-Side Gemini API: gemini-3.5-flash-lite => gemini-3.1-flash-lite
+// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.5-flash-lite (Không rớt model)
 // ============================================================================
 
 /**
@@ -225,7 +227,7 @@ export async function extractHealthEventWithProgress(
   file: File,
   member: FamilyMember,
   onProgress?: (update: ExtractionProgressUpdate) => void
-): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string }> {
+): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
   onProgress?.({
     stage: 'preparing',
     progressPercent: 25,
@@ -288,6 +290,8 @@ export async function extractHealthEventWithProgress(
     let buffer = '';
     let activeModel = 'gemini-3.5-flash-lite';
     let finalExtracted: Record<string, unknown> | null = null;
+    let docTotalPages: number | undefined;
+    let docProcessedPages: number | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -310,6 +314,8 @@ export async function extractHealthEventWithProgress(
           extracted?: Record<string, unknown>;
           modelUsed?: string;
           progressPercent?: number;
+          totalPages?: number;
+          processedPages?: number;
         };
         try {
           data = JSON.parse(payload) as typeof data;
@@ -318,6 +324,9 @@ export async function extractHealthEventWithProgress(
         }
 
         if (data.modelUsed) activeModel = data.modelUsed;
+        if (typeof data.totalPages === 'number') docTotalPages = data.totalPages;
+        if (typeof data.processedPages === 'number') docProcessedPages = data.processedPages;
+
         if (data.type === 'error') throw new Error(data.error || 'Máy chủ OCR không thể xử lý tài liệu.');
         if (data.type === 'progress') {
           const isRetry = data.message?.includes('phương án dự phòng') || data.message?.includes('Đang thử mô hình');
@@ -327,6 +336,8 @@ export async function extractHealthEventWithProgress(
             message: data.message || 'Đang chờ mô hình đọc tài liệu...',
             modelUsed: activeModel,
             partialEvent: data.extracted ? normalizeExtractedEvent(data.extracted) : undefined,
+            totalPages: docTotalPages,
+            processedPages: docProcessedPages,
           });
         } else if (data.type === 'chunk' && data.text) {
           accumulated += data.text;
@@ -338,9 +349,13 @@ export async function extractHealthEventWithProgress(
             modelUsed: activeModel,
             partialEvent: partial,
             rawChunk: data.text,
+            totalPages: docTotalPages,
+            processedPages: docProcessedPages,
           });
         } else if (data.type === 'complete' && data.extracted) {
           finalExtracted = data.extracted;
+          if (typeof data.totalPages === 'number') docTotalPages = data.totalPages;
+          if (typeof data.processedPages === 'number') docProcessedPages = data.processedPages;
         }
       }
     }
@@ -368,6 +383,8 @@ export async function extractHealthEventWithProgress(
       message: 'Đang đối chiếu người bệnh với thành viên gia đình...',
       modelUsed: activeModel,
       partialEvent: normalized,
+      totalPages: docTotalPages,
+      processedPages: docProcessedPages,
     });
     onProgress?.({
       stage: 'completed',
@@ -375,14 +392,21 @@ export async function extractHealthEventWithProgress(
       message: 'Hoàn tất số hóa tài liệu y tế!',
       modelUsed: activeModel,
       partialEvent: normalized,
+      totalPages: docTotalPages,
+      processedPages: docProcessedPages,
     });
-    return { extracted: normalized, modelUsed: activeModel };
+    return {
+      extracted: normalized,
+      modelUsed: activeModel,
+      totalPages: docTotalPages,
+      processedPages: docProcessedPages || docTotalPages,
+    };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(
         abortReason === 'idle'
-          ? 'Không nhận được tiến độ OCR trong 90 giây. Tệp vẫn được lưu trên Google Drive; hãy kiểm tra kết nối hoặc nhập thủ công.'
-          : 'OCR đã chờ quá 5 phút. Tệp vẫn được lưu trên Google Drive; hãy thử lại hoặc nhập thủ công.',
+          ? 'Không nhận được dữ liệu phản hồi từ AI trong 4 phút. Hãy kiểm tra kết nối mạng hoặc thử lại.'
+          : 'Quá thời gian OCR tối đa (10 phút). Tệp vẫn được lưu an toàn trên Google Drive; bạn có thể bấm "Chạy lại OCR" hoặc nhập thủ công.',
       );
     }
     throw error;
@@ -434,8 +458,8 @@ export async function refineAndOrganizeMemberData(
 }
 
 // ============================================================================
-// NHÓM NHIỆM VỤ 2: PHÂN TÍCH, ĐÁNH GIÁ TOÀN DIỆN HỒ SƠ Y TẾ & TƯ VẤN LỜI KHUYÊN
-// Sử dụng Server-Side Gemini API: gemini-3.8-flash => gemini-3.6-flash => gemini-3-flash
+// NHÓM NHIỆM VỤ 2: PHÂN TÍCH, ĐÁNH GIÁ TOÀN DIỆN HỒ SƠ Y TẾ & TƯ VẤN LỜI KHUYÊN (DEEP INSIGHT)
+// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.8-flash (Phân tích 4 lớp y khoa)
 // ============================================================================
 
 /**
@@ -544,7 +568,8 @@ export async function streamHealthAssistant(
  */
 export async function analyzeComprehensiveHealth(
   member: FamilyMember,
-  profile: HealthProfile
+  profile: HealthProfile,
+  model?: string
 ): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock }> {
   const data = await callServerGemini<{
     success: boolean;
@@ -553,6 +578,7 @@ export async function analyzeComprehensiveHealth(
   }>('analyze-comprehensive', {
     member,
     profile,
+    model,
   });
 
   const result = data.result;
@@ -595,6 +621,23 @@ export async function analyzeComprehensiveHealth(
     result,
     aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
   };
+}
+
+/**
+ * Tải log hệ thống từ server (bao gồm các bước xoay vòng key, retry OCR)
+ */
+export async function fetchServerLogs(): Promise<any[]> {
+  const token = await getAuthenticatedUserToken();
+  const response = await fetch('/api/gemini/digitization-logs', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Không thể tải log từ server (Mã lỗi: ${response.status}).`);
+  }
+  const data = await response.json();
+  return Array.isArray(data.logs) ? data.logs : [];
 }
 
 // ============================================================================

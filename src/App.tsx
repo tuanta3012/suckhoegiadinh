@@ -66,11 +66,17 @@ export default function App() {
       .catch((error: unknown) => {
         console.warn('Phiên Google Drive:', error);
       });
+    const handleDriveExpired = () => {
+      setDriveAuthorized(false);
+      showToast('Phiên Google Drive đã hết hạn. Hãy bấm "Cấp quyền Drive" để tiếp tục.', 'error');
+    };
+    window.addEventListener('google-drive-auth-expired', handleDriveExpired);
     return () => {
       cancelled = true;
       unsubscribe?.();
+      window.removeEventListener('google-drive-auth-expired', handleDriveExpired);
     };
-  }, []);
+  }, [showToast]);
 
   const connectGoogle = useCallback(async () => {
     try {

@@ -5,6 +5,8 @@ export interface OcrRecoveryJob {
   status: OcrRecoveryStatus;
   progressPercent: number;
   updatedAt: number;
+  totalPages?: number;
+  processedPages?: number;
 }
 
 const STORAGE_KEY_PREFIX = 'health_ocr_recovery_v1_';

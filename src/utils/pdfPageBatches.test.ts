@@ -9,6 +9,7 @@ describe('splitPdfIntoBatches', () => {
 
     const batches = await splitPdfIntoBatches(
       Buffer.from(await source.save()).toString('base64'),
+      3,
     );
 
     expect(batches.map(({ firstPage, lastPage }) => [firstPage, lastPage])).toEqual([

@@ -15,25 +15,58 @@ export interface FamilyMember {
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+export interface PhysicalExam {
+  height_cm?: number;
+  weight_kg?: number;
+  bmi?: number;
+  bp_mmHg?: string;
+  pulse_bpm?: number;
+  classification?: string;
+}
+
 export interface HealthMetric {
   name: string;
   standardKey?: string;
-  value: number;
+  value: number | string;
   unit: string;
+  refRange?: string;
   status?: 'normal' | 'optimal' | 'warning_high' | 'warning_low' | 'critical_high' | 'critical_low' | string;
 }
 
 export interface Medication {
   name: string;
   dosage?: string;
+  quantity?: string;
   frequency?: string;
+  timing?: string;
   duration?: string;
+  instructions?: string;
 }
 
 export interface ImagingResult {
   modality: string;
   findings: string;
   conclusion: string;
+}
+
+export interface VaccinationRecord {
+  vaccineName: string;
+  targetDisease?: string;
+  doseNumber?: string | number;
+  lotNumber?: string;
+  manufacturer?: string;
+  injectionSite?: string;
+  administeredDate: string;
+  nextDoseDate?: string | null;
+  reactionNotes?: string;
+}
+
+export interface HospitalizationRecord {
+  admissionDate?: string;
+  dischargeDate?: string;
+  department?: string;
+  treatmentSummary?: string;
+  surgicalNotes?: string;
 }
 
 export interface HealthEvent {
@@ -44,10 +77,15 @@ export interface HealthEvent {
   title: string;
   date: string;
   facility?: string;
+  doctorName?: string;
+  customCategory?: string;
+  physicalExam?: PhysicalExam;
   diagnoses: string[];
   medications: Medication[];
   metrics: HealthMetric[];
   imagingResults?: ImagingResult[];
+  vaccinations?: VaccinationRecord[];
+  hospitalization?: HospitalizationRecord;
   advice?: string;
   nextFollowUp?: string;
   notes?: string;
@@ -68,6 +106,8 @@ export interface HealthSource {
   rawDeletedAt?: string;
   fileSize?: number;
   fileHash?: string;
+  totalPages?: number;
+  processedPages?: number;
 }
 
 export interface HealthSummary {
