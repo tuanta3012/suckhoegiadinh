@@ -3,7 +3,10 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import firebaseConfig from './firebase-applet-config.json' assert { type: 'json' };
+import fs from 'fs';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const firebaseConfig = JSON.parse(fs.readFileSync(path.join(__dirname, './firebase-applet-config.json'), 'utf8'));
 import { parseGeminiApiKeys } from './src/utils/geminiApiKeys.ts';
 import {
   GeminiQuotaScheduler,
@@ -21,8 +24,6 @@ import { cleanExtractedJson, mergeExtractedBatches } from './src/utils/healthDoc
 import { digitizationLogger } from './src/utils/digitizationLogger.ts';
 import { parseRobustJson, sleep, prepareDataForDeepDive, sanitizeMetricName } from './src/utils/healthRecordService.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const isProd = process.env.NODE_ENV === 'production';
 
 function getPort(): number {
