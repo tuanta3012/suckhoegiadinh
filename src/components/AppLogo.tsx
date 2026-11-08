@@ -31,7 +31,7 @@ export const AppLogo: React.FC<AppLogoProps> = ({
         className={`relative overflow-hidden shrink-0 shadow-sm border border-emerald-500/30 bg-slate-900 flex items-center justify-center ${sizeMap[size]}`}
       >
         <img
-          src="/src/assets/images/app_health_logo_1793877965288.jpg"
+          src="/src/assets/images/app_health_logo_clean_1794134407055.jpg"
           alt="Logo Sức Khỏe Gia Đình"
           className="w-full h-full object-cover"
           onError={(e) => {

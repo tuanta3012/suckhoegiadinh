@@ -3,7 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import firebaseConfig from './firebase-applet-config.json';
+import firebaseConfig from './firebase-applet-config.json' assert { type: 'json' };
 import { parseGeminiApiKeys } from './src/utils/geminiApiKeys.ts';
 import {
   GeminiQuotaScheduler,
