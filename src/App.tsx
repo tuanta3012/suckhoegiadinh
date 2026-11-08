@@ -110,9 +110,19 @@ export default function App() {
   return (
     <HealthDashboard
       userEmail={currentUser?.email || auth.currentUser?.email || null}
+      userName={currentUser?.name || auth.currentUser?.displayName || null}
       appVersion={RELEASE_APP_VERSION}
       driveAuthorized={driveAuthorized}
-      onConnectDrive={() => void connectGoogle()}
+      onConnectDrive={async () => {
+        try {
+          await connectGoogle();
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!msg.includes('auth/popup-closed-by-user') && !msg.includes('popup_closed_by_user')) {
+            showToast(msg, 'error');
+          }
+        }
+      }}
       onLogout={() => void logOut()}
       showToast={showToast}
     />

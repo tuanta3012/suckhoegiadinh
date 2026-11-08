@@ -45,6 +45,7 @@ import {
   User,
   UserPlus,
   Users,
+  ChevronRight,
   X,
 } from 'lucide-react';
 import { CameraResultType, CameraSource } from '@capacitor/camera';
@@ -71,6 +72,7 @@ import {
   cleanupExpiredRawFiles,
   createHealthWorkspace,
   deleteDriveFamilyMember,
+  deleteHealthWorkspaceFolder,
   downloadDriveFile,
   factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
@@ -149,6 +151,7 @@ export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
 interface HealthDashboardProps {
   userEmail: string | null;
+  userName?: string | null;
   appVersion: string;
   driveAuthorized: boolean;
   onConnectDrive: () => void;
@@ -174,7 +177,7 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const UPDATE_SERVER_URL =
   'https://raw.githubusercontent.com/tuanta3012/suckhoegiadinh/refs/heads/main/version.json';
 
-function createDefaultLocalWorkspace(adminEmail: string | null): HealthDriveWorkspace {
+function createDefaultLocalWorkspace(adminEmail: string | null, adminName?: string | null): HealthDriveWorkspace {
   return {
     rootFolderId: 'local_offline_workspace',
     familyFileId: 'local_family_file',
@@ -188,10 +191,10 @@ function createDefaultLocalWorkspace(adminEmail: string | null): HealthDriveWork
       members: [
         {
           id: 'member_local_1',
-          name: 'Tôi',
+          name: adminName || 'Tôi',
           driveFolderId: 'raw_local_1',
           profileFileId: 'profile_local_1',
-          role: 'other',
+          role: 'admin',
         },
       ],
     },
@@ -202,12 +205,12 @@ function offlineCacheKey(baseKey: string, userEmail: string | null): string {
   return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
 }
 
-function loadNativeOfflineState(userEmail: string | null): {
+function loadNativeOfflineState(userEmail: string | null, userName?: string | null): {
   workspace: HealthDriveWorkspace;
   profiles: Record<string, HealthProfile>;
 } {
   const fallback = {
-    workspace: createDefaultLocalWorkspace(userEmail),
+    workspace: createDefaultLocalWorkspace(userEmail, userName),
     profiles: {} as Record<string, HealthProfile>,
   };
   if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
@@ -291,13 +294,14 @@ const EVENT_TYPE_OPTIONS: Array<{
 
 export function HealthDashboard({
   userEmail,
+  userName,
   appVersion,
   driveAuthorized,
   onConnectDrive,
   onLogout,
   showToast,
 }: HealthDashboardProps) {
-  const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
+  const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail, userName));
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [rootIdInput, setRootIdInput] = useState('');
 
@@ -348,6 +352,11 @@ export function HealthDashboard({
     partialExtracted: {},
     error: null,
   });
+  const [showUploadMemberPicker, setShowUploadMemberPicker] = useState(false);
+  const [isCameraTriggerActive, setIsCameraTriggerActive] = useState(false);
+  const [isFileTriggerActive, setIsFileTriggerActive] = useState(false);
+  const [isQuickActionTriggerActive, setIsQuickActionTriggerActive] = useState(false);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState(false);
@@ -390,6 +399,7 @@ export function HealthDashboard({
   );
   const selectedMemberIdRef = useRef<string>(selectedMemberId);
   const uploadQueueRef = useRef<File[]>([]);
+  const pickedMemberIdForBatchRef = useRef<string | undefined>(undefined);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
   authIdentityRef.current = { userEmail, driveAuthorized };
   const previousSelectedMemberIdRef = useRef(selectedMemberId);
@@ -574,13 +584,14 @@ export function HealthDashboard({
         showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${prev.total} (${nextFile.name})...`, 'info');
         return { current: nextCurrent, total: prev.total };
       });
-      void beginDigitization(nextFile);
+      void beginDigitization(nextFile, { memberId: pickedMemberIdForBatchRef.current });
     } else {
       uploadQueueRef.current = [];
       if (queueStatus) {
         showToast(`Đã nhập dữ liệu xong toàn bộ ${queueStatus.total} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`, 'success');
       }
       setQueueStatus(null);
+      pickedMemberIdForBatchRef.current = undefined;
       // Tự động kích hoạt toàn bộ luồng chuẩn hóa & phân tích 4 lớp sau khi tất cả các tệp hoàn tất
       void runFamilyDoctorSummaryAfterQueue();
     }
@@ -621,7 +632,7 @@ export function HealthDashboard({
       } catch {
         // Fallthrough
       }
-      void handleCreateWorkspace();
+      showToast('Không tìm thấy thư mục "Suc khoe gia dinh" trên Drive của bạn. Hãy bấm "Tạo kho dữ liệu".', 'info');
       return;
     }
 
@@ -652,10 +663,14 @@ export function HealthDashboard({
     setIsLoading(true);
     try {
       if (workspace && userEmail && driveAuthorized && workspace.rootFolderId !== 'local_offline_workspace') {
+        if (!isWorkspaceAdmin) {
+          throw new Error('Chỉ Quản trị viên của Workspace mới có quyền xóa toàn bộ dữ liệu trên Drive.');
+        }
         try {
-          await factoryResetWorkspaceFolder(workspace, userEmail);
+          await deleteHealthWorkspaceFolder(workspace.rootFolderId);
         } catch (e) {
-          console.warn('Lỗi khi dọn dẹp thư mục Drive:', e);
+          console.warn('Lỗi khi xóa thư mục Drive:', e);
+          showToast('Không thể xóa thư mục trên Drive. Dữ liệu địa phương vẫn sẽ được đặt lại.', 'info');
         }
       }
       try {
@@ -668,8 +683,12 @@ export function HealthDashboard({
       localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, userEmail));
       localStorage.removeItem('health_offline_workspace_v2');
       localStorage.removeItem('health_offline_profiles_v2');
+      if (userEmail) {
+        localStorage.removeItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`);
+        localStorage.removeItem(PROFILE_ROOT_KEY);
+      }
 
-      const freshWs = createDefaultLocalWorkspace(userEmail);
+      const freshWs = createDefaultLocalWorkspace(userEmail, userName);
       const freshMember = freshWs.family.members[0];
       const freshProf = { [freshMember.id]: createHealthProfile(freshMember) };
 
@@ -906,6 +925,24 @@ export function HealthDashboard({
 
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // Personalize local member "Tôi" with actual name if available
+  useEffect(() => {
+    if (userName && workspace.rootFolderId === 'local_offline_workspace') {
+      const me = workspace.family.members.find((m) => m.id === 'member_local_1' && m.name === 'Tôi');
+      if (me) {
+        setWorkspace((prev) => ({
+          ...prev,
+          family: {
+            ...prev.family,
+            members: prev.family.members.map((m) =>
+              m.id === 'member_local_1' ? { ...m, name: userName } : m
+            ),
+          },
+        }));
+      }
+    }
+  }, [userName, workspace.rootFolderId, workspace.family.members]);
+
   const syncStatus = useMemo(() => {
     if (!driveAuthorized) return 'offline';
     if (isSyncing || isLoading || isUploading || isSummarizing) return 'syncing';
@@ -913,14 +950,22 @@ export function HealthDashboard({
   }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing]);
 
   // Auto-connect workspace on mount or Drive authorization change
+  const discoveryAttemptedRef = useRef(false);
+
+  // Auto-connect to Drive Workspace on login
   useEffect(() => {
     if (!driveAuthorized || !userEmail) return;
     const shouldRefreshCachedWorkspace = shouldRefreshCachedWorkspaceRef.current;
+    
+    // Skip if already connected (unless force refresh) or if we already tried discovery and failed
     if (
       workspace &&
       workspace.rootFolderId !== 'local_offline_workspace' &&
       !shouldRefreshCachedWorkspace
     ) return;
+    
+    if (!workspace && discoveryAttemptedRef.current && !shouldRefreshCachedWorkspace) return;
+
     shouldRefreshCachedWorkspaceRef.current = false;
 
     let cancelled = false;
@@ -974,8 +1019,15 @@ export function HealthDashboard({
           }
         }
 
+        if (discoveryAttemptedRef.current && !shouldRefreshCachedWorkspace) {
+          setIsSyncing(false);
+          return;
+        }
+
         // Tự động tìm kiếm thư mục Sức khỏe Gia đình đã có trên Drive của tài khoản
+        discoveryAttemptedRef.current = true;
         const discovered = await findExistingHealthWorkspace();
+        
         if (!cancelled && discovered) {
           localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, discovered.rootFolderId);
           setWorkspace(discovered);
@@ -986,6 +1038,8 @@ export function HealthDashboard({
             `Đã tự động kết nối thư mục "Suc khoe gia dinh" trên Google Drive (${discovered.family.members.length} thành viên, ${totalEvents} hồ sơ)!`,
             'success',
           );
+        } else if (!cancelled) {
+          // Silent end of discovery if nothing found
         }
       } catch (err) {
         console.warn('[Auto-Connect Error]:', err);
@@ -1045,13 +1099,29 @@ export function HealthDashboard({
     setIsLoading(true);
     setErrorMessage('');
     try {
-      const created = await createHealthWorkspace(userEmail || '');
+      let created = await createHealthWorkspace(userEmail || '', userName);
+      
+      // Nếu là Workspace mới hoàn toàn (chưa có thành viên), tự động tạo hồ sơ cho chính người dùng
+      if (created.family.members.length === 0) {
+        try {
+          created = await addDriveFamilyMember(created, {
+            id: `member_${crypto.randomUUID().slice(0, 8)}`,
+            name: userName || 'Tôi',
+            role: 'admin',
+            email: userEmail || undefined,
+          });
+        } catch (memberError) {
+          console.warn('Không thể tự động tạo hồ sơ cá nhân:', memberError);
+        }
+      }
+
       localStorage.setItem(
         `${PROFILE_ROOT_KEY}_${userEmail?.trim().toLowerCase()}`,
         created.rootFolderId
       );
       setWorkspace(created);
       setRootIdInput(created.rootFolderId);
+      await reloadProfiles(created); // Tải hồ sơ vừa tạo
       showToast('Đã tạo thư mục Suc khoe gia dinh trên Google Drive!', 'success');
     } catch (error) {
       setErrorMessage(
@@ -1106,6 +1176,29 @@ export function HealthDashboard({
     }
   }
 
+  async function handleQuickAddMember(name: string): Promise<string> {
+    if (!workspace || !name.trim()) throw new Error('Cần nhập tên thành viên.');
+    setIsAddingMember(true);
+    try {
+      const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+      const next = await addDriveFamilyMember(workspace, {
+        id: memberId,
+        name: name.trim(),
+        role: 'other',
+      });
+      setWorkspace(next);
+      await reloadProfiles(next);
+      showToast(`Đã thêm thành viên ${name.trim()}.`, 'success');
+      return memberId;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Không thể thêm thành viên.';
+      showToast(msg, 'error');
+      throw error;
+    } finally {
+      setIsAddingMember(false);
+    }
+  }
+
   async function handleSaveMember(updates: EditableFamilyMember) {
     if (!workspace || !editingMember || !driveAuthorized || !isWorkspaceAdmin) return;
     const name = updates.name.trim();
@@ -1153,10 +1246,17 @@ export function HealthDashboard({
   }
 
   async function handleDeleteFamilyMember(member: FamilyMember) {
-    if (!workspace || !driveAuthorized) return;
+    if (!workspace) return;
+    if (!isWorkspaceAdmin) {
+      showToast('Chỉ Quản trị viên mới có quyền xóa thành viên.', 'error');
+      return;
+    }
+    const isSelf = member.email === userEmail;
     const confirmed = await confirm({
-      title: `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
-      message: `Thao tác này sẽ gỡ thành viên khỏi Workspace và xóa vĩnh viễn hồ sơ JSON cùng toàn bộ tài liệu trong thư mục Drive của họ. Không thể hoàn tác.`,
+      title: isSelf ? 'Xóa vĩnh viễn hồ sơ của chính bạn?' : `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
+      message: isSelf 
+        ? 'Bạn đang xóa hồ sơ của chính mình. Hành động này sẽ gỡ bạn khỏi Workspace và xóa vĩnh viễn hồ sơ cá nhân của bạn trên Drive. Bạn sẽ cần đăng nhập lại hoặc tạo workspace mới để tiếp tục sử dụng.'
+        : `Thao tác này sẽ gỡ thành viên khỏi Workspace và xóa vĩnh viễn hồ sơ JSON cùng toàn bộ tài liệu trong thư mục Drive của họ. Không thể hoàn tác.`,
       confirmLabel: 'Xóa vĩnh viễn',
     });
     if (!confirmed) return;
@@ -1218,7 +1318,7 @@ export function HealthDashboard({
     }
   }
 
-  async function beginDigitization(file: File, options?: { forceUpload?: boolean }) {
+  async function beginDigitization(file: File, options?: { forceUpload?: boolean; memberId?: string }) {
     if (!workspaceRef.current) {
       showToast('Hãy kết nối Google Drive trước khi tải tài liệu.', 'error');
       return;
@@ -1240,7 +1340,7 @@ export function HealthDashboard({
     // SỬ DỤNG REF để lấy danh sách thành viên mới nhất
     const currentWorkspace = workspaceRef.current;
     const currentMembers = currentWorkspace.family.members;
-    const targetMemberId = selectedMemberIdRef.current || selectedMemberId;
+    const targetMemberId = options?.memberId || selectedMemberIdRef.current || selectedMemberId;
     let effectiveMember = currentMembers.find(m => m.id === targetMemberId) || currentMembers[0];
     
     if (!effectiveMember) {
@@ -1847,24 +1947,59 @@ export function HealthDashboard({
     }
   }
 
-  async function handleCameraCapture() {
+  function handleFileUploadTrigger() {
+    if (pickedMemberIdForBatchRef.current !== undefined) {
+      fileInputRef.current?.click();
+      return;
+    }
+    setIsFileTriggerActive(true);
+    setIsCameraTriggerActive(false);
+    setIsQuickActionTriggerActive(false);
+    setShowUploadMemberPicker(true);
+  }
+
+  function handleQuickActionTrigger() {
+    setIsQuickActionTriggerActive(true);
+    setIsFileTriggerActive(false);
+    setIsCameraTriggerActive(false);
+    setShowUploadMemberPicker(true);
+  }
+
+  async function handleCameraCapture(isAutoRetry = false) {
+    if (!isAutoRetry && pickedMemberIdForBatchRef.current === undefined) {
+      setIsCameraTriggerActive(true);
+      setShowUploadMemberPicker(true);
+      return;
+    }
+
     try {
       const photo = await CapacitorCamera.getPhoto({
         quality: 85,
         resultType: CameraResultType.Uri,
         source: CameraSource.Camera,
       });
-      if (!photo.webPath) throw new Error('Camera không trả về ảnh.');
+      if (!photo.webPath) return;
+
       const response = await fetch(photo.webPath);
       if (!response.ok) throw new Error('Không đọc được ảnh chụp từ camera.');
       const blob = await response.blob();
       const file = new File(
         [blob],
-        `kham-benh-${new Date().toISOString().slice(0, 10)}.${photo.format || 'jpg'}`,
+        `kham-benh-${new Date().toISOString().slice(0, 10)}-${Date.now().toString().slice(-4)}.${photo.format || 'jpg'}`,
         { type: blob.type || 'image/jpeg' }
       );
-      await beginDigitization(file);
+      
+      // Process immediately since we have the member
+      void beginDigitization(file, { memberId: pickedMemberIdForBatchRef.current });
+      
+      // Automatic loop for batch capture
+      setTimeout(() => {
+        void handleCameraCapture(true);
+      }, 500);
     } catch (error) {
+      // User cancelled or error - stop loop
+      setIsCameraTriggerActive(false);
+      pickedMemberIdForBatchRef.current = undefined;
       if (error instanceof Error && !/cancel|cancelled|canceled/i.test(error.message)) {
         showToast(error.message, 'error');
       }
@@ -2409,15 +2544,23 @@ export function HealthDashboard({
                     type="button"
                     onClick={() => {
                       setShowSettingsDropdown(false);
-                      void handleManualSync();
+                      if (workspace.rootFolderId === 'local_offline_workspace') {
+                        void handleCreateWorkspace();
+                      } else {
+                        void handleManualSync();
+                      }
                     }}
                     className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors text-left text-xs font-semibold"
                   >
                     <FolderSync className="w-4 h-4 text-emerald-600 shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="font-bold text-slate-800">Đồng bộ dữ liệu</div>
+                      <div className="font-bold text-slate-800">
+                        {workspace.rootFolderId === 'local_offline_workspace' ? 'Tạo kho dữ liệu' : 'Đồng bộ dữ liệu'}
+                      </div>
                       <div className="text-[10px] text-slate-400 font-normal truncate">
-                        {driveAuthorized ? 'Đồng bộ 2 chiều với Drive' : 'Chưa kết nối Drive (Bấm để đăng nhập)'}
+                        {driveAuthorized 
+                          ? (workspace.rootFolderId === 'local_offline_workspace' ? 'Khởi tạo thư mục trên Drive' : 'Đồng bộ 2 chiều với Drive')
+                          : 'Chưa kết nối Drive (Bấm để đăng nhập)'}
                       </div>
                     </div>
                   </button>
@@ -2425,14 +2568,20 @@ export function HealthDashboard({
                   {/* 2. Xóa dữ liệu */}
                   <button
                     type="button"
+                    disabled={!isWorkspaceAdmin && workspace.rootFolderId !== 'local_offline_workspace'}
                     onClick={() => {
                       setShowSettingsDropdown(false);
                       void handleFactoryReset();
                     }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors text-left text-xs font-semibold"
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors text-left text-xs font-semibold disabled:opacity-40 disabled:hover:bg-transparent"
                   >
                     <Trash2 className="w-4 h-4 text-rose-600 shrink-0" />
-                    <span>Xóa dữ liệu</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold">Xóa dữ liệu</div>
+                      {!isWorkspaceAdmin && workspace.rootFolderId !== 'local_offline_workspace' && (
+                        <div className="text-[10px] text-rose-400 font-normal">Chỉ dành cho Quản trị viên</div>
+                      )}
+                    </div>
                   </button>
 
                   {/* 3. Đăng nhập / Đăng xuất */}
@@ -2727,11 +2876,11 @@ export function HealthDashboard({
 
                       <button
                         type="button"
-                        onClick={() => fileInputRef.current?.click()}
+                        onClick={handleFileUploadTrigger}
                         className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100 hover:border-emerald-300 hover:bg-emerald-50/50 transition-all text-left group"
                       >
                         <span className="w-5 h-5 rounded-lg bg-emerald-600 text-white font-extrabold text-[10px] flex items-center justify-center mb-1">2</span>
-                        <h4 className="font-bold text-[11px] text-slate-900 group-hover:text-emerald-700 leading-tight">2. Số hóa</h4>
+                        <h4 className="font-bold text-[11px] text-slate-900 group-hover:text-emerald-700 leading-tight">2. Tải tài liệu</h4>
                         <p className="text-[10px] text-slate-500 mt-0.5 truncate">Tải ảnh/PDF</p>
                       </button>
 
@@ -2746,11 +2895,11 @@ export function HealthDashboard({
                     <div className="flex flex-col sm:flex-row gap-2">
                       <button
                         type="button"
-                        onClick={() => fileInputRef.current?.click()}
+                        onClick={handleFileUploadTrigger}
                         className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all"
                       >
                         <FileUp className="w-4 h-4" />
-                        <span>Tải tệp số hóa ngay</span>
+                        <span>Số hóa tài liệu ngay</span>
                       </button>
                       {!driveAuthorized ? (
                         <button
@@ -2765,10 +2914,16 @@ export function HealthDashboard({
                         <button
                           type="button"
                           disabled={isSyncing}
-                          onClick={() => void handleManualSync()}
+                          onClick={() => {
+                            if (workspace.rootFolderId === 'local_offline_workspace') {
+                              void handleCreateWorkspace();
+                            } else {
+                              void handleManualSync();
+                            }
+                          }}
                           className="py-2.5 px-3 rounded-xl border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center gap-1 transition-all disabled:opacity-50"
                         >
-                          {isSyncing ? 'Đang tải Drive...' : 'Đồng bộ từ Drive'}
+                          {isSyncing ? 'Đang đồng bộ...' : (workspace.rootFolderId === 'local_offline_workspace' ? 'Tạo kho dữ liệu' : 'Đồng bộ dữ liệu')}
                         </button>
                       )}
                     </div>
@@ -2826,7 +2981,7 @@ export function HealthDashboard({
                   <div className="flex items-center justify-between mb-2.5">
                     <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
                       <Users className="w-4 h-4 text-emerald-600" />
-                      <span>Hồ sơ người thân</span>
+                      <span>Hồ sơ thành viên</span>
                     </h3>
                     <button
                       type="button"
@@ -2919,7 +3074,7 @@ export function HealthDashboard({
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={handleCameraCapture}
+                      onClick={() => void handleCameraCapture()}
                       disabled={!driveAuthorized || isUploading}
                       className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
                     >
@@ -3042,7 +3197,7 @@ export function HealthDashboard({
                       </p>
                       <button
                         type="button"
-                        onClick={handleCameraCapture}
+                        onClick={() => void handleCameraCapture()}
                         className="mt-4 px-4 py-2.5 rounded-xl bg-emerald-600 text-white font-bold text-xs"
                       >
                         Chụp tài liệu ngay
@@ -3453,7 +3608,7 @@ export function HealthDashboard({
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-6 shadow-xs">
                   <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 mb-4">
                     <Users className="w-5 h-5 text-emerald-600" />
-                    <span>Thành viên gia đình ({members.length})</span>
+                    <span>Hồ sơ thành viên ({members.length})</span>
                   </h3>
 
                   <div className="divide-y divide-slate-100">
@@ -3480,6 +3635,12 @@ export function HealthDashboard({
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <p className="font-bold text-slate-900 text-sm">{m.name}</p>
+                                {m.role === 'admin' && (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-black text-white bg-emerald-600 px-1.5 py-0.5 rounded shadow-sm uppercase tracking-tighter">
+                                    <ShieldCheck className="w-2.5 h-2.5" />
+                                    <span>Admin</span>
+                                  </span>
+                                )}
                                 {m.email && (
                                   <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200/60">
                                     <Mail className="w-3 h-3 text-emerald-600 shrink-0" />
@@ -3515,7 +3676,7 @@ export function HealthDashboard({
                                 <Pencil className="w-4 h-4" />
                               </button>
                             )}
-                            {driveAuthorized && isWorkspaceAdmin && (
+                            {isWorkspaceAdmin && (
                               <button
                                 type="button"
                                 disabled={isLoading}
@@ -3630,19 +3791,20 @@ export function HealthDashboard({
           onChange={(event) => {
             const files = Array.from(event.target.files || []);
             if (files.length === 0) return;
+            
             if (files.length === 1) {
               uploadQueueRef.current = [];
               setUploadQueue([]);
               setQueueStatus({ current: 1, total: 1 });
-              showToast(`Đang tự động xử lý tệp tài liệu y tế "${files[0].name}"...`, 'info');
-              void beginDigitization(files[0]);
+              showToast(`Đang xử lý tài liệu cho ${pickedMemberIdForBatchRef.current ? (members.find(m => m.id === pickedMemberIdForBatchRef.current)?.name || 'thành viên') : 'tự động nhận diện'}...`, 'info');
+              void beginDigitization(files[0], { memberId: pickedMemberIdForBatchRef.current });
             } else {
               const remaining = files.slice(1);
               uploadQueueRef.current = remaining;
               setUploadQueue(remaining);
               setQueueStatus({ current: 1, total: files.length });
-              showToast(`Đã chọn ${files.length} tệp. Đang xử lý tệp 1/${files.length} (${files[0].name})...`, 'info');
-              void beginDigitization(files[0]);
+              showToast(`Đã chọn ${files.length} tệp. Đang xử lý tệp 1/${files.length}...`, 'info');
+              void beginDigitization(files[0], { memberId: pickedMemberIdForBatchRef.current });
             }
             event.currentTarget.value = '';
           }}
@@ -3793,7 +3955,7 @@ export function HealthDashboard({
           <div className="flex items-center justify-center">
             <button
               type="button"
-              onClick={() => setShowQuickActionModal(true)}
+              onClick={handleQuickActionTrigger}
               className="w-12 h-12 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-lg shadow-emerald-600/30 active:scale-95 transition-transform"
               title="Thêm hồ sơ mới"
             >
@@ -3835,7 +3997,10 @@ export function HealthDashboard({
       {showQuickActionModal && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/50 backdrop-blur-xs p-3 animate-in fade-in duration-150"
-          onClick={() => setShowQuickActionModal(false)}
+          onClick={() => {
+            setShowQuickActionModal(false);
+            pickedMemberIdForBatchRef.current = undefined;
+          }}
         >
           <div
             className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl space-y-4 animate-in slide-in-from-bottom duration-200"
@@ -3873,7 +4038,7 @@ export function HealthDashboard({
                 type="button"
                 onClick={() => {
                   setShowQuickActionModal(false);
-                  fileInputRef.current?.click();
+                  handleFileUploadTrigger();
                 }}
                 className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 text-slate-900 font-bold text-xs transition-all text-left"
               >
@@ -4040,6 +4205,97 @@ export function HealthDashboard({
         onClose={() => setShowWorkspaceAuditModal(false)}
         onFactoryReset={handleFactoryReset}
         showToast={showToast}
+      />
+      <UploadMemberPickerModal
+        isOpen={showUploadMemberPicker}
+        members={workspace?.family.members || []}
+        onClose={() => {
+          setShowUploadMemberPicker(false);
+          setPendingUploadFiles([]);
+          setIsFileTriggerActive(false);
+          setIsCameraTriggerActive(false);
+          setIsQuickActionTriggerActive(false);
+          pickedMemberIdForBatchRef.current = undefined;
+        }}
+        onSelect={(memberId) => {
+          setShowUploadMemberPicker(false);
+          pickedMemberIdForBatchRef.current = memberId;
+          if (memberId) setSelectedMemberId(memberId);
+
+          if (isCameraTriggerActive) {
+            setIsCameraTriggerActive(false);
+            void handleCameraCapture(true);
+            return;
+          }
+
+          if (isFileTriggerActive) {
+            setIsFileTriggerActive(false);
+            fileInputRef.current?.click();
+            return;
+          }
+
+          if (isQuickActionTriggerActive) {
+            setIsQuickActionTriggerActive(false);
+            setShowQuickActionModal(true);
+            return;
+          }
+
+          const files = pendingUploadFiles;
+          setPendingUploadFiles([]);
+          if (files.length === 0) return;
+          
+          if (files.length === 1) {
+            uploadQueueRef.current = [];
+            setUploadQueue([]);
+            setQueueStatus({ current: 1, total: 1 });
+            showToast(`Đang xử lý tài liệu cho ${memberId ? (workspace?.family.members.find(m => m.id === memberId)?.name || 'thành viên') : 'tự động nhận diện'}...`, 'info');
+            void beginDigitization(files[0], { memberId });
+          } else {
+            const remaining = files.slice(1);
+            uploadQueueRef.current = remaining;
+            setUploadQueue(remaining);
+            setQueueStatus({ current: 1, total: files.length });
+            showToast(`Đã chọn ${files.length} tệp. Đang xử lý tệp 1/${files.length}...`, 'info');
+            void beginDigitization(files[0], { memberId });
+          }
+        }}
+        onAddNew={async (name) => {
+          try {
+            const newId = await handleQuickAddMember(name);
+            setShowUploadMemberPicker(false);
+            pickedMemberIdForBatchRef.current = newId;
+            setSelectedMemberId(newId);
+
+            if (isCameraTriggerActive) {
+              setIsCameraTriggerActive(false);
+              void handleCameraCapture(true);
+              return;
+            }
+
+            if (isFileTriggerActive) {
+              setIsFileTriggerActive(false);
+              fileInputRef.current?.click();
+              return;
+            }
+
+            if (isQuickActionTriggerActive) {
+              setIsQuickActionTriggerActive(false);
+              setShowQuickActionModal(true);
+              return;
+            }
+
+            const files = pendingUploadFiles;
+            setPendingUploadFiles([]);
+            if (files.length === 0) return;
+            
+            setQueueStatus({ current: 1, total: files.length });
+            uploadQueueRef.current = files.slice(1);
+            setUploadQueue(files.slice(1));
+            void beginDigitization(files[0], { memberId: newId });
+          } catch (e) {
+            // Error handled in handleQuickAddMember
+          }
+        }}
       />
       {editingMember && (
         <MemberEditModal
@@ -4534,4 +4790,135 @@ function stableSerialize(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value) ?? 'undefined';
+}
+function UploadMemberPickerModal({
+  isOpen,
+  members,
+  onClose,
+  onSelect,
+  onAddNew,
+}: {
+  isOpen: boolean;
+  members: FamilyMember[];
+  onClose: () => void;
+  onSelect: (memberId?: string) => void;
+  onAddNew: (name: string) => void;
+}) {
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newName, setNewName] = useState('');
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+        <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+          <div>
+            <h3 className="text-base font-black text-slate-900 tracking-tight">Chọn hồ sơ thao tác</h3>
+            <p className="text-[11px] text-slate-500 font-medium">Chọn hồ sơ để gán tài liệu y tế</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-400"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-2 max-h-[60vh] overflow-y-auto">
+          {/* Members List */}
+          <div className="grid grid-cols-1 gap-2">
+            {members.map((member) => (
+              <button
+                key={member.id}
+                onClick={() => onSelect(member.id)}
+                className="flex items-center gap-3 p-3 rounded-2xl border border-slate-100 bg-white hover:border-emerald-200 hover:bg-emerald-50 transition-all text-left group"
+              >
+                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold group-hover:scale-105 transition-transform">
+                  {member.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-slate-800 text-sm">{member.name}</div>
+                  <div className="text-[10px] text-slate-400 font-medium">
+                    {member.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all" />
+              </button>
+            ))}
+          </div>
+
+          <div className="pt-2 space-y-2 border-t border-slate-100 mt-2">
+            {/* Auto detect option */}
+            <button
+              onClick={() => onSelect(undefined)}
+              className="w-full flex items-center gap-3 p-3 rounded-2xl border border-dashed border-emerald-200 bg-emerald-50/30 hover:bg-emerald-50 text-emerald-700 transition-all text-left font-bold text-xs"
+            >
+              <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div className="flex-1">
+                <div>Bỏ qua (Tự động nhận diện)</div>
+                <div className="text-[9px] font-normal text-emerald-600/70">AI sẽ tự tìm chủ thể trong tài liệu</div>
+              </div>
+            </button>
+
+            {/* Add new member trigger */}
+            {!showAddForm ? (
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="w-full flex items-center gap-3 p-3 rounded-2xl border border-dashed border-slate-200 hover:border-emerald-300 hover:bg-slate-50 text-slate-600 hover:text-emerald-700 transition-all text-left font-bold text-xs"
+              >
+                <div className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center group-hover:text-emerald-600">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <span>Thêm hồ sơ thành viên mới</span>
+              </button>
+            ) : (
+              <div className="p-3 rounded-2xl border border-emerald-200 bg-emerald-50/30 animate-in slide-in-from-top-2 duration-200">
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    placeholder="Nhập tên thành viên..."
+                    className="flex-1 bg-white border border-emerald-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newName.trim()) onAddNew(newName);
+                    }}
+                  />
+                  <button
+                    disabled={!newName.trim()}
+                    onClick={() => onAddNew(newName)}
+                    className="bg-emerald-600 text-white px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50"
+                  >
+                    Thêm
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setNewName('');
+                    }}
+                    className="p-2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="p-4 bg-slate-50 flex justify-end border-t border-slate-100">
+          <button
+            onClick={onClose}
+            className="text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors"
+          >
+            Hủy bỏ
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -188,68 +188,63 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
   );
 }
 
-export async function searchDriveFoldersByName(folderName: string): Promise<DriveFile[]> {
-  try {
-    const params = new URLSearchParams({
-      q: `mimeType = '${FOLDER_MIME}' and name = '${folderName.replace(/'/g, "\\'")}' and trashed = false`,
-      fields: `nextPageToken,files(${FILE_FIELDS})`,
-      pageSize: '100',
-    });
-    const result = await driveRequest<{ files?: DriveFile[] }>(
-      `${DRIVE_API}/files?${params.toString()}`,
-    );
-    return result.files || [];
-  } catch (error) {
-    console.warn('[Google Drive Search] Global search failed, falling back to root list:', error);
-    return [];
-  }
-}
-
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
   const foldersToInspect: DriveFile[] = [];
 
-  // 1. Global Drive search for any folder matching WORKSPACE_FOLDER_NAME or LEGACY_WORKSPACE_FOLDER_NAMES
-  for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
-    const globalFound = await searchDriveFoldersByName(folderName);
-    for (const f of globalFound) {
+  // 1. Parallel search only at the root level of My Drive
+  const searchPromises = LEGACY_WORKSPACE_FOLDER_NAMES.map(async (name) => {
+    try {
+      return await listFiles('root', name, FOLDER_MIME);
+    } catch {
+      return [];
+    }
+  });
+
+  const searchResults = await Promise.all(searchPromises);
+  for (const list of searchResults) {
+    for (const f of list) {
       if (!foldersToInspect.some((existing) => existing.id === f.id)) {
         foldersToInspect.push(f);
       }
     }
   }
 
-  // 2. Direct root search as secondary guarantee
-  for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
-    try {
-      const rootFound = await listFiles('root', folderName, FOLDER_MIME);
-      for (const f of rootFound) {
-        if (!foldersToInspect.some((existing) => existing.id === f.id)) {
-          foldersToInspect.push(f);
+  if (foldersToInspect.length === 0) return null;
+
+  // 2. Fast-path inspection: Look for family.json in parallel
+  const inspectionResults = await Promise.all(
+    foldersToInspect.map(async (folder) => {
+      try {
+        const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
+        if (manifestFiles.length > 0) {
+          return { folder, manifestId: manifestFiles[0].id };
         }
+      } catch {
+        // Ignore folder access errors
       }
-    } catch {
-      // Ignore root query error
+      return null;
+    })
+  );
+
+  const foundWithManifest = inspectionResults.find((r) => r !== null);
+  if (foundWithManifest) {
+    const { folder } = foundWithManifest;
+    if (folder.name !== WORKSPACE_FOLDER_NAME) {
+      void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
+        console.warn('[Google Drive] Could not normalize legacy folder name.', error);
+      });
     }
+    return openHealthWorkspace(folder.id);
   }
 
-  // Inspect each folder found
-  for (const folder of foldersToInspect) {
-    // Check for family.json
-    const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
-    if (manifestFiles.length > 0) {
-      if (folder.name !== WORKSPACE_FOLDER_NAME) {
-        void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
-          console.warn('[Google Drive] Could not normalize legacy folder name.', error);
-        });
-      }
-      return openHealthWorkspace(folder.id);
-    }
-
-    // Check if folder contains profiles/raw_files or json profile files
-    const children = await listFiles(folder.id);
+  // 3. Fallback: Only do expensive subfolder inspection if no manifest found anywhere
+  // and we have a very likely candidate (named exactly like current workspace)
+  const candidate = foldersToInspect.find(f => f.name === WORKSPACE_FOLDER_NAME);
+  if (candidate) {
+    const children = await listFiles(candidate.id);
     const profilesFolder = children.find((c) => c.name === 'profiles' && c.mimeType === FOLDER_MIME);
     if (profilesFolder) {
-      // Auto-recover family.json for existing folder
+      // Recovery logic
       const profileFiles = await listFiles(profilesFolder.id);
       const members: FamilyMember[] = [];
       for (const pf of profileFiles) {
@@ -263,55 +258,56 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
             members.push({
               id: memberId,
               name: memberName,
-              driveFolderId: folder.id,
+              driveFolderId: candidate.id,
               profileFileId: pf.id,
               role: rawProfile?.member?.role || 'other',
             });
-          } catch {
-            // Ignore unparseable files
-          }
+          } catch { /* skip */ }
         }
       }
 
-      const now = new Date().toISOString();
-      const rawFolder = children.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME) || folder;
-      const family: HealthFamily = {
-        schemaVersion: 1,
-        adminEmail: '',
-        rawFilesFolderId: rawFolder.id,
-        profilesFolderId: profilesFolder.id,
-        members,
-        createdAt: now,
-        updatedAt: now,
-      };
+      if (members.length > 0) {
+        const now = new Date().toISOString();
+        const rawFolder = children.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME) || candidate;
+        const family: HealthFamily = {
+          schemaVersion: 1,
+          adminEmail: '',
+          rawFilesFolderId: rawFolder.id,
+          profilesFolderId: profilesFolder.id,
+          members,
+          createdAt: now,
+          updatedAt: now,
+        };
 
-      const manifest = await uploadContent(
-        'family.json',
-        JSON_MIME,
-        new Blob([JSON.stringify(family, null, 2)]),
-        folder.id,
-      );
+        const manifest = await uploadContent(
+          'family.json',
+          JSON_MIME,
+          new Blob([JSON.stringify(family, null, 2)]),
+          candidate.id,
+        );
 
-      return {
-        rootFolderId: folder.id,
-        familyFileId: manifest.id,
-        family,
-      };
+        return {
+          rootFolderId: candidate.id,
+          familyFileId: manifest.id,
+          family,
+        };
+      }
     }
   }
+
   return null;
 }
 
-export async function createHealthWorkspace(adminEmail: string): Promise<HealthDriveWorkspace> {
+export async function createHealthWorkspace(adminEmail: string, adminName?: string | null): Promise<HealthDriveWorkspace> {
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
   if (!cleanAdminEmail) throw new Error('Cần đăng nhập trước khi tạo Workspace gia đình.');
 
   // Kiểm tra xem đã có thư mục nào được tạo trước đó chưa (tránh trùng lặp / phục hồi gián đoạn)
-  const existingFolders: DriveFile[] = [];
-  for (const folderName of LEGACY_WORKSPACE_FOLDER_NAMES) {
-    const found = await listFiles('root', folderName, FOLDER_MIME);
-    existingFolders.push(...found);
-  }
+  const searchPromises = LEGACY_WORKSPACE_FOLDER_NAMES.map((name) =>
+    listFiles('root', name, FOLDER_MIME).catch(() => [])
+  );
+  const searchResults = await Promise.all(searchPromises);
+  const existingFolders = searchResults.flat();
 
   if (existingFolders.length > 0) {
     const existingRoot = existingFolders[0];
@@ -553,77 +549,59 @@ export async function deleteDriveFamilyMember(
   return { workspace: updatedWorkspace };
 }
 
+export async function deleteHealthWorkspaceFolder(rootFolderId: string): Promise<void> {
+  await deleteDriveFile(rootFolderId);
+}
+
 export async function factoryResetWorkspaceFolder(
   workspace: HealthDriveWorkspace,
   adminEmail: string
 ): Promise<HealthDriveWorkspace> {
+  // We'll keep this but the UI will now primarily use deleteHealthWorkspaceFolder
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
   const deletionErrors: string[] = [];
 
-  for (const member of workspace.family.members) {
-    const memberErrors: string[] = [];
-    if (member.driveFolderId) {
-      let files: DriveFile[] = [];
-      try {
-        files = await listFolderContentsRecursively(member.driveFolderId);
-      } catch (error) {
-        memberErrors.push(`${member.name}: không thể liệt kê tài liệu (${error instanceof Error ? error.message : 'lỗi không xác định'})`);
-      }
-      for (const file of files) {
+  try {
+    const allRootChildren = await listFolderContentsRecursively(workspace.rootFolderId);
+    for (const file of allRootChildren) {
+      if (file.id !== workspace.rootFolderId) {
         try {
           await deleteDriveFile(file.id);
         } catch (error) {
-          memberErrors.push(`${file.name}: ${error instanceof Error ? error.message : 'không thể xóa'}`);
-        }
-      }
-      if (memberErrors.length === 0) {
-        try {
-          await deleteDriveFile(member.driveFolderId);
-        } catch (error) {
-          memberErrors.push(`${member.name}: ${error instanceof Error ? error.message : 'không thể xóa thư mục'}`);
+          deletionErrors.push(`${file.name}: ${error instanceof Error ? error.message : 'không thể xóa'}`);
         }
       }
     }
-    if (member.profileFileId) {
-      try {
-        await deleteDriveFile(member.profileFileId);
-      } catch (error) {
-        memberErrors.push(`${member.name} (hồ sơ): ${error instanceof Error ? error.message : 'không thể xóa'}`);
-      }
-    }
-    deletionErrors.push(...memberErrors);
+  } catch (error) {
+    deletionErrors.push(`Không thể quét thư mục gốc: ${error instanceof Error ? error.message : 'lỗi'}`);
   }
 
   if (deletionErrors.length > 0) {
     const examples = deletionErrors.slice(0, 5).join('; ');
     const remaining = deletionErrors.length - Math.min(deletionErrors.length, 5);
     throw new Error(
-      `Chưa thể hoàn tất khởi tạo lại vì còn ${deletionErrors.length} lỗi xóa trên Drive: ${examples}${remaining ? `; và ${remaining} lỗi khác` : ''}. Danh sách thành viên được giữ nguyên; hãy kiểm tra Drive rồi thử lại.`,
+      `Chưa thể hoàn tất khởi tạo lại vì còn ${deletionErrors.length} lỗi xóa trên Drive: ${examples}${remaining ? `; và ${remaining} lỗi khác` : ''}. Hãy kiểm tra Drive rồi thử lại.`,
     );
   }
 
+  const raw = await createFolder('raw_files', workspace.rootFolderId);
+  const profiles = await createFolder('profiles', workspace.rootFolderId);
   const now = new Date().toISOString();
   const resetFamily: HealthFamily = {
     schemaVersion: 1,
     adminEmail: cleanAdminEmail,
-    rawFilesFolderId: workspace.family.rawFilesFolderId,
-    profilesFolderId: workspace.family.profilesFolderId,
+    rawFilesFolderId: raw.id,
+    profilesFolderId: profiles.id,
     members: [],
     createdAt: workspace.family.createdAt || now,
     updatedAt: now,
   };
 
-  const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`, {
-    headers: { Authorization: `Bearer ${accessToken()}` },
-  });
-  const etag = response.ok ? response.headers.get('etag') || undefined : undefined;
-
-  const file = await replaceContent(
-    workspace.familyFileId,
+  const file = await uploadContent(
     'family.json',
     JSON_MIME,
     new Blob([JSON.stringify(resetFamily, null, 2)]),
-    etag
+    workspace.rootFolderId,
   );
 
   return {
