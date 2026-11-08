@@ -1491,7 +1491,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req: Request, res: Response) => {
+    app.get('/*', (_req: Request, res: Response) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
