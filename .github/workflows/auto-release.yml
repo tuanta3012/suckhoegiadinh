@@ -283,6 +283,7 @@ jobs:
           VITE_APP_MODE: apk
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
           VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
+          VITE_BACKEND_URL: ${{ secrets.BACKEND_API_URL }}
         run: npm run build
 
       - name: Sync APK Assets to Android
@@ -313,6 +314,7 @@ jobs:
         env:
           VITE_APP_MODE: play
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
+          VITE_BACKEND_URL: ${{ secrets.BACKEND_API_URL }}
         run: npm run build
 
       - name: Sync AAB Assets to Android

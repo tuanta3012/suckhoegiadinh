@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './googleDriveService';
+import { buildApiUrl } from './apiConfig';
 
 const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
 const OCR_REQUEST_TIMEOUT_MS = 600_000;
@@ -73,7 +74,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
   const timeout = window.setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(`/api/gemini/${endpoint}`, {
+    response = await fetch(buildApiUrl(`/api/gemini/${endpoint}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -262,7 +263,7 @@ export async function extractHealthEventWithProgress(
   };
   renewIdleTimeout();
   try {
-    const response = await fetch('/api/gemini/extract-health-event', {
+    const response = await fetch(buildApiUrl('/api/gemini/extract-health-event'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -509,7 +510,7 @@ export async function streamHealthAssistant(
   onChunk: (chunk: string) => void
 ): Promise<string> {
   const token = await getAuthenticatedUserToken();
-  const response = await fetch('/api/gemini/ask-assistant', {
+  const response = await fetch(buildApiUrl('/api/gemini/ask-assistant'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -630,7 +631,7 @@ export async function analyzeComprehensiveHealth(
  */
 export async function fetchServerLogs(): Promise<any[]> {
   const token = await getAuthenticatedUserToken();
-  const response = await fetch('/api/gemini/digitization-logs', {
+  const response = await fetch(buildApiUrl('/api/gemini/digitization-logs'), {
     headers: {
       Authorization: `Bearer ${token}`,
     },
