@@ -11,18 +11,14 @@ def main():
     os.makedirs('src/assets/images', exist_ok=True)
 
     master_png = 'resources/icon.png'
-    src_img = 'src/assets/images/app_health_logo_clean_1794134407055.jpg'
+    src_img = 'src/assets/images/app_logo_2d_flat_1794137089154.jpg'
 
     if os.path.exists(src_img):
-        # Crop center 880x880 to remove outer border artifacts, resize to 1024x1024
-        run(['convert', src_img, '-gravity', 'center', '-crop', '880x880+0+0', '+repage', '-resize', '1024x1024', master_png])
+        run(['convert', src_img, '-resize', '1024x1024', master_png])
     elif not os.path.exists(master_png):
-        if os.path.exists('public/stk_app_icon.png'):
-            run(['convert', 'public/stk_app_icon.png', '-gravity', 'center', '-crop', '880x880+0+0', '+repage', '-resize', '1024x1024', master_png])
-        else:
-            print("Warning: No source icon found. Proceeding with existing assets if possible.")
+        print("Warning: No source icon found.")
 
-    bg_color = '#15a6a3'
+    bg_color = '#059669'
 
     # 1. Master PNG full bleed solid
     solid_master_png = 'resources/master_solid.png'
@@ -78,15 +74,11 @@ def main():
         dir_path = os.path.join(base_res, folder)
         os.makedirs(dir_path, exist_ok=True)
 
-        # Legacy icons: Full-bleed square & round with exact matching bg_color background
         run(['convert', solid_master_png, '-resize', f'{size}x{size}', '-strip', '-colors', '256', '-depth', '8', '-define', 'png:compression-level=9', os.path.join(dir_path, 'ic_launcher.png')])
         run(['convert', solid_master_png, '-resize', f'{size}x{size}', '-strip', '-colors', '256', '-depth', '8', '-define', 'png:compression-level=9', os.path.join(dir_path, 'ic_launcher_round.png')])
-
-        # Adaptive background: Solid #15a6a3 (no white frame)
         run(['convert', '-size', f'{fg_size}x{fg_size}', f'xc:{bg_color}', '-strip', '-colors', '16', os.path.join(dir_path, 'ic_launcher_background.png')])
 
-        # Adaptive foreground: Centered logo inside adaptive safe zone
-        logo_size = int(fg_size * 0.80)
+        logo_size = int(fg_size * 0.85)
         run([
             'convert', '-size', f'{fg_size}x{fg_size}', 'xc:none',
             '(', solid_master_png, '-resize', f'{logo_size}x{logo_size}', ')',
@@ -120,7 +112,7 @@ def main():
     with open(os.path.join(values_dir, 'ic_launcher_background.xml'), 'w') as f:
         f.write(colors_xml)
 
-    print(f"All app icons successfully generated with full-bleed background {bg_color}!")
+    print("2D Flat App icons successfully generated!")
 
 if __name__ == '__main__':
     main()

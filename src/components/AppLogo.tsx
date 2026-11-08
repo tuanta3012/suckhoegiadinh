@@ -28,10 +28,10 @@ export const AppLogo: React.FC<AppLogoProps> = ({
   return (
     <div className={`flex items-center gap-3 ${className}`}>
       <div
-        className={`relative overflow-hidden shrink-0 shadow-sm border border-emerald-500/30 bg-slate-900 flex items-center justify-center ${sizeMap[size]}`}
+        className={`relative overflow-hidden shrink-0 shadow-none flex items-center justify-center ${sizeMap[size]}`}
       >
         <img
-          src="/src/assets/images/app_health_logo_clean_1794134407055.jpg"
+          src="/src/assets/images/app_logo_2d_flat_1794137089154.jpg"
           alt="Logo Sức Khỏe Gia Đình"
           className="w-full h-full object-cover"
           onError={(e) => {
