@@ -5,6 +5,8 @@ import {
   canDeleteRawSource,
   createHealthProfile,
   digitizeHealthSource,
+  excludeDeletedFamilyMembers,
+  mergeFamilyMemberTombstones,
   mergeFamilyMembers,
   mergeHealthProfiles,
   parseHealthProfile,
@@ -45,6 +47,32 @@ describe('health profile', () => {
       { ...updatedMember, gender: 'female' },
       concurrentMember,
     ]);
+  });
+
+  it('rejects concurrent edits to the same member field instead of last-write-wins', () => {
+    const firstEdit = { ...member, name: 'Mẹ thiết bị A' };
+    const secondEdit = { ...member, name: 'Mẹ thiết bị B' };
+    expect(() => mergeFamilyMembers([firstEdit], [secondEdit], [member]))
+      .toThrow('đã được sửa trên nhiều thiết bị');
+  });
+
+  it('keeps deletion tombstones and prevents stale member snapshots from restoring a deleted profile', () => {
+    const tombstones = mergeFamilyMemberTombstones(
+      [{ memberId: 'member-2', deletedAt: '2026-03-10T10:00:00.000Z' }],
+      [{ memberId: 'member-2', deletedAt: '2026-03-10T11:00:00.000Z' }],
+    );
+    const staleAndCurrent = mergeFamilyMembers(
+      [member],
+      [member, { ...member, id: 'member-2', name: 'Bố' }],
+    );
+
+    expect(excludeDeletedFamilyMembers(staleAndCurrent, tombstones).map(({ id }) => id))
+      .toEqual(['member-1']);
+    expect(mergeFamilyMemberTombstones(
+      tombstones,
+      [{ memberId: 'member-2', deletedAt: '2026-03-10T12:00:00.000Z' }],
+    ).find((item) => item.memberId === 'member-2')?.deletedAt)
+      .toBe('2026-03-10T12:00:00.000Z');
   });
 
   it('keeps uploaded originals ineligible for deletion until a linked event is digitized', () => {
@@ -122,6 +150,22 @@ describe('health profile', () => {
     const secondCopy = {
       ...base,
       timeline: [{ ...event, id: 'shared-event', title: 'Kết quả đã chỉnh sửa trên thiết bị khác' }],
+    };
+
+    expect(() => mergeHealthProfiles(firstCopy, secondCopy)).toThrow('Xung đột đồng bộ');
+  });
+
+  it('does not use device timestamps to overwrite a conflicting event edit', () => {
+    const base = createHealthProfile(member);
+    const firstCopy = { ...base, timeline: [{ ...event, id: 'shared-event' }] };
+    const secondCopy = {
+      ...base,
+      timeline: [{
+        ...event,
+        id: 'shared-event',
+        title: 'Sửa ở thiết bị khác',
+        recordedAt: '2027-01-01T10:00:00.000Z',
+      }],
     };
 
     expect(() => mergeHealthProfiles(firstCopy, secondCopy)).toThrow('Xung đột đồng bộ');

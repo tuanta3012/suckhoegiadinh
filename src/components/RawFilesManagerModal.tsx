@@ -3,15 +3,17 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
+  Eye,
   FileText,
   FolderOpen,
+  LoaderCircle,
   RefreshCw,
   Trash2,
   X,
   PlayCircle,
 } from 'lucide-react';
 import type { FamilyMember, HealthProfile, HealthSource } from '../types';
-import type { HealthDriveWorkspace } from '../utils/healthDriveService';
+import { downloadDriveFile, type HealthDriveWorkspace } from '../utils/healthDriveService';
 
 import { formatDateTimeVN } from '../utils/formatters';
 
@@ -37,6 +39,7 @@ export function RawFilesManagerModal({
   showToast,
 }: RawFilesManagerModalProps) {
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [viewingId, setViewingId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   if (!isOpen || !workspace) return null;
@@ -74,7 +77,7 @@ export function RawFilesManagerModal({
             </div>
             <div>
               <h3 id="raw-manager-title" className="text-sm sm:text-base font-bold text-white">
-                Quản lý Tài liệu Gốc (Raw Folder)
+                Quản lý Tài liệu Gốc
               </h3>
               <p className="text-[11px] text-slate-300">
                 Tổng số: <strong>{allSources.length}</strong> tệp ({processedCount} đã số hóa, {pendingCount} đang chờ/dang dở)
@@ -117,7 +120,7 @@ export function RawFilesManagerModal({
           {allSources.length === 0 ? (
             <div className="text-center py-12 space-y-2">
               <FileText className="w-12 h-12 text-slate-300 mx-auto" />
-              <h4 className="font-bold text-slate-700 text-sm">Chưa có tài liệu nào trong Raw Folder</h4>
+              <h4 className="font-bold text-slate-700 text-sm">Chưa có tài liệu gốc</h4>
               <p className="text-xs text-slate-500">Hãy tải lên tài liệu PDF hoặc ảnh chụp để hệ thống bắt đầu số hóa tự động.</p>
             </div>
           ) : (
@@ -168,6 +171,48 @@ export function RawFilesManagerModal({
                     </div>
 
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                      <button
+                        type="button"
+                        disabled={viewingId === source.driveFileId}
+                        onClick={async () => {
+                          const previewWindow = window.open('', '_blank');
+                          if (!previewWindow) {
+                            showToast('Không thể mở tài liệu. Hãy cho phép cửa sổ bật lên rồi thử lại.', 'error');
+                            return;
+                          }
+                          setViewingId(source.driveFileId);
+                          try {
+                            const downloaded = await downloadDriveFile(source.driveFileId);
+                            const blob = source.mimeType
+                              ? new Blob([downloaded], { type: source.mimeType })
+                              : downloaded;
+                            const url = URL.createObjectURL(blob);
+                            previewWindow.location.href = url;
+                            previewWindow.addEventListener(
+                              'beforeunload',
+                              () => URL.revokeObjectURL(url),
+                              { once: true },
+                            );
+                          } catch (error) {
+                            previewWindow.close();
+                            showToast(
+                              error instanceof Error ? `Không thể mở tài liệu: ${error.message}` : 'Không thể mở tài liệu gốc.',
+                              'error',
+                            );
+                          } finally {
+                            setViewingId(null);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center gap-1.5 transition-all disabled:opacity-50"
+                        title="Mở tài liệu gốc để xem"
+                      >
+                        {viewingId === source.driveFileId ? (
+                          <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                        <span>{viewingId === source.driveFileId ? 'Đang mở...' : 'Xem tài liệu'}</span>
+                      </button>
                       <span
                         className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold ${
                           isProcessed

@@ -235,7 +235,7 @@ export async function removeHealthWorkspaceAssignment(
   const cleanEmail = normalizeEmail(memberEmail);
   const currentEmail = authenticatedEmail();
   const workspace = await getDoc(doc(db, RELAY_COLLECTION, rootFolderId));
-  if (!workspace.exists()) throw new Error('Không tìm thấy Workspace chia sẻ trên Firestore.');
+  if (!workspace.exists()) return;
   const isAdmin = workspace.data().adminEmail === currentEmail;
   if (!isAdmin && cleanEmail !== currentEmail) {
     throw new Error('Không có quyền thu hồi lời mời này.');

@@ -201,6 +201,7 @@ export interface HealthProfile {
   aiAnalysis?: AiAnalysisBlock;
   createdAt: string;
   updatedAt: string;
+  syncPending?: boolean;
 }
 
 export interface HealthFamily {
@@ -209,6 +210,11 @@ export interface HealthFamily {
   rawFilesFolderId: string;
   profilesFolderId: string;
   members: FamilyMember[];
+  deletedMembers?: Array<{
+    memberId: string;
+    deletedAt: string;
+    deletedBy?: string;
+  }>;
   createdAt: string;
   updatedAt: string;
 }

@@ -21,6 +21,9 @@ import {
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+export function getSignedInGoogleEmail(): string | null {
+  return auth.currentUser?.email?.trim().toLowerCase() || null;
+}
 const isNative = Capacitor.isNativePlatform();
 const provider = new GoogleAuthProvider();
 provider.addScope('https://www.googleapis.com/auth/drive.file');

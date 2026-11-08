@@ -1,6 +1,7 @@
 import type {
   FamilyMember,
   HealthEvent,
+  HealthFamily,
   HealthMetric,
   HealthProfile,
   HealthSource,
@@ -113,28 +114,60 @@ export function mergeFamilyMembers(
   for (const member of incoming) {
     const latest = members.get(member.id);
     const previous = baselineById.get(member.id);
-    if (!latest || !previous) {
+    if (!latest) {
       members.set(member.id, member);
       continue;
     }
+    if (!previous) {
+      if (JSON.stringify(latest) !== JSON.stringify(member)) {
+        throw new Error(`Xung đột đồng bộ: hồ sơ thành viên "${member.name}" có cùng mã nhưng thông tin khác nhau.`);
+      }
+      continue;
+    }
+
+    const mergeField = <K extends keyof FamilyMember>(field: K): FamilyMember[K] => {
+      const latestChanged = latest[field] !== previous[field];
+      const incomingChanged = member[field] !== previous[field];
+      if (latestChanged && incomingChanged && latest[field] !== member[field]) {
+        throw new Error(`Xung đột đồng bộ: trường "${String(field)}" của thành viên "${member.name}" đã được sửa trên nhiều thiết bị.`);
+      }
+      return incomingChanged ? member[field] : latest[field];
+    };
 
     members.set(member.id, {
       id: latest.id,
-      name: member.name !== previous.name ? member.name : latest.name,
-      email: member.email !== previous.email ? member.email : latest.email,
-      gender: member.gender !== previous.gender ? member.gender : latest.gender,
-      birthDate: member.birthDate !== previous.birthDate ? member.birthDate : latest.birthDate,
-      role: member.role !== previous.role ? member.role : latest.role,
-      driveFolderId: member.driveFolderId !== previous.driveFolderId
-        ? member.driveFolderId
-        : latest.driveFolderId,
-      profileFileId: member.profileFileId !== previous.profileFileId
-        ? member.profileFileId
-        : latest.profileFileId,
-      avatarUrl: member.avatarUrl !== previous.avatarUrl ? member.avatarUrl : latest.avatarUrl,
+      name: mergeField('name'),
+      email: mergeField('email'),
+      gender: mergeField('gender'),
+      birthDate: mergeField('birthDate'),
+      role: mergeField('role'),
+      driveFolderId: mergeField('driveFolderId'),
+      profileFileId: mergeField('profileFileId'),
+      avatarUrl: mergeField('avatarUrl'),
     });
   }
   return [...members.values()];
+}
+
+export function mergeFamilyMemberTombstones(
+  ...collections: Array<HealthFamily['deletedMembers']>
+): NonNullable<HealthFamily['deletedMembers']> {
+  const tombstones = new Map<string, NonNullable<HealthFamily['deletedMembers']>[number]>();
+  for (const tombstone of collections.flatMap((collection) => collection || [])) {
+    const previous = tombstones.get(tombstone.memberId);
+    if (!previous || tombstone.deletedAt > previous.deletedAt) {
+      tombstones.set(tombstone.memberId, tombstone);
+    }
+  }
+  return [...tombstones.values()];
+}
+
+export function excludeDeletedFamilyMembers(
+  members: FamilyMember[],
+  tombstones: HealthFamily['deletedMembers'],
+): FamilyMember[] {
+  const deletedIds = new Set((tombstones || []).map((tombstone) => tombstone.memberId));
+  return members.filter((member) => !deletedIds.has(member.id));
 }
 
 export function mergeHealthProfiles(
@@ -146,11 +179,7 @@ export function mergeHealthProfiles(
   for (const event of [...current.timeline, ...incoming.timeline]) {
     const previous = events.get(event.id);
     if (previous && !sameHealthEventContent(previous, event)) {
-      if (event.recordedAt === previous.recordedAt) {
-        throw new Error(`Xung đột đồng bộ: sự kiện "${event.title}" có cùng mã nhưng nội dung khác nhau. Hãy tải lại hồ sơ và kiểm tra trước khi thử lại.`);
-      }
-      if (event.recordedAt > previous.recordedAt) events.set(event.id, event);
-      continue;
+      throw new Error(`Xung đột đồng bộ: sự kiện "${event.title}" có cùng mã nhưng nội dung khác nhau. Hãy tải lại hồ sơ và xử lý xung đột trước khi thử lại.`);
     }
     if (!previous || event.recordedAt > previous.recordedAt) events.set(event.id, event);
   }

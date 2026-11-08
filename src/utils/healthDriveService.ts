@@ -1,7 +1,20 @@
-import { getGoogleAccessToken, getValidGoogleAccessToken, trySilentRefresh } from './googleDriveService';
+import {
+  getGoogleAccessToken,
+  getSignedInGoogleEmail,
+  getValidGoogleAccessToken,
+  trySilentRefresh,
+} from './googleDriveService';
 import type { FamilyMember, HealthFamily, HealthProfile } from '../types';
-import { canDeleteRawSource, mergeFamilyMembers, mergeHealthProfiles, parseHealthProfile } from './healthProfile';
+import {
+  canDeleteRawSource,
+  excludeDeletedFamilyMembers,
+  mergeFamilyMemberTombstones,
+  mergeFamilyMembers,
+  mergeHealthProfiles,
+  parseHealthProfile,
+} from './healthProfile';
 import { registerHealthWorkspaceRelay } from './workspaceShareRelay';
+import { localSyncOutbox, supportsDurableOfflineQueue } from './localSyncOutbox';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
@@ -30,6 +43,10 @@ export interface HealthDriveWorkspace {
 
 function accessToken(): string {
   return getGoogleAccessToken() || '';
+}
+
+function isLocalProfileFileId(fileId: string): boolean {
+  return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
 async function authenticatedDriveFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -400,7 +417,16 @@ export async function openHealthWorkspace(rootFolderId: string): Promise<HealthD
   if (familyResponse.schemaVersion !== 1 || !Array.isArray(familyResponse.members)) {
     throw new Error('Tệp family.json không hợp lệ hoặc không được hỗ trợ.');
   }
-  return { rootFolderId, familyFileId: manifestFiles[0].id, family: familyResponse };
+  const deletedMembers = mergeFamilyMemberTombstones(familyResponse.deletedMembers);
+  return {
+    rootFolderId,
+    familyFileId: manifestFiles[0].id,
+    family: {
+      ...familyResponse,
+      deletedMembers,
+      members: excludeDeletedFamilyMembers(familyResponse.members, deletedMembers),
+    },
+  };
 }
 
 export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: HealthFamily): Promise<HealthDriveWorkspace> {
@@ -414,10 +440,19 @@ export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: 
       throw new Error('family.json không hợp lệ; không thể cập nhật danh sách thành viên.');
     }
 
+    const deletedMembers = mergeFamilyMemberTombstones(
+      latest.deletedMembers,
+      family.deletedMembers,
+      workspace.family.deletedMembers,
+    );
     const next: HealthFamily = {
       ...latest,
       ...family,
-      members: mergeFamilyMembers(latest.members, family.members, workspace.family.members),
+      deletedMembers,
+      members: excludeDeletedFamilyMembers(
+        mergeFamilyMembers(latest.members, family.members, workspace.family.members),
+        deletedMembers,
+      ),
       createdAt: latest.createdAt || family.createdAt,
       updatedAt: new Date().toISOString(),
     };
@@ -543,6 +578,14 @@ export async function deleteDriveFamilyMember(
   const familyWithoutMember: HealthFamily = {
     ...workspace.family,
     members: workspace.family.members.filter((item) => item.id !== memberId),
+    deletedMembers: mergeFamilyMemberTombstones(
+      workspace.family.deletedMembers,
+      [{
+        memberId,
+        deletedAt: new Date().toISOString(),
+        deletedBy: getSignedInGoogleEmail() || undefined,
+      }],
+    ),
   };
   const updatedWorkspace = await removeFamilyMemberFromManifest(workspace, familyWithoutMember, memberId);
 
@@ -550,6 +593,23 @@ export async function deleteDriveFamilyMember(
 }
 
 export async function deleteHealthWorkspaceFolder(rootFolderId: string): Promise<void> {
+  if (!rootFolderId.trim()) throw new Error('Thiếu mã thư mục Workspace cần xóa.');
+  const contents = await listFolderContentsRecursively(rootFolderId);
+  const deletionErrors: string[] = [];
+  for (const file of contents) {
+    try {
+      await deleteDriveFile(file.id);
+    } catch (error) {
+      deletionErrors.push(`${file.name}: ${error instanceof Error ? error.message : 'không thể xóa'}`);
+    }
+  }
+  if (deletionErrors.length > 0) {
+    const examples = deletionErrors.slice(0, 5).join('; ');
+    const remaining = deletionErrors.length - Math.min(deletionErrors.length, 5);
+    throw new Error(
+      `Không thể xóa toàn bộ nội dung Workspace (${deletionErrors.length} lỗi): ${examples}${remaining ? `; và ${remaining} lỗi khác` : ''}. Thư mục gốc được giữ lại để có thể thử lại.`,
+    );
+  }
   await deleteDriveFile(rootFolderId);
 }
 
@@ -659,7 +719,7 @@ export async function loadHealthProfile(fileId: string): Promise<HealthProfile> 
   return driveRequest<HealthProfile>(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`);
 }
 
-export async function saveHealthProfile(fileId: string, profile: HealthProfile): Promise<HealthProfile> {
+async function saveHealthProfileRemote(fileId: string, profile: HealthProfile): Promise<HealthProfile> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`, {
       headers: { Authorization: `Bearer ${accessToken()}` },
@@ -681,6 +741,83 @@ export async function saveHealthProfile(fileId: string, profile: HealthProfile):
     }
   }
   throw new Error('Hồ sơ đang được cập nhật trên thiết bị khác. Đồng bộ lại rồi thử lưu lần nữa.');
+}
+
+function shouldQueueProfileSave(error: unknown): boolean {
+  return error instanceof DriveConflictError ||
+    error instanceof TypeError ||
+    (error instanceof Error &&
+      /failed to fetch|networkerror|load failed|network request failed|phiên google drive đã hết hạn|đăng nhập lại để cấp quyền drive|xung đột đồng bộ/i.test(error.message));
+}
+
+export async function saveHealthProfile(fileId: string, profile: HealthProfile): Promise<HealthProfile> {
+  const accountEmail = getSignedInGoogleEmail();
+  let localProfile = profile;
+  const queuedSaves = supportsDurableOfflineQueue() && accountEmail
+    ? await localSyncOutbox.listProfileSaves(accountEmail)
+    : [];
+  try {
+    for (const queued of queuedSaves) {
+      if (queued.profileFileId === fileId) {
+        localProfile = mergeHealthProfiles(queued.profile, localProfile);
+      }
+    }
+
+    const saved = await saveHealthProfileRemote(fileId, localProfile);
+    if (accountEmail) {
+      for (const queued of queuedSaves) {
+        if (queued.profileFileId === fileId) {
+          await localSyncOutbox.complete(accountEmail, queued.id);
+        }
+      }
+    }
+    return { ...saved, syncPending: false };
+  } catch (error) {
+    if (
+      !supportsDurableOfflineQueue() ||
+      !accountEmail ||
+      !shouldQueueProfileSave(error)
+    ) {
+      throw error;
+    }
+    await localSyncOutbox.enqueueProfileSave(accountEmail, fileId, localProfile);
+    return { ...localProfile, syncPending: true };
+  }
+}
+
+export async function flushPendingHealthProfileSaves(
+  members: FamilyMember[],
+  accountEmail: string,
+): Promise<number> {
+  if (!supportsDurableOfflineQueue() || !accountEmail.trim()) return 0;
+  const memberByProfileId = new Map(members.map((member) => [member.profileFileId, member]));
+  const pending = await localSyncOutbox.listProfileSaves(accountEmail);
+  let flushed = 0;
+  for (const operation of pending) {
+    const savedMemberId = operation.profile.member.id;
+    const savedMemberEmail = operation.profile.member.email?.trim().toLowerCase();
+    const member = memberByProfileId.get(operation.profileFileId) ||
+      (isLocalProfileFileId(operation.profileFileId)
+        ? members.find((candidate) => candidate.id === savedMemberId)
+        : undefined) ||
+      (isLocalProfileFileId(operation.profileFileId) && savedMemberEmail
+        ? members.find((candidate) => candidate.email?.trim().toLowerCase() === savedMemberEmail)
+        : undefined);
+    if (!member) {
+      throw new Error(
+        `Không tìm thấy thành viên đích cho thay đổi hồ sơ đang chờ (${operation.profile.member.name}); dữ liệu cục bộ được giữ nguyên.`,
+      );
+    }
+    await saveHealthProfile(member.profileFileId, {
+      ...operation.profile,
+      member,
+    });
+    if (member.profileFileId !== operation.profileFileId) {
+      await localSyncOutbox.complete(accountEmail, operation.id);
+    }
+    flushed += 1;
+  }
+  return flushed;
 }
 
 export async function uploadRawHealthFile(
@@ -730,6 +867,57 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
   if (response.ok || response.status === 404) return;
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
   throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi xóa tệp.`);
+}
+
+export async function revokeDriveFolderAccess(folderId: string, memberEmail: string): Promise<void> {
+  const normalizedEmail = memberEmail.trim().toLowerCase();
+  if (!folderId.trim() || !normalizedEmail) {
+    throw new Error('Thiếu mã thư mục hoặc email để thu hồi quyền Google Drive.');
+  }
+
+  const permissions: Array<{
+    id?: string;
+    emailAddress?: string;
+    type?: string;
+    role?: string;
+    deleted?: boolean;
+  }> = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({
+      fields: 'nextPageToken,permissions(id,emailAddress,type,role,deleted)',
+      pageSize: '100',
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+    const result = await driveRequest<{
+      permissions?: typeof permissions;
+      nextPageToken?: string;
+    }>(
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions?${params.toString()}`,
+    );
+    permissions.push(...(result.permissions || []));
+    pageToken = result.nextPageToken;
+  } while (pageToken);
+
+  const matchingPermissions = permissions.filter((permission) =>
+    permission.id &&
+    permission.type === 'user' &&
+    permission.role !== 'owner' &&
+    !permission.deleted &&
+    permission.emailAddress?.trim().toLowerCase() === normalizedEmail,
+  );
+  for (const permission of matchingPermissions) {
+    const response = await authenticatedDriveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions/${encodeURIComponent(permission.id!)}`,
+      { method: 'DELETE' },
+    );
+    if (response.ok || response.status === 404) continue;
+    const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    throw new Error(
+      body?.error?.message ||
+      `Không thể thu hồi quyền Drive của ${normalizedEmail} (HTTP ${response.status}).`,
+    );
+  }
 }
 
 export async function listRawFiles(member: FamilyMember): Promise<DriveFile[]> {
