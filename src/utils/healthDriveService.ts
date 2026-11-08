@@ -86,13 +86,18 @@ async function driveRequest<T>(url: string, init: RequestInit = {}): Promise<T> 
   return response.json() as Promise<T>;
 }
 
-function driveQuery(parentId?: string | null, name?: string, mimeType?: string): string {
+function driveQuery(parentId?: string | null, name?: string | string[], mimeType?: string): string {
   const clauses: string[] = ['trashed = false'];
   if (parentId) {
     clauses.push(`'${parentId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' in parents`);
   }
   if (name) {
-    clauses.push(`name = '${name.replace(/'/g, "\\'")}'`);
+    const names = Array.isArray(name) ? name : [name];
+    clauses.push(
+      names.length === 1
+        ? `name = '${names[0].replace(/'/g, "\\'")}'`
+        : `(${names.map((item) => `name = '${item.replace(/'/g, "\\'")}'`).join(' or ')})`,
+    );
   }
   if (mimeType) {
     clauses.push(`mimeType = '${mimeType}'`);
@@ -100,7 +105,11 @@ function driveQuery(parentId?: string | null, name?: string, mimeType?: string):
   return clauses.join(' and ');
 }
 
-async function listFiles(parentId?: string | null, name?: string, mimeType?: string): Promise<DriveFile[]> {
+async function listFiles(
+  parentId?: string | null,
+  name?: string | string[],
+  mimeType?: string,
+): Promise<DriveFile[]> {
   const files: DriveFile[] = [];
   let pageToken: string | undefined;
   do {
@@ -216,52 +225,28 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
 }
 
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
-  const foldersToInspect: DriveFile[] = [];
-
-  // 1. Search strictly at the root level of My Drive in parallel
-  const searchPromises = LEGACY_WORKSPACE_FOLDER_NAMES.map(async (name) => {
-    try {
-      return await listFiles('root', name, FOLDER_MIME);
-    } catch {
-      return [];
-    }
-  });
-
-  const searchResults = await Promise.all(searchPromises);
-  for (const list of searchResults) {
-    for (const f of list) {
-      if (!foldersToInspect.some((existing) => existing.id === f.id)) {
-        foldersToInspect.push(f);
-      }
-    }
-  }
-
+  const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
   if (foldersToInspect.length === 0) return null;
 
   // 2. Fast-path inspection: Look for family.json directly in root candidates
   const inspectionResults = await Promise.all(
     foldersToInspect.map(async (folder) => {
-      try {
-        const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
-        if (manifestFiles.length > 0) {
-          return { folder, manifestId: manifestFiles[0].id };
-        }
-      } catch {
-        // Ignore folder access errors
-      }
-      return null;
+      const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
+      return manifestFiles.length > 0
+        ? { folder, manifestId: manifestFiles[0].id }
+        : null;
     })
   );
 
   const foundWithManifest = inspectionResults.find((r) => r !== null);
   if (foundWithManifest) {
-    const { folder } = foundWithManifest;
+    const { folder, manifestId } = foundWithManifest;
     if (folder.name !== WORKSPACE_FOLDER_NAME) {
       void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
         console.warn('[Google Drive] Could not normalize legacy folder name.', error);
       });
     }
-    return openHealthWorkspace(folder.id);
+    return openHealthWorkspace(folder.id, manifestId);
   }
 
   // Strictly no deep subfolder scan if family.json is absent
@@ -273,11 +258,7 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
   if (!cleanAdminEmail) throw new Error('Cần đăng nhập trước khi tạo Workspace gia đình.');
 
   // Kiểm tra xem đã có thư mục nào được tạo trước đó chưa (tránh trùng lặp / phục hồi gián đoạn)
-  const searchPromises = LEGACY_WORKSPACE_FOLDER_NAMES.map((name) =>
-    listFiles('root', name, FOLDER_MIME).catch(() => [])
-  );
-  const searchResults = await Promise.all(searchPromises);
-  const existingFolders = searchResults.flat();
+  const existingFolders = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
 
   if (existingFolders.length > 0) {
     const existingRoot = existingFolders[0];
@@ -359,13 +340,17 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
   return { rootFolderId: root.id, familyFileId: manifest.id, family, relayRegistrationError };
 }
 
-export async function openHealthWorkspace(rootFolderId: string): Promise<HealthDriveWorkspace> {
+export async function openHealthWorkspace(
+  rootFolderId: string,
+  knownManifestFileId?: string,
+): Promise<HealthDriveWorkspace> {
   const root = await driveRequest<DriveFile>(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`);
   if (root.mimeType !== FOLDER_MIME) throw new Error('ID được nhập không phải là thư mục Google Drive.');
-  const manifestFiles = await listFiles(rootFolderId, 'family.json', JSON_MIME);
-  if (!manifestFiles.length) throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
+  const manifestFileId = knownManifestFileId ||
+    (await listFiles(rootFolderId, 'family.json', JSON_MIME))[0]?.id;
+  if (!manifestFileId) throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
   const familyResponse = await driveRequest<HealthFamily>(
-    `${DRIVE_API}/files/${encodeURIComponent(manifestFiles[0].id)}?alt=media`,
+    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
   );
   if (familyResponse.schemaVersion !== 1 || !Array.isArray(familyResponse.members)) {
     throw new Error('Tệp family.json không hợp lệ hoặc không được hỗ trợ.');
@@ -373,7 +358,7 @@ export async function openHealthWorkspace(rootFolderId: string): Promise<HealthD
   const deletedMembers = mergeFamilyMemberTombstones(familyResponse.deletedMembers);
   return {
     rootFolderId,
-    familyFileId: manifestFiles[0].id,
+    familyFileId: manifestFileId,
     family: {
       ...familyResponse,
       deletedMembers,

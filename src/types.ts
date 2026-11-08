@@ -103,6 +103,7 @@ export interface HealthSource {
   mimeType: string;
   uploadedAt: string;
   status: 'pending' | 'processed';
+  subjectStatus?: 'unresolved';
   digitizedAt?: string;
   rawDeletedAt?: string;
   relocatedToMemberId?: string;

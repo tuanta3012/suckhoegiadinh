@@ -81,6 +81,7 @@ function isHealthSource(value: unknown): value is HealthSource {
       typeof value.mimeType === 'string' &&
       isNonEmptyString(value.uploadedAt) &&
       (value.status === 'pending' || value.status === 'processed') &&
+      (value.subjectStatus === undefined || value.subjectStatus === 'unresolved') &&
       (value.digitizedAt === undefined || typeof value.digitizedAt === 'string') &&
       (value.rawDeletedAt === undefined || typeof value.rawDeletedAt === 'string') &&
       (value.relocatedToMemberId === undefined || typeof value.relocatedToMemberId === 'string') &&
@@ -196,6 +197,9 @@ export function mergeHealthProfiles(
     sources.set(source.driveFileId, {
       ...previous,
       ...selected,
+      subjectStatus: selected.status === 'processed'
+        ? selected.subjectStatus
+        : source.subjectStatus || previous.subjectStatus,
       rawDeletedAt: previous.rawDeletedAt || source.rawDeletedAt,
       relocatedToMemberId: source.relocatedToMemberId || previous.relocatedToMemberId,
     });
@@ -247,7 +251,7 @@ export function digitizeHealthSource(
   );
   const sources = profile.sources.map((item) =>
     item.driveFileId === event.sourceFileId
-      ? { ...item, status: 'processed' as const, digitizedAt: now }
+      ? { ...item, status: 'processed' as const, subjectStatus: undefined, digitizedAt: now }
       : item,
   );
   return {
@@ -362,6 +366,7 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
     mimeType: String(raw.mimeType || 'application/octet-stream'),
     uploadedAt: String(raw.uploadedAt || new Date().toISOString()),
     status: raw.status === 'processed' ? 'processed' : 'pending',
+    subjectStatus: raw.subjectStatus === 'unresolved' ? 'unresolved' : undefined,
     digitizedAt: raw.digitizedAt ? String(raw.digitizedAt) : undefined,
     rawDeletedAt: raw.rawDeletedAt ? String(raw.rawDeletedAt) : undefined,
     relocatedToMemberId: raw.relocatedToMemberId ? String(raw.relocatedToMemberId) : undefined,

@@ -91,6 +91,43 @@ describe('health profile', () => {
     expect(profile.sources[0].digitizedAt).toBe('2026-03-10T09:05:00.000Z');
   });
 
+  it('preserves unresolved-subject state until the source is assigned and digitized', () => {
+    const profile = parseHealthProfile({
+      sources: [{
+        driveFileId: 'source-1',
+        fileName: 'unknown-patient.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-03-10T08:00:00.000Z',
+        status: 'pending',
+        subjectStatus: 'unresolved',
+      }],
+    }, member);
+
+    expect(profile.timeline).toEqual([]);
+    expect(profile.sources[0].subjectStatus).toBe('unresolved');
+
+    const assignedProfile = digitizeHealthSource(profile, event, '2026-03-10T09:05:00.000Z');
+    expect(assignedProfile.sources[0].subjectStatus).toBeUndefined();
+    expect(assignedProfile.sources[0].status).toBe('processed');
+  });
+
+  it('merges unresolved-subject state from another device', () => {
+    const base = createHealthProfile(member);
+    const source = {
+      driveFileId: 'source-1',
+      fileName: 'unknown-patient.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-03-10T08:00:00.000Z',
+      status: 'pending' as const,
+    };
+    const merged = mergeHealthProfiles(
+      { ...base, sources: [source] },
+      { ...base, sources: [{ ...source, subjectStatus: 'unresolved' }] },
+    );
+
+    expect(merged.sources[0].subjectStatus).toBe('unresolved');
+  });
+
   it('merges timeline and sources without dropping existing events', () => {
     const first = createHealthProfile(member, '2026-01-01T00:00:00.000Z');
     const original = {

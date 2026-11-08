@@ -159,7 +159,11 @@ export function RawFilesManagerModal({
                           {source.fileName}
                         </h4>
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500 mt-0.5">
-                          <span>Thành viên: <strong>{member.name}</strong></span>
+                          <span>
+                            {source.subjectStatus === 'unresolved'
+                              ? <strong className="text-amber-800">Chưa xác định chủ thể</strong>
+                              : <>Thành viên: <strong>{member.name}</strong></>}
+                          </span>
                           <span>·</span>
                           <span>Dung lượng: {formattedSize}</span>
                           <span>·</span>
@@ -222,7 +226,9 @@ export function RawFilesManagerModal({
                       >
                         {isProcessed
                           ? `Đã số hóa xong (${processedPages}/${totalPages} trang)`
-                          : `Chờ số hóa / Dang dở (${processedPages}/${totalPages} trang)`}
+                          : source.subjectStatus === 'unresolved'
+                            ? 'Chưa xác định chủ thể'
+                            : `Chờ số hóa / Dang dở (${processedPages}/${totalPages} trang)`}
                       </span>
 
                       <button
