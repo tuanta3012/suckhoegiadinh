@@ -161,6 +161,12 @@ import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
 import { formatDateVN, formatDateTimeVN, isSamePersonName, normalizeVietnameseProperName } from '../utils/formatters';
 import { findMemberByOcrPatientName, isRecognizablePatientName } from '../utils/ocrSubjectRouting';
+import {
+  updateBatchNotificationProgress,
+  updateBatchNotificationComplete,
+  requestNotificationPermission,
+  setupBackgroundAppResumeListener,
+} from '../utils/backgroundNotificationService';
 
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
@@ -196,7 +202,7 @@ function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
-function createDefaultLocalWorkspace(adminEmail: string | null, adminName?: string | null): HealthDriveWorkspace {
+function createDefaultLocalWorkspace(adminEmail: string | null, _adminName?: string | null): HealthDriveWorkspace {
   return {
     rootFolderId: 'local_offline_workspace',
     familyFileId: 'local_family_file',
@@ -207,16 +213,7 @@ function createDefaultLocalWorkspace(adminEmail: string | null, adminName?: stri
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       adminEmail: adminEmail || 'offline@user',
-      members: [
-        {
-          id: 'member_local_1',
-          name: adminName || 'Tôi',
-          driveFolderId: 'raw_local_1',
-          profileFileId: 'profile_local_1',
-          role: 'admin',
-          email: adminEmail || undefined,
-        },
-      ],
+      members: [],
     },
   };
 }
@@ -367,7 +364,7 @@ export function HealthDashboard({
   const [selectedMemberId, setSelectedMemberId] = useState<string>(
     findMemberForEmail(offlineStartup.workspace.family.members, userEmail)?.id ||
       offlineStartup.workspace.family.members[0]?.id ||
-      'member_local_1',
+      '',
   );
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -397,6 +394,8 @@ export function HealthDashboard({
     modelUsed: string;
     partialExtracted: Partial<HealthEvent>;
     error: string | null;
+    totalPages?: number;
+    processedPages?: number;
   }>({
     isOpen: false,
     file: null,
@@ -408,6 +407,8 @@ export function HealthDashboard({
     modelUsed: 'gemini-3.5-flash-lite',
     partialExtracted: {},
     error: null,
+    totalPages: undefined,
+    processedPages: undefined,
   });
   const [showUploadMemberPicker, setShowUploadMemberPicker] = useState(false);
   const [isCameraTriggerActive, setIsCameraTriggerActive] = useState(false);
@@ -445,6 +446,11 @@ export function HealthDashboard({
   const [isRefining, setIsRefining] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
+  const queueStatusRef = useRef<{ current: number; total: number } | null>(null);
+  const updateQueueStatus = useCallback((next: { current: number; total: number } | null) => {
+    queueStatusRef.current = next;
+    setQueueStatus(next);
+  }, []);
   const [pendingLocalUploadCount, setPendingLocalUploadCount] = useState(0);
   const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
 
@@ -501,7 +507,7 @@ export function HealthDashboard({
     setSelectedMemberId(
       findMemberForEmail(nextOfflineState.workspace.family.members, userEmail)?.id ||
         nextOfflineState.workspace.family.members[0]?.id ||
-        'member_local_1',
+        '',
     );
     setProfileErrors({});
     setDigitizationDraft(null);
@@ -639,30 +645,44 @@ export function HealthDashboard({
 
   function processNextInQueue() {
     const queue = uploadQueueRef.current.length > 0 ? uploadQueueRef.current : uploadQueue;
-    if (queue.length > 0) {
+    const currentStatus = queueStatusRef.current;
+
+    if (queue.length > 0 && currentStatus) {
       const nextFile = queue[0];
       const pendingUploadId = pendingUploadIdsRef.current.shift();
       if (pendingUploadId) processingPendingUploadIdsRef.current.add(pendingUploadId);
       const remaining = queue.slice(1);
       uploadQueueRef.current = remaining;
       setUploadQueue(remaining);
-      setQueueStatus(prev => {
-        if (!prev) return null;
-        const nextCurrent = prev.current + 1;
-        showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${prev.total} (${nextFile.name})...`, 'info');
-        return { current: nextCurrent, total: prev.total };
+
+      const nextCurrent = currentStatus.current + 1;
+      const nextStatus = { current: nextCurrent, total: currentStatus.total };
+      updateQueueStatus(nextStatus);
+
+      showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${currentStatus.total} (${nextFile.name})...`, 'info');
+      void updateBatchNotificationProgress({
+        current: nextCurrent,
+        total: currentStatus.total,
+        fileName: nextFile.name,
+        memberName: selectedMember?.name,
       });
+
       void beginDigitization(nextFile, {
         memberId: pickedMemberIdForBatchRef.current,
         pendingUploadId,
       });
     } else {
+      const finalTotal = currentStatus?.total || 1;
       uploadQueueRef.current = [];
       pendingUploadIdsRef.current = [];
-      if (queueStatus) {
-        showToast(`Đã nhập dữ liệu xong toàn bộ ${queueStatus.total} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`, 'success');
+      if (currentStatus) {
+        showToast(`Đã nhập dữ liệu xong toàn bộ ${finalTotal} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`, 'success');
+        void updateBatchNotificationComplete({
+          total: finalTotal,
+          memberName: selectedMember?.name,
+        });
       }
-      setQueueStatus(null);
+      updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
       // Tự động kích hoạt toàn bộ luồng chuẩn hóa & phân tích 4 lớp sau khi tất cả các tệp hoàn tất
       void runFamilyDoctorSummaryAfterQueue();
@@ -735,13 +755,21 @@ export function HealthDashboard({
     uploadQueueRef.current = files.slice(1);
     pendingUploadIdsRef.current = queuedIds.slice(1);
     setUploadQueue(files.slice(1));
-    setQueueStatus({ current: 1, total: files.length });
+    const initialStatus = { current: 1, total: files.length };
+    updateQueueStatus(initialStatus);
     showToast(
       files.length === 1
         ? `Đang xử lý tài liệu cho ${targetMember.name}...`
         : `Đã xếp ${files.length} tệp; bắt đầu xử lý theo thứ tự.`,
       'info',
     );
+    void requestNotificationPermission();
+    void updateBatchNotificationProgress({
+      current: 1,
+      total: files.length,
+      fileName: files[0].name,
+      memberName: targetMember.name,
+    });
     void beginDigitization(files[0], {
       memberId,
       pendingUploadId: firstPendingId,
@@ -957,15 +985,14 @@ export function HealthDashboard({
       digitizationLogger.clearLogs();
 
       const freshWs = createDefaultLocalWorkspace(userEmail, userName);
-      const freshMember = freshWs.family.members[0];
-      const freshProf = { [freshMember.id]: createHealthProfile(freshMember) };
+      const freshProf = {};
 
       workspaceRef.current = freshWs;
       profilesRef.current = freshProf;
       setWorkspace(freshWs);
       setProfiles(freshProf);
       setProfileErrors({});
-      setSelectedMemberId(freshMember.id);
+      setSelectedMemberId('');
       setRootIdInput('');
       setDigitizationDraft(null);
       setIdentityResolutionDraft(null);
@@ -1350,23 +1377,7 @@ export function HealthDashboard({
 
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Personalize local member "Tôi" with actual name if available
-  useEffect(() => {
-    if (userName && workspace.rootFolderId === 'local_offline_workspace') {
-      const me = workspace.family.members.find((m) => m.id === 'member_local_1' && m.name === 'Tôi');
-      if (me) {
-        setWorkspace((prev) => ({
-          ...prev,
-          family: {
-            ...prev.family,
-            members: prev.family.members.map((m) =>
-              m.id === 'member_local_1' ? { ...m, name: userName } : m
-            ),
-          },
-        }));
-      }
-    }
-  }, [userName, workspace.rootFolderId, workspace.family.members]);
+
 
   const syncStatus = useMemo(() => {
     if (isSyncing || isLoading || isUploading || isSummarizing) return 'syncing';
@@ -1551,19 +1562,7 @@ export function HealthDashboard({
       const previousWorkspace = workspaceRef.current;
       const localProfiles = profilesRef.current;
 
-      // Nếu là Workspace mới hoàn toàn (chưa có thành viên), tự động tạo hồ sơ cho chính người dùng
-      if (created.family.members.length === 0) {
-        try {
-          created = await addDriveFamilyMember(created, {
-            id: `member_${crypto.randomUUID().slice(0, 8)}`,
-            name: userName || 'Tôi',
-            role: 'admin',
-            email: userEmail || undefined,
-          });
-        } catch (memberError) {
-          console.warn('Không thể tự động tạo hồ sơ cá nhân:', memberError);
-        }
-      }
+
 
       if (previousWorkspace?.rootFolderId === 'local_offline_workspace') {
         if (supportsDurableOfflineQueue() && userEmail) {
@@ -1782,7 +1781,7 @@ export function HealthDashboard({
   }
 
   async function handleSaveMember(updates: EditableFamilyMember) {
-    if (!workspace || !editingMember || !isWorkspaceAdmin) return;
+    if (!workspace || !editingMember) return;
     const name = updates.name.trim();
     if (!name) {
       showToast('Họ tên thành viên không được để trống.', 'error');
@@ -2416,6 +2415,8 @@ export function HealthDashboard({
         partialExtracted: update.partialEvent
           ? { ...prev.partialExtracted, ...update.partialEvent }
           : prev.partialExtracted,
+        totalPages: update.totalPages !== undefined ? update.totalPages : prev.totalPages,
+        processedPages: update.processedPages !== undefined ? update.processedPages : prev.processedPages,
       };
     });
   }
@@ -4534,7 +4535,7 @@ export function HealthDashboard({
                             >
                               Mở hồ sơ
                             </button>
-                            {driveAuthorized && isWorkspaceAdmin && (
+                            {driveAuthorized && (
                               <button
                                 type="button"
                                 disabled={isLoading || isSavingMember}
@@ -4565,86 +4566,89 @@ export function HealthDashboard({
                   </div>
 
                   {/* Add Member Form */}
-                  {isWorkspaceAdmin && (
-                    <form
-                      onSubmit={(e) => void handleAddMember(e)}
-                      className="mt-6 pt-5 border-t border-slate-100 space-y-4"
-                    >
-                      <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-1.5">
-                        <UserPlus className="w-4 h-4 text-emerald-600" />
-                        <span>Thêm thành viên mới</span>
-                      </h4>
-                      
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                            Họ và tên *
-                          </label>
-                          <input
-                            type="text"
-                            required
-                            value={newMemberName}
-                            onChange={(e) => setNewMemberName(e.target.value)}
-                            placeholder="Họ và tên thành viên..."
-                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                            Địa chỉ Gmail (dùng chia sẻ dữ liệu)
-                          </label>
-                          <input
-                            type="email"
-                            value={newMemberEmail}
-                            onChange={(e) => setNewMemberEmail(e.target.value)}
-                            placeholder="nguoithan@gmail.com"
-                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                            Ngày tháng năm sinh (ngày/tháng/năm)
-                          </label>
-                          <input
-                            type="text"
-                            value={newMemberBirthDate}
-                            onChange={(e) => setNewMemberBirthDate(e.target.value)}
-                            placeholder="DD/MM/YYYY (VD: 15/04/1990)"
-                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                            Giới tính
-                          </label>
-                          <select
-                            value={newMemberGender}
-                            onChange={(e) =>
-                              setNewMemberGender(e.target.value as 'male' | 'female' | 'other')
-                            }
-                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white font-medium focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                          >
-                            <option value="male">Nam</option>
-                            <option value="female">Nữ</option>
-                            <option value="other">Khác</option>
-                          </select>
-                        </div>
+                  <form
+                    onSubmit={(e) => void handleAddMember(e)}
+                    className="mt-6 pt-5 border-t border-slate-100 space-y-4"
+                  >
+                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-1.5">
+                      <UserPlus className="w-4 h-4 text-emerald-600" />
+                      <span>Thêm thành viên mới</span>
+                    </h4>
+                    
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {/* 1. Họ và tên */}
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                          Họ và tên *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={newMemberName}
+                          onChange={(e) => setNewMemberName(e.target.value)}
+                          placeholder="Họ và tên thành viên..."
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                        />
                       </div>
+                      {/* 2. Ngày tháng năm sinh */}
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                          Ngày tháng năm sinh
+                        </label>
+                        <input
+                          type="text"
+                          value={newMemberBirthDate}
+                          onChange={(e) => setNewMemberBirthDate(e.target.value)}
+                          placeholder="DD/MM/YYYY (VD: 15/04/1990)"
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                        />
+                      </div>
+                      {/* 3. Giới tính */}
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                          Giới tính
+                        </label>
+                        <select
+                          value={newMemberGender}
+                          onChange={(e) =>
+                            setNewMemberGender(e.target.value as 'male' | 'female' | 'other')
+                          }
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white font-medium focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                        >
+                          <option value="male">Nam</option>
+                          <option value="female">Nữ</option>
+                          <option value="other">Khác</option>
+                        </select>
+                      </div>
+                      {/* 4. Địa chỉ Gmail */}
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                          Địa chỉ Gmail
+                        </label>
+                        <input
+                          type="email"
+                          value={newMemberEmail}
+                          onChange={(e) => setNewMemberEmail(e.target.value)}
+                          placeholder="nguoithan@gmail.com"
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
 
-                      <button
-                        type="submit"
-                        disabled={isAddingMember || !newMemberName.trim()}
-                        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs active:scale-[0.98] transition-all disabled:opacity-50"
-                      >
-                        {isAddingMember ? (
-                          <LoaderCircle className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <UserPlus className="w-4 h-4" />
-                        )}
-                        <span>Tạo hồ sơ thành viên mới</span>
-                      </button>
-                    </form>
-                  )}
+                    {/* Nút Tạo hồ sơ */}
+                    <button
+                      type="submit"
+                      disabled={isAddingMember || !newMemberName.trim()}
+                      className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs active:scale-[0.98] transition-all disabled:opacity-50"
+                    >
+                      {isAddingMember ? (
+                        <LoaderCircle className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <UserPlus className="w-4 h-4" />
+                      )}
+                      <span>Tạo hồ sơ</span>
+                    </button>
+                  </form>
                 </div>
               </div>
             )}
@@ -4934,6 +4938,8 @@ export function HealthDashboard({
           modelUsed={trackerState.modelUsed}
           partialExtracted={trackerState.partialExtracted}
           error={trackerState.error}
+          totalPages={trackerState.totalPages}
+          processedPages={trackerState.processedPages}
           onReview={() => {
             if (trackerState.driveFile) {
               setDigitizationDraft({
@@ -4961,7 +4967,6 @@ export function HealthDashboard({
               return;
             }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
-            if (queueStatus) processNextInQueue();
           }}
         />
       )}

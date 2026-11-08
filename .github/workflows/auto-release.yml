@@ -30,6 +30,12 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.2.1
+          cache-disabled: false
+
       # 2. Tự động lấy versionName, buildaab từ package.json & versionCode từ Git Commit Count
       - name: Determine Auto Version
         id: auto_version
@@ -198,6 +204,11 @@ jobs:
                 fs.writeFileSync(manifestPath, manifest, 'utf8');
               }
             "
+          fi
+
+          if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            sed -i "s/gradle-8.2.1-all.zip/gradle-8.2.1-bin.zip/g" android/gradle/wrapper/gradle-wrapper.properties
+            sed -i "s/networkTimeout=.*/networkTimeout=60000/g" android/gradle/wrapper/gradle-wrapper.properties
           fi
 
           if [ -f "android/variables.gradle" ]; then

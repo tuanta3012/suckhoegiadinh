@@ -86,22 +86,32 @@ async function driveRequest<T>(url: string, init: RequestInit = {}): Promise<T> 
   return response.json() as Promise<T>;
 }
 
-function driveQuery(parentId: string, name: string, mimeType?: string): string {
-  const clauses = [`'${parentId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' in parents`, `name = '${name.replace(/'/g, "\\'")}'`, 'trashed = false'];
-  if (mimeType) clauses.push(`mimeType = '${mimeType}'`);
+function driveQuery(parentId?: string | null, name?: string, mimeType?: string): string {
+  const clauses: string[] = ['trashed = false'];
+  if (parentId) {
+    clauses.push(`'${parentId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' in parents`);
+  }
+  if (name) {
+    clauses.push(`name = '${name.replace(/'/g, "\\'")}'`);
+  }
+  if (mimeType) {
+    clauses.push(`mimeType = '${mimeType}'`);
+  }
   return clauses.join(' and ');
 }
 
-async function listFiles(parentId: string, name?: string, mimeType?: string): Promise<DriveFile[]> {
+async function listFiles(parentId?: string | null, name?: string, mimeType?: string): Promise<DriveFile[]> {
   const files: DriveFile[] = [];
   let pageToken: string | undefined;
   do {
     const params = new URLSearchParams({
-      q: name ? driveQuery(parentId, name, mimeType) : `'${parentId}' in parents and trashed = false`,
+      q: driveQuery(parentId, name, mimeType),
       fields: `nextPageToken,files(${FILE_FIELDS})`,
       pageSize: '1000',
-      orderBy: 'name',
     });
+    if (!name) {
+      params.set('orderBy', 'name');
+    }
     if (pageToken) params.set('pageToken', pageToken);
     const result = await driveRequest<{ files?: DriveFile[]; nextPageToken?: string }>(
       `${DRIVE_API}/files?${params.toString()}`,
@@ -208,7 +218,7 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
   const foldersToInspect: DriveFile[] = [];
 
-  // 1. Parallel search only at the root level of My Drive
+  // 1. Search strictly at the root level of My Drive in parallel
   const searchPromises = LEGACY_WORKSPACE_FOLDER_NAMES.map(async (name) => {
     try {
       return await listFiles('root', name, FOLDER_MIME);
@@ -228,7 +238,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
 
   if (foldersToInspect.length === 0) return null;
 
-  // 2. Fast-path inspection: Look for family.json in parallel
+  // 2. Fast-path inspection: Look for family.json directly in root candidates
   const inspectionResults = await Promise.all(
     foldersToInspect.map(async (folder) => {
       try {
@@ -254,64 +264,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     return openHealthWorkspace(folder.id);
   }
 
-  // 3. Fallback: Only do expensive subfolder inspection if no manifest found anywhere
-  // and we have a very likely candidate (named exactly like current workspace)
-  const candidate = foldersToInspect.find(f => f.name === WORKSPACE_FOLDER_NAME);
-  if (candidate) {
-    const children = await listFiles(candidate.id);
-    const profilesFolder = children.find((c) => c.name === 'profiles' && c.mimeType === FOLDER_MIME);
-    if (profilesFolder) {
-      // Recovery logic
-      const profileFiles = await listFiles(profilesFolder.id);
-      const members: FamilyMember[] = [];
-      for (const pf of profileFiles) {
-        if (pf.name.endsWith('.json')) {
-          try {
-            const rawProfile = await driveRequest<any>(
-              `${DRIVE_API}/files/${encodeURIComponent(pf.id)}?alt=media`
-            );
-            const memberName = rawProfile?.member?.name || pf.name.replace('.json', '');
-            const memberId = rawProfile?.member?.id || `member_${pf.id.slice(0, 8)}`;
-            members.push({
-              id: memberId,
-              name: memberName,
-              driveFolderId: candidate.id,
-              profileFileId: pf.id,
-              role: rawProfile?.member?.role || 'other',
-            });
-          } catch { /* skip */ }
-        }
-      }
-
-      if (members.length > 0) {
-        const now = new Date().toISOString();
-        const rawFolder = children.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME) || candidate;
-        const family: HealthFamily = {
-          schemaVersion: 1,
-          adminEmail: '',
-          rawFilesFolderId: rawFolder.id,
-          profilesFolderId: profilesFolder.id,
-          members,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        const manifest = await uploadContent(
-          'family.json',
-          JSON_MIME,
-          new Blob([JSON.stringify(family, null, 2)]),
-          candidate.id,
-        );
-
-        return {
-          rootFolderId: candidate.id,
-          familyFileId: manifest.id,
-          family,
-        };
-      }
-    }
-  }
-
+  // Strictly no deep subfolder scan if family.json is absent
   return null;
 }
 

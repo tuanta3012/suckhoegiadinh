@@ -35,6 +35,8 @@ interface DigitizationProgressTrackerModalProps {
   modelUsed?: string;
   partialExtracted: Partial<HealthEvent>;
   error?: string | null;
+  totalPages?: number;
+  processedPages?: number;
   onReview: () => void;
   onRetry: () => void;
   onManualEntry: () => void;
@@ -52,6 +54,8 @@ export function DigitizationProgressTrackerModal({
   modelUsed = 'gemini-3.5-flash-lite',
   partialExtracted,
   error,
+  totalPages,
+  processedPages,
   onReview,
   onRetry,
   onManualEntry,
@@ -185,29 +189,37 @@ export function DigitizationProgressTrackerModal({
 
           {/* Sequential Multi-Page Page Badges for PDFs */}
           {(() => {
-            const pageMatch =
-              progressMessage.match(/(?:xử lý|đã xong|trang)?\s*(\d+)\/(\d+)\s*trang/i) ||
-              progressMessage.match(/trang\s*(\d+)\/(\d+)/i) ||
-              progressMessage.match(/(\d+)\/(\d+)/);
-            const curPage = pageMatch ? parseInt(pageMatch[1], 10) : (step === 'completed' ? (isPdf ? 1 : 1) : 0);
-            const totPages = pageMatch ? parseInt(pageMatch[2], 10) : 0;
-            
-            if (totPages > 1 || (isPdf && curPage > 0)) {
-              const pagesCount = totPages || Math.max(curPage, 1);
+            let curPage = processedPages || 0;
+            let totPages = totalPages || 0;
+
+            if (!totPages) {
+              const pageMatch =
+                progressMessage.match(/(?:xử lý|đã xong)?\s*trang\s*(\d+)\/(\d+)/i) ||
+                progressMessage.match(/(\d+)\/(\d+)\s*trang/i);
+              if (pageMatch) {
+                curPage = parseInt(pageMatch[1], 10);
+                totPages = parseInt(pageMatch[2], 10);
+              }
+            }
+
+            if (totPages > 1) {
+              const pagesCount = totPages;
+              const displayCurPage = step === 'completed' ? pagesCount : Math.min(curPage, pagesCount);
+
               return (
                 <div className="p-3 rounded-2xl bg-slate-900 text-white space-y-2 shadow-sm border border-slate-800 animate-in fade-in duration-200">
                   <div className="flex items-center justify-between text-xs font-bold text-emerald-400">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <FileStack className="w-4 h-4 shrink-0 text-emerald-400" />
-                      <span className="truncate">Tiến độ số hóa từng trang ({curPage}/{pagesCount})</span>
+                      <span className="truncate">Tiến độ số hóa từng trang ({displayCurPage}/{pagesCount})</span>
                     </div>
                   </div>
 
                   <div className="flex flex-wrap gap-1.5 pt-0.5">
                     {Array.from({ length: pagesCount }, (_, idx) => {
                       const pageNum = idx + 1;
-                      const isDone = pageNum < curPage || step === 'completed';
-                      const isCurrent = pageNum === curPage && step !== 'completed';
+                      const isDone = pageNum <= displayCurPage || step === 'completed';
+                      const isCurrent = pageNum === displayCurPage + 1 && step !== 'completed';
                       return (
                         <div
                           key={pageNum}
