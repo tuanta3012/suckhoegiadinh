@@ -35,7 +35,6 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
     >
       <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in-95 duration-500">
         <div className="relative">
-          <div className="absolute -inset-3 rounded-full bg-emerald-500/20 blur-xl animate-pulse" />
           <AppLogo size="xl" />
         </div>
         <div className="text-center space-y-1.5 px-4">

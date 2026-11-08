@@ -28,7 +28,7 @@ export const AppLogo: React.FC<AppLogoProps> = ({
   return (
     <div className={`flex items-center gap-3 ${className}`}>
       <div
-        className={`relative overflow-hidden shrink-0 shadow-none flex items-center justify-center ${sizeMap[size]}`}
+        className={`relative overflow-hidden shrink-0 shadow-none flex items-center justify-center bg-[#059669] ${sizeMap[size]}`}
       >
         <img
           src="/src/assets/images/app_logo_2d_flat_1794137089154.jpg"

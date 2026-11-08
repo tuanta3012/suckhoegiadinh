@@ -51,9 +51,9 @@ def main():
     run(['cp', 'resources/icon-background.png', 'resources/android/icon-background.png'])
     run(['cp', 'resources/icon-foreground.png', 'resources/android/icon-foreground.png'])
 
-    # 4. Splash screen
+    # 4. Splash screen (Matching Teal background for 2D flat look)
     run([
-        'convert', '-size', '2732x2732', 'xc:#0f172a',
+        'convert', '-size', '2732x2732', 'xc:#059669',
         '(', solid_master_png, '-resize', '768x768', ')',
         '-gravity', 'center', '-composite',
         '-strip', '-colors', '256', '-depth', '8', '-define', 'png:compression-level=9',
