@@ -1,4 +1,8 @@
 
+import { Capacitor } from '@capacitor/core';
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+
 export interface DigitizationLogEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -68,7 +72,7 @@ class DigitizationLogger {
     }
   }
 
-  exportLogsAsFile(customLogs?: DigitizationLogEntry[]) {
+  async exportLogsAsFile(customLogs?: DigitizationLogEntry[]): Promise<boolean> {
     try {
       // Prioritize customLogs (usually from server), then local logs, then default message
       let logsToExport: DigitizationLogEntry[] = [];
@@ -89,16 +93,32 @@ class DigitizationLogger {
       }
 
       const jsonString = JSON.stringify(logsToExport, null, 2);
-      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.setAttribute('href', url);
       const dateStr = new Date().toISOString().slice(0, 10);
-      link.setAttribute('download', `family_health_ai_digitization_logs_${dateStr}.json`);
+      const fileName = `family_health_ai_digitization_logs_${dateStr}.json`;
+      if (Capacitor.isNativePlatform()) {
+        const file = await Filesystem.writeFile({
+          path: fileName,
+          data: jsonString,
+          directory: Directory.Cache,
+          encoding: Encoding.UTF8,
+        });
+        await Share.share({
+          title: 'Log ứng dụng Sức khỏe Gia đình',
+          text: 'Tệp log chẩn đoán của ứng dụng.',
+          url: file.uri,
+          dialogTitle: 'Xuất log ứng dụng',
+        });
+        return true;
+      }
+
+      const url = URL.createObjectURL(new Blob([jsonString], { type: 'application/json;charset=utf-8;' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       return true;
     } catch (e) {
       console.error('[DigitizationLogger] Failed to export logs:', e);

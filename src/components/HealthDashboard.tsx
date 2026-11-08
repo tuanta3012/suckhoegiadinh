@@ -3611,17 +3611,32 @@ export function HealthDashboard({
                     onClick={async () => {
                       setShowSettingsDropdown(false);
                       try {
-                        showToast('Đang tải log từ máy chủ...', 'info');
-                        const serverLogs = await fetchServerLogs();
-                        const success = digitizationLogger.exportLogsAsFile(serverLogs);
+                        let serverLogs: Awaited<ReturnType<typeof fetchServerLogs>> | undefined;
+                        let serverLogError: unknown;
+                        try {
+                          serverLogs = await fetchServerLogs();
+                        } catch (error) {
+                          serverLogError = error;
+                          console.warn('[Log export] Server logs unavailable; exporting local logs.', error);
+                        }
+                        const success = await digitizationLogger.exportLogsAsFile(serverLogs);
                         if (success) {
-                          showToast('Đã xuất file log hệ thống thành công.', 'success');
+                          showToast(
+                            serverLogError
+                              ? 'Không kết nối được máy chủ; đã xuất log lưu trên thiết bị.'
+                              : 'Đã xuất file log hệ thống thành công.',
+                            serverLogError ? 'info' : 'success',
+                          );
                         } else {
                           showToast('Không thể tạo file log.', 'error');
                         }
                       } catch (err) {
-                        showToast(err instanceof Error ? err.message : 'Lỗi khi tải log từ server.', 'error');
-                        digitizationLogger.exportLogsAsFile();
+                        showToast(
+                          err instanceof Error
+                            ? `Không thể xuất log: ${err.message}`
+                            : 'Không thể xuất log từ thiết bị.',
+                          'error',
+                        );
                       }
                     }}
                     className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
