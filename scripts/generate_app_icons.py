@@ -59,6 +59,8 @@ def main():
         '-strip', '-colors', '256', '-depth', '8', '-define', 'png:compression-level=9',
         'resources/splash.png'
     ])
+    # Copy to android native drawable
+    run(['cp', 'resources/splash.png', 'android/app/src/main/res/drawable/splash.png'])
 
     # 5. Android mipmap densities for Adaptive & Legacy icons
     densities = {

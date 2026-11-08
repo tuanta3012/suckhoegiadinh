@@ -1,4 +1,5 @@
 import React from 'react';
+import logoUrl from '../assets/images/app_logo_2d_flat_1794137089154.jpg';
 
 interface AppLogoProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
@@ -31,7 +32,7 @@ export const AppLogo: React.FC<AppLogoProps> = ({
         className={`relative overflow-hidden shrink-0 shadow-none flex items-center justify-center bg-[#059669] ${sizeMap[size]}`}
       >
         <img
-          src="/src/assets/images/app_logo_2d_flat_1794137089154.jpg"
+          src={logoUrl}
           alt="Logo Sức Khỏe Gia Đình"
           className="w-full h-full object-cover"
           onError={(e) => {
