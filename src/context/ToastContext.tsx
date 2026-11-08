@@ -36,7 +36,7 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       {toast && (
         <div
           role={toast.type === 'error' ? 'alert' : 'status'}
-          className={`fixed bottom-4 left-1/2 z-[100] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-semibold shadow-xl ${
+          className={`fixed top-20 left-1/2 z-[100] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-semibold shadow-xl ${
             toast.type === 'error'
               ? 'bg-rose-700 text-white'
               : toast.type === 'success'

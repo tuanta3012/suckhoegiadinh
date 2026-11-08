@@ -1495,9 +1495,9 @@ export function HealthDashboard({
                   '',
               );
               setRootIdInput(opened.rootFolderId);
+              setIsSyncing(false);
               await reloadProfiles(opened);
               showToast('Đã kết nối và đồng bộ 2 chiều dữ liệu từ Google Drive.', 'success');
-              setIsSyncing(false);
               return;
             }
           } catch {
@@ -1505,11 +1505,23 @@ export function HealthDashboard({
           }
         }
 
-        let assignment: Awaited<ReturnType<typeof readHealthWorkspaceAssignment>> = null;
-        try {
-          assignment = await readHealthWorkspaceAssignment(userEmail);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Không thể kiểm tra lời mời Workspace.';
+        const shouldDiscover = !discoveryAttemptedRef.current || shouldRefreshCachedWorkspace;
+        const assignmentPromise = readHealthWorkspaceAssignment(userEmail).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        const discoveryPromise = shouldDiscover
+          ? findExistingHealthWorkspace().then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error }),
+            )
+          : Promise.resolve({ value: null });
+        const assignmentResult = await assignmentPromise;
+        const assignment = 'value' in assignmentResult ? assignmentResult.value : null;
+        if ('error' in assignmentResult) {
+          const message = assignmentResult.error instanceof Error
+            ? assignmentResult.error.message
+            : 'Không thể kiểm tra lời mời Workspace.';
           setErrorMessage(message);
           showToast(message, 'error');
         }
@@ -1527,9 +1539,9 @@ export function HealthDashboard({
                   '',
               );
               setRootIdInput(opened.rootFolderId);
+              setIsSyncing(false);
               await reloadProfiles(opened);
               showToast('Đã mở không gian gia đình được chia sẻ từ Google Drive.', 'success');
-              setIsSyncing(false);
               return;
             }
           } catch {
@@ -1544,7 +1556,9 @@ export function HealthDashboard({
 
         // Tự động tìm kiếm thư mục Sức khỏe Gia đình đã có trên Drive của tài khoản
         discoveryAttemptedRef.current = true;
-        const loaded = await findExistingHealthWorkspace();
+        const discoveryResult = await discoveryPromise;
+        if ('error' in discoveryResult) throw discoveryResult.error;
+        const loaded = discoveryResult.value;
         const discovered = loaded
           ? await applyPendingMemberDeletions(loaded)
           : null;
@@ -1558,12 +1572,26 @@ export function HealthDashboard({
               '',
           );
           setRootIdInput(discovered.rootFolderId);
-          const loadedProfiles = await reloadProfiles(discovered);
-          const totalEvents = Object.values(loadedProfiles).reduce((sum, p) => sum + (p.timeline?.length || 0), 0);
-          showToast(
-            `Đã tự động kết nối thư mục "Suc khoe gia dinh" trên Google Drive (${discovered.family.members.length} thành viên, ${totalEvents} hồ sơ)!`,
-            'success',
-          );
+          setIsSyncing(false);
+          void reloadProfiles(discovered)
+            .then((loadedProfiles) => {
+              const totalEvents = Object.values(loadedProfiles).reduce(
+                (sum, profile) => sum + (profile.timeline?.length || 0),
+                0,
+              );
+              showToast(
+                `Đã tự động kết nối thư mục "Suc khoe gia dinh" trên Drive (${discovered.family.members.length} thành viên, ${totalEvents} hồ sơ).`,
+                'success',
+              );
+            })
+            .catch((error: unknown) => {
+              console.error('[Auto-Connect] Could not load Drive profiles.', error);
+              const message = error instanceof Error
+                ? error.message
+                : 'Không thể tải hồ sơ sức khỏe từ Google Drive.';
+              setErrorMessage(message);
+              showToast(message, 'error');
+            });
         } else if (!cancelled) {
           // Silent end of discovery if nothing found
         }
