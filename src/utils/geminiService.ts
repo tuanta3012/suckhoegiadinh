@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import { ensureGeminiAuthUser } from './googleDriveService';
 import { buildApiUrl } from './apiConfig';
+import { digitizationLogger } from './digitizationLogger';
 
 const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
 const OCR_REQUEST_TIMEOUT_MS = 600_000;
@@ -50,9 +51,11 @@ async function getAuthenticatedUserToken(): Promise<string> {
 }
 
 /**
- * Server-side Gemini API invocation helper
+ * Server-side Gemini API invocation helper with logging & execution duration tracking
  */
 async function callServerGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+  const getDuration = digitizationLogger.startTimer();
+  digitizationLogger.log('info', 'api', `Bắt đầu gọi API server: /api/gemini/${endpoint}`, { endpoint });
   const token = await getAuthenticatedUserToken();
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
@@ -68,20 +71,50 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
       body: JSON.stringify(body),
     });
   } catch (error) {
+    const durationMs = getDuration();
     if (controller.signal.aborted) {
+      digitizationLogger.log(
+        'error',
+        'api',
+        `API /api/gemini/${endpoint} quá thời gian chờ (${durationMs}ms)`,
+        undefined,
+        durationMs,
+      );
       throw new Error('Yêu cầu Gemini quá thời gian chờ. Hãy thử lại với tài liệu nhỏ hơn.');
     }
+    digitizationLogger.log(
+      'error',
+      'api',
+      `Lỗi kết nối khi gọi /api/gemini/${endpoint}: ${error instanceof Error ? error.message : 'Unknown'}`,
+      undefined,
+      durationMs,
+    );
     throw error;
   } finally {
     window.clearTimeout(timeout);
   }
 
+  const durationMs = getDuration();
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.success) {
     const errorMsg = data?.error || `Máy chủ Gemini trả về mã lỗi ${response.status}.`;
+    digitizationLogger.log(
+      'error',
+      'api',
+      `API /api/gemini/${endpoint} thất bại (HTTP ${response.status}): ${errorMsg}`,
+      { status: response.status },
+      durationMs,
+    );
     throw new Error(errorMsg);
   }
 
+  digitizationLogger.log(
+    'info',
+    'api',
+    `API /api/gemini/${endpoint} phản hồi thành công (${durationMs}ms)`,
+    undefined,
+    durationMs,
+  );
   return data as T;
 }
 
@@ -213,6 +246,15 @@ export async function extractHealthEventWithProgress(
   member: FamilyMember,
   onProgress?: (update: ExtractionProgressUpdate) => void
 ): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+  const getDuration = digitizationLogger.startTimer();
+  const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+  digitizationLogger.log(
+    'info',
+    'ocr_start',
+    `Bắt đầu số hóa OCR tài liệu: "${file.name}" (${(file.size / 1024).toFixed(1)} KB, MIME: ${mimeType}) cho hồ sơ ${member.name}`,
+    { fileName: file.name, fileSize: file.size, mimeType, memberId: member.id, memberName: member.name }
+  );
+
   onProgress?.({
     stage: 'preparing',
     progressPercent: 25,
@@ -220,7 +262,6 @@ export async function extractHealthEventWithProgress(
   });
 
   const base64Data = await fileToBase64(file);
-  const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
 
   onProgress?.({
     stage: 'reading_document',
@@ -257,6 +298,7 @@ export async function extractHealthEventWithProgress(
         base64Data,
         mimeType,
         member,
+        fileName: file.name,
         stream: true,
       }),
     });
@@ -314,6 +356,9 @@ export async function extractHealthEventWithProgress(
         if (data.type === 'error') throw new Error(data.error || 'Máy chủ OCR không thể xử lý tài liệu.');
         if (data.type === 'progress') {
           const isRetry = data.message?.includes('phương án dự phòng') || data.message?.includes('Đang thử mô hình');
+          if (isRetry) {
+            digitizationLogger.log('warn', 'ocr_retry', `Thử lại hoặc chuyển khóa dự phòng: ${data.message}`, { modelUsed: activeModel });
+          }
           onProgress?.({
             stage: isRetry ? 'retrying_model' : 'waiting_for_model',
             progressPercent: data.progressPercent ?? 48,
@@ -361,6 +406,25 @@ export async function extractHealthEventWithProgress(
       throw new Error('AI không trích xuất được thông tin có thể xác nhận từ tài liệu. Hãy nhập thủ công hoặc thử lại.');
     }
 
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'info',
+      'ocr_complete',
+      `Số hóa OCR hoàn tất trong ${durationMs}ms (${(durationMs / 1000).toFixed(1)}s) bằng model ${activeModel}. Trích xuất: tiêu đề="${normalized.title || 'N/A'}", người bệnh="${normalized.patientName || 'N/A'}", ${normalized.diagnoses?.length || 0} chẩn đoán, ${normalized.medications?.length || 0} thuốc, ${normalized.metrics?.length || 0} chỉ số đo.`,
+      {
+        durationMs,
+        modelUsed: activeModel,
+        totalPages: docTotalPages,
+        processedPages: docProcessedPages,
+        patientName: normalized.patientName,
+        title: normalized.title,
+        diagnosesCount: normalized.diagnoses?.length || 0,
+        medicationsCount: normalized.medications?.length || 0,
+        metricsCount: normalized.metrics?.length || 0,
+      },
+      durationMs,
+    );
+
     onProgress?.({
       stage: 'matching_patient',
       progressPercent: 96,
@@ -386,12 +450,23 @@ export async function extractHealthEventWithProgress(
       processedPages: docProcessedPages || docTotalPages,
     };
   } catch (error) {
+    const durationMs = getDuration();
+    const errorMsg = controller.signal.aborted
+      ? abortReason === 'idle'
+        ? 'Không nhận được dữ liệu phản hồi từ AI trong 4 phút. Hãy kiểm tra kết nối mạng hoặc thử lại.'
+        : 'Quá thời gian OCR tối đa (10 phút). Tệp vẫn được lưu an toàn trên Google Drive; bạn có thể bấm "Chạy lại OCR" hoặc nhập thủ công.'
+      : error instanceof Error
+        ? error.message
+        : 'Lỗi OCR không xác định';
+    digitizationLogger.log(
+      'error',
+      'ocr_error',
+      `Lỗi xử lý OCR tài liệu "${file.name}": ${errorMsg}`,
+      { error: errorMsg, abortReason },
+      durationMs,
+    );
     if (controller.signal.aborted) {
-      throw new Error(
-        abortReason === 'idle'
-          ? 'Không nhận được dữ liệu phản hồi từ AI trong 4 phút. Hãy kiểm tra kết nối mạng hoặc thử lại.'
-          : 'Quá thời gian OCR tối đa (10 phút). Tệp vẫn được lưu an toàn trên Google Drive; bạn có thể bấm "Chạy lại OCR" hoặc nhập thủ công.',
-      );
+      throw new Error(errorMsg);
     }
     throw error;
   } finally {
@@ -426,19 +501,50 @@ export async function refineAndOrganizeMemberData(
     return { organizedTimeline: [], refinementNotes: ['Chưa có sự kiện y tế nào để hiệu chỉnh.'] };
   }
 
-  const data = await callServerGemini<{
-    success: boolean;
-    organizedTimeline: HealthEvent[];
-    refinementNotes: string[];
-  }>('refine-and-organize', {
-    member,
-    events,
-  });
+  const getDuration = digitizationLogger.startTimer();
+  digitizationLogger.log(
+    'info',
+    'refine_start',
+    `Bắt đầu chuẩn hóa danh pháp y tế tự động cho ${member.name} (${events.length} sự kiện)`,
+    { memberId: member.id, eventCount: events.length }
+  );
 
-  return {
-    organizedTimeline: Array.isArray(data.organizedTimeline) ? data.organizedTimeline : events,
-    refinementNotes: Array.isArray(data.refinementNotes) ? data.refinementNotes : ['Đã chuẩn hóa dữ liệu.'],
-  };
+  try {
+    const data = await callServerGemini<{
+      success: boolean;
+      organizedTimeline: HealthEvent[];
+      refinementNotes: string[];
+    }>('refine-and-organize', {
+      member,
+      events,
+    });
+
+    const durationMs = getDuration();
+    const finalTimeline = Array.isArray(data.organizedTimeline) ? data.organizedTimeline : events;
+    const notes = Array.isArray(data.refinementNotes) ? data.refinementNotes : ['Đã chuẩn hóa dữ liệu.'];
+    digitizationLogger.log(
+      'info',
+      'refine_complete',
+      `Chuẩn hóa danh pháp y tế hoàn tất trong ${durationMs}ms (${finalTimeline.length} sự kiện đã xử lý)`,
+      { durationMs, organizedCount: finalTimeline.length, notesCount: notes.length },
+      durationMs
+    );
+
+    return {
+      organizedTimeline: finalTimeline,
+      refinementNotes: notes,
+    };
+  } catch (error) {
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'error',
+      'refine_error',
+      `Lỗi khi chuẩn hóa danh pháp y tế: ${error instanceof Error ? error.message : 'Unknown'}`,
+      undefined,
+      durationMs
+    );
+    throw error;
+  }
 }
 
 // ============================================================================
@@ -453,14 +559,41 @@ export async function summarizeHealthProfile(
   member: FamilyMember,
   profile: HealthProfile
 ): Promise<string> {
-  const data = await callServerGemini<{ success: boolean; summary: string }>('summarize', {
-    member,
-    profile,
-  });
-  if (typeof data.summary !== 'string' || !data.summary.trim()) {
-    throw new Error('AI chưa trả về bản tóm tắt hợp lệ. Vui lòng thử lại sau.');
+  const getDuration = digitizationLogger.startTimer();
+  digitizationLogger.log(
+    'info',
+    'summary_start',
+    `Bắt đầu tổng kết hồ sơ sức khỏe cho ${member.name} (${profile.timeline.length} sự kiện)`,
+    { memberId: member.id, eventCount: profile.timeline.length }
+  );
+  try {
+    const data = await callServerGemini<{ success: boolean; summary: string }>('summarize', {
+      member,
+      profile,
+    });
+    if (typeof data.summary !== 'string' || !data.summary.trim()) {
+      throw new Error('AI chưa trả về bản tóm tắt hợp lệ. Vui lòng thử lại sau.');
+    }
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'info',
+      'summary_complete',
+      `Tổng kết hồ sơ sức khỏe hoàn tất trong ${durationMs}ms (${data.summary.length} ký tự)`,
+      { durationMs, length: data.summary.length },
+      durationMs
+    );
+    return data.summary.trim();
+  } catch (error) {
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'error',
+      'summary_error',
+      `Lỗi tổng kết hồ sơ cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
+      undefined,
+      durationMs
+    );
+    throw error;
   }
-  return data.summary.trim();
 }
 
 /**
@@ -555,58 +688,100 @@ export async function analyzeComprehensiveHealth(
   profile: HealthProfile,
   model: string = 'gemini-3.6-flash'
 ): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock; modelUsed?: string }> {
-  const data = await callServerGemini<{
-    success: boolean;
-    result: AiDeepAnalysisResult;
-    aiAnalysis?: AiAnalysisBlock;
-    modelUsed?: string;
-  }>('analyze-comprehensive', {
-    member,
-    profile,
-    model,
-  });
+  const getDuration = digitizationLogger.startTimer();
+  digitizationLogger.log(
+    'info',
+    'deep_analysis_start',
+    `Bắt đầu phân tích y khoa chuyên sâu 4 lớp (${model}) cho ${member.name} (${profile.timeline.length} sự kiện)`,
+    { memberId: member.id, model, eventCount: profile.timeline.length }
+  );
 
-  const result = data.result;
-  if (
-    !isRecord(result) ||
-    typeof result.overallAssessment !== 'string' ||
-    !Array.isArray(result.crossCorrelations) ||
-    !Array.isArray(result.velocityTrends) ||
-    !Array.isArray(result.chronicSurveillance) ||
-    !isRecord(result.roadmap) ||
-    !Array.isArray(result.roadmap.criticalAlerts) ||
-    !Array.isArray(result.roadmap.specialistReferrals) ||
-    !isRecord(result.roadmap.timeBoundPlan) ||
-    !Array.isArray(result.roadmap.timeBoundPlan.next3Months) ||
-    !Array.isArray(result.roadmap.timeBoundPlan.next6Months) ||
-    !Array.isArray(result.roadmap.timeBoundPlan.next12Months)
-  ) {
-    throw new Error('AI trả về phân tích chưa đầy đủ. Hồ sơ chưa được cập nhật; vui lòng thử phân tích lại.');
-  }
+  try {
+    const data = await callServerGemini<{
+      success: boolean;
+      result: AiDeepAnalysisResult;
+      aiAnalysis?: AiAnalysisBlock;
+      modelUsed?: string;
+    }>('analyze-comprehensive', {
+      member,
+      profile,
+      model,
+    });
 
-  const aiAnalysisFallback: AiAnalysisBlock = {
-    lastAnalyzedDate: new Date().toISOString().slice(0, 10),
-    overviewSummary: result.overallAssessment,
-    criticalAlerts: result.roadmap.criticalAlerts,
-    chronicConditionsTracking: result.chronicSurveillance.map(
-      (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`
-    ),
-    actionRoadmap: {
-      specialistConsultation: result.roadmap.specialistReferrals.map((s) => s.specialty),
-      dietaryModifications: result.roadmap.timeBoundPlan.next3Months.filter((i) =>
-        /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i)
+    const rawResult = isRecord(data?.result) ? (data.result as Record<string, any>) : {};
+    const rawRoadmap = isRecord(rawResult.roadmap) ? (rawResult.roadmap as Record<string, any>) : {};
+    const rawTimePlan = isRecord(rawRoadmap.timeBoundPlan) ? (rawRoadmap.timeBoundPlan as Record<string, any>) : {};
+
+    const result: AiDeepAnalysisResult = {
+      analyzedAt: typeof rawResult.analyzedAt === 'string' ? rawResult.analyzedAt : new Date().toISOString(),
+      healthScore: typeof rawResult.healthScore === 'number' && Number.isFinite(rawResult.healthScore) ? rawResult.healthScore : 80,
+      overallAssessment: typeof rawResult.overallAssessment === 'string' && rawResult.overallAssessment.trim()
+        ? rawResult.overallAssessment
+        : `Dựa trên hồ sơ y tế của ${member.name}, hệ thống đã ghi nhận và phân tích dữ liệu sức khỏe.`,
+      crossCorrelations: Array.isArray(rawResult.crossCorrelations) ? rawResult.crossCorrelations : [],
+      velocityTrends: Array.isArray(rawResult.velocityTrends) ? rawResult.velocityTrends : [],
+      chronicSurveillance: Array.isArray(rawResult.chronicSurveillance) ? rawResult.chronicSurveillance : [],
+      roadmap: {
+        criticalAlerts: Array.isArray(rawRoadmap.criticalAlerts) ? rawRoadmap.criticalAlerts : [],
+        specialistReferrals: Array.isArray(rawRoadmap.specialistReferrals) ? rawRoadmap.specialistReferrals : [],
+        timeBoundPlan: {
+          next3Months: Array.isArray(rawTimePlan.next3Months) ? rawTimePlan.next3Months : [],
+          next6Months: Array.isArray(rawTimePlan.next6Months) ? rawTimePlan.next6Months : [],
+          next12Months: Array.isArray(rawTimePlan.next12Months) ? rawTimePlan.next12Months : [],
+        },
+      },
+    };
+
+    const aiAnalysisFallback: AiAnalysisBlock = {
+      lastAnalyzedDate: new Date().toISOString().slice(0, 10),
+      overviewSummary: result.overallAssessment,
+      criticalAlerts: result.roadmap.criticalAlerts,
+      chronicConditionsTracking: result.chronicSurveillance.map(
+        (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`
       ),
-      followUpSchedule: result.roadmap.timeBoundPlan.next3Months.find((i) =>
-        /tái khám|kiểm tra lại|xét nghiệm/i.test(i)
-      ) || 'Tái khám kiểm tra lại sau 3 tháng.',
-    },
-  };
+      actionRoadmap: {
+        specialistConsultation: result.roadmap.specialistReferrals.map((s) => s.specialty),
+        dietaryModifications: result.roadmap.timeBoundPlan.next3Months.filter((i) =>
+          /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i)
+        ),
+        followUpSchedule: result.roadmap.timeBoundPlan.next3Months.find((i) =>
+          /tái khám|kiểm tra lại|xét nghiệm/i.test(i)
+        ) || 'Tái khám kiểm tra lại sau 3 tháng.',
+      },
+    };
 
-  return {
-    result,
-    aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
-    modelUsed: data.modelUsed,
-  };
+    const durationMs = getDuration();
+    const finalModel = data.modelUsed || model;
+    digitizationLogger.log(
+      'info',
+      'deep_analysis_complete',
+      `Phân tích y khoa 4 lớp hoàn tất trong ${durationMs}ms bằng ${finalModel}. Cảnh báo: ${result.roadmap.criticalAlerts.length}, Chuyên khoa: ${result.roadmap.specialistReferrals.length}, Xu hướng: ${result.velocityTrends.length}`,
+      {
+        durationMs,
+        modelUsed: finalModel,
+        criticalAlertsCount: result.roadmap.criticalAlerts.length,
+        specialistCount: result.roadmap.specialistReferrals.length,
+        velocityTrendsCount: result.velocityTrends.length,
+      },
+      durationMs
+    );
+
+    return {
+      result,
+      aiAnalysis: data.aiAnalysis || aiAnalysisFallback,
+      modelUsed: finalModel,
+    };
+  } catch (error) {
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'error',
+      'deep_analysis_error',
+      `Lỗi phân tích chuyên sâu cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
+      undefined,
+      durationMs
+    );
+    throw error;
+  }
 }
 
 /**

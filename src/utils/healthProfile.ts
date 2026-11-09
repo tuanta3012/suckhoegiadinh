@@ -6,6 +6,7 @@ import type {
   HealthProfile,
   HealthSource,
 } from '../types';
+import { mergeHealthEvents } from './deduplicationService';
 
 const EVENT_TYPES = new Set<HealthEvent['type']>([
   'comprehensive_exam',
@@ -179,10 +180,28 @@ export function mergeHealthProfiles(
   const events = new Map<string, HealthEvent>();
   for (const event of [...current.timeline, ...incoming.timeline]) {
     const previous = events.get(event.id);
-    if (previous && !sameHealthEventContent(previous, event)) {
-      throw new Error(`Xung đột đồng bộ: sự kiện "${event.title}" có cùng mã nhưng nội dung khác nhau. Hãy tải lại hồ sơ và xử lý xung đột trước khi thử lại.`);
+    if (!previous) {
+      events.set(event.id, event);
+      continue;
     }
-    if (!previous || event.recordedAt > previous.recordedAt) events.set(event.id, event);
+    if (sameHealthEventContent(previous, event)) {
+      if (event.recordedAt > previous.recordedAt) {
+        events.set(event.id, event);
+      }
+      continue;
+    }
+    // Trùng ID nhưng nội dung khác nhau:
+    // Đây là trường hợp một sự kiện đã được chỉnh sửa hoặc hợp nhất (merge/deduplicate).
+    // - Nếu một bản ghi có mốc recordedAt mới hơn, ưu tiên bản ghi mới hơn (Last-Write-Wins).
+    // - Nếu cả hai có cùng recordedAt, hợp nhất thông minh dữ liệu y tế (mergeHealthEvents)
+    //   để bảo toàn trọn vẹn chỉ số, thuốc, chẩn đoán mà không làm mất dữ liệu và không báo lỗi xung đột giả.
+    if (event.recordedAt > previous.recordedAt) {
+      events.set(event.id, event);
+    } else if (previous.recordedAt > event.recordedAt) {
+      events.set(event.id, previous);
+    } else {
+      events.set(event.id, mergeHealthEvents(previous, event, now));
+    }
   }
 
   const sources = new Map<string, HealthSource>();

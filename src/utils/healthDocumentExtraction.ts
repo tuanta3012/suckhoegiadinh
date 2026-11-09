@@ -245,9 +245,20 @@ export function resolveConsensusDate(
   };
 
   for (const v of values) {
-    if (v.date) addCandidate(v.date, 3);
+    if (v.date) addCandidate(v.date, 4);
+    if (isRecord(v.hospitalization)) {
+      if (v.hospitalization.admissionDate) addCandidate(v.hospitalization.admissionDate, 3);
+      if (v.hospitalization.dischargeDate) addCandidate(v.hospitalization.dischargeDate, 3);
+    }
+    if (Array.isArray(v.vaccinations)) {
+      for (const item of v.vaccinations) {
+        if (isRecord(item) && item.administeredDate) addCandidate(item.administeredDate, 3);
+      }
+    }
     
-    const textToScan = `${v.notes || ''} ${v.advice || ''} ${v.title || ''}`;
+    const textToScan = JSON.stringify(v);
+    
+    // Scans standard numeric dates (DD/MM/YYYY or YYYY-MM-DD)
     const dateMatches = textToScan.matchAll(/\b(\d{1,2}[/-]\d{1,2}[/-](?:19|20)\d{2})\b/g);
     for (const match of dateMatches) {
       addCandidate(match[1], 1);
@@ -255,6 +266,15 @@ export function resolveConsensusDate(
     const isoMatches = textToScan.matchAll(/\b((?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2})\b/g);
     for (const match of isoMatches) {
       addCandidate(match[1], 1);
+    }
+    
+    // Scans Vietnamese textual dates (e.g. "ngày 22 tháng 05 năm 2024")
+    const vnTextMatches = textToScan.matchAll(/ng[àa]y\s+(\d{1,2})\s+th[áa]ng\s+(\d{1,2})\s+n[ăa]m\s+((?:19|20)\d{2})/gi);
+    for (const match of vnTextMatches) {
+      const d = match[1].padStart(2, '0');
+      const m = match[2].padStart(2, '0');
+      const y = match[3];
+      addCandidate(`${y}-${m}-${d}`, 2);
     }
   }
 
@@ -277,7 +297,7 @@ export function resolveConsensusDate(
   for (const [date, weight] of dateCounts.entries()) {
     let effectiveWeight = weight;
     if (bestYear && date.startsWith(bestYear)) {
-      effectiveWeight += 5;
+      effectiveWeight += 10;
     }
     if (effectiveWeight > maxWeight) {
       maxWeight = effectiveWeight;

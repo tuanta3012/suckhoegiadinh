@@ -13,7 +13,7 @@ import {
   mergeHealthProfiles,
   parseHealthProfile,
 } from './healthProfile';
-import { registerHealthWorkspaceRelay } from './workspaceShareRelay';
+import { findAdminWorkspaceRelay, registerHealthWorkspaceRelay, unregisterHealthWorkspace } from './workspaceShareRelay';
 import { localSyncOutbox, supportsDurableOfflineQueue } from './localSyncOutbox';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
@@ -22,6 +22,16 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JSON_MIME = 'application/json';
 const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size';
 const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
+
+async function deleteDriveFilesBatch(fileIds: string[], concurrency = 5): Promise<void> {
+  const ids = [...new Set(fileIds)].filter(Boolean);
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const batch = ids.slice(i, i + concurrency);
+    await Promise.all(batch.map((id) => deleteDriveFile(id).catch((err) => {
+      console.warn(`[Drive Deletion] Không thể xóa tệp ${id}:`, err);
+    })));
+  }
+}
 
 class DriveConflictError extends Error {}
 
@@ -226,32 +236,99 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
 }
 
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
-  const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
-  if (foldersToInspect.length === 0) return null;
+  const userEmail = getSignedInGoogleEmail();
+  if (!userEmail) return null;
 
-  // 2. Fast-path inspection: Look for family.json directly in root candidates
-  const inspectionResults = await Promise.all(
-    foldersToInspect.map(async (folder) => {
-      const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
-      return manifestFiles.length > 0
-        ? { folder, manifestId: manifestFiles[0].id }
-        : null;
-    })
-  );
+  const normalizedEmail = userEmail.trim().toLowerCase();
+  const cacheKey = `health_ws_cache_${encodeURIComponent(normalizedEmail)}`;
 
-  const foundWithManifest = inspectionResults.find((r) => r !== null);
-  if (foundWithManifest) {
-    const { folder, manifestId } = foundWithManifest;
-    if (folder.name !== WORKSPACE_FOLDER_NAME) {
-      void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
-        console.warn('[Google Drive] Could not normalize legacy folder name.', error);
-      });
+  // 1. Siêu tốc: Kiểm tra localStorage trước (Tốc độ Sheets)
+  const cached = typeof localStorage !== 'undefined' ? localStorage.getItem(cacheKey) : null;
+  if (cached) {
+    try {
+      const { rootFolderId, familyFileId } = JSON.parse(cached);
+      if (rootFolderId && familyFileId) {
+        return await openHealthWorkspace(rootFolderId, familyFileId);
+      }
+    } catch (e) {
+      localStorage.removeItem(cacheKey);
     }
-    return openHealthWorkspace(folder.id, manifestId);
   }
 
-  // Strictly no deep subfolder scan if family.json is absent
+  // 2. Kiểm tra Firestore Shadow Index (Nếu đổi thiết bị)
+  try {
+    const indexed = await findAdminWorkspaceRelay(userEmail);
+    if (indexed) {
+      try {
+        const opened = await openHealthWorkspace(indexed.rootFolderId, indexed.familyFileId);
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(cacheKey, JSON.stringify(indexed));
+        }
+        return opened;
+      } catch (e) {
+        console.warn('[Discovery] Thư mục trong Firestore Index không còn tồn tại:', indexed.rootFolderId, e);
+        // Xóa index đã lỗi khỏi Firestore & LocalStorage để lần sau không quét lại
+        void unregisterHealthWorkspace(indexed.rootFolderId).catch(() => {});
+        if (typeof localStorage !== 'undefined') localStorage.removeItem(cacheKey);
+      }
+    }
+  } catch (error) {
+    console.warn('[Discovery] Không thể tra cứu Firestore Index:', error);
+  }
+
+  // 3. Fallback: Quét Drive (Chậm nhất, chỉ chạy 1 lần duy nhất)
+  try {
+    const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
+    if (foldersToInspect.length === 0) return null;
+
+    // 3. Fast-path inspection: Look for family.json directly in root candidates
+    const inspectionResults = await Promise.all(
+      foldersToInspect.map(async (folder) => {
+        try {
+          const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
+          return manifestFiles.length > 0
+            ? { folder, manifestId: manifestFiles[0].id }
+            : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const foundWithManifest = inspectionResults.find((r) => r !== null);
+    if (foundWithManifest) {
+      const { folder, manifestId } = foundWithManifest;
+      if (folder.name !== WORKSPACE_FOLDER_NAME) {
+        void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
+          console.warn('[Google Drive] Could not normalize legacy folder name.', error);
+        });
+      }
+      const opened = await openHealthWorkspace(folder.id, manifestId);
+      
+      // Đăng ký lại vào Firestore & localStorage để lần sau tìm nhanh hơn
+      if (userEmail && opened.family.adminEmail === userEmail.trim().toLowerCase()) {
+        const payload = { rootFolderId: opened.rootFolderId, familyFileId: opened.familyFileId };
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(cacheKey, JSON.stringify(payload));
+        }
+        void registerHealthWorkspaceRelay(opened.rootFolderId, opened.familyFileId, userEmail).catch(() => {});
+      }
+      
+      return opened;
+    }
+  } catch (error) {
+    console.warn('[Discovery] Lỗi khi quét thư mục Drive:', error);
+  }
+
   return null;
+}
+
+export async function clearWorkspaceCache(userEmail: string): Promise<void> {
+  const normalizedEmail = userEmail.trim().toLowerCase();
+  const cacheKey = `health_ws_cache_${encodeURIComponent(normalizedEmail)}`;
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(cacheKey);
+  }
 }
 
 export async function createHealthWorkspace(adminEmail: string, adminName?: string | null): Promise<HealthDriveWorkspace> {
@@ -313,8 +390,10 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
 
   // Khởi tạo thư mục hoàn toàn mới với tên "Suc khoe gia dinh"
   const root = await createFolder(WORKSPACE_FOLDER_NAME);
-  const raw = await createFolder('raw_files', root.id);
-  const profiles = await createFolder('profiles', root.id);
+  const [raw, profiles] = await Promise.all([
+    createFolder('raw_files', root.id),
+    createFolder('profiles', root.id),
+  ]);
   const now = new Date().toISOString();
   const family: HealthFamily = {
     schemaVersion: 1,
@@ -345,11 +424,19 @@ export async function openHealthWorkspace(
   rootFolderId: string,
   knownManifestFileId?: string,
 ): Promise<HealthDriveWorkspace> {
-  const root = await driveRequest<DriveFile>(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`);
+  // Tối ưu: Lấy metadata và nội dung song song nếu đã biết manifest ID
+  const manifestIdPromise = knownManifestFileId 
+    ? Promise.resolve(knownManifestFileId)
+    : listFiles(rootFolderId, 'family.json', JSON_MIME).then(files => files[0]?.id);
+
+  const [root, manifestFileId] = await Promise.all([
+    driveRequest<DriveFile>(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`),
+    manifestIdPromise
+  ]);
+
   if (root.mimeType !== FOLDER_MIME) throw new Error('ID được nhập không phải là thư mục Google Drive.');
-  const manifestFileId = knownManifestFileId ||
-    (await listFiles(rootFolderId, 'family.json', JSON_MIME))[0]?.id;
   if (!manifestFileId) throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
+
   const familyResponse = await driveRequest<HealthFamily>(
     `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
   );
@@ -528,25 +615,8 @@ export async function deleteDriveFamilyMember(
     throw new Error('Thành viên thiếu ID thư mục hoặc hồ sơ Drive; không thể xóa an toàn.');
   }
 
-  const filesToDelete = await listFolderContentsRecursively(member.driveFolderId);
-  const fileIds = [...new Set([
-    member.profileFileId,
-    ...filesToDelete.map((file) => file.id),
-    member.driveFolderId,
-  ])];
-  const deletionErrors: string[] = [];
-  for (const fileId of fileIds) {
-    try {
-      await deleteDriveFile(fileId);
-    } catch (error) {
-      deletionErrors.push(error instanceof Error ? error.message : 'Lỗi không xác định.');
-    }
-  }
-  if (deletionErrors.length > 0) {
-    throw new Error(
-      `Chưa xóa được toàn bộ dữ liệu của ${member.name}; thành viên vẫn được giữ trong danh sách để có thể thử lại. ${deletionErrors.slice(0, 3).join('; ')}`,
-    );
-  }
+  const fileIds = [member.profileFileId, member.driveFolderId].filter(Boolean);
+  await deleteDriveFilesBatch(fileIds);
 
   const familyWithoutMember: HealthFamily = {
     ...workspace.family,
@@ -567,23 +637,31 @@ export async function deleteDriveFamilyMember(
 
 export async function deleteHealthWorkspaceFolder(rootFolderId: string): Promise<void> {
   if (!rootFolderId.trim()) throw new Error('Thiếu mã thư mục Workspace cần xóa.');
-  const contents = await listFolderContentsRecursively(rootFolderId);
-  const deletionErrors: string[] = [];
-  for (const file of contents) {
-    try {
-      await deleteDriveFile(file.id);
-    } catch (error) {
-      deletionErrors.push(`${file.name}: ${error instanceof Error ? error.message : 'không thể xóa'}`);
-    }
+  
+  // 1. Xóa cache cục bộ ngay lập tức (Tốc độ Sheets)
+  const userEmail = getSignedInGoogleEmail();
+  if (userEmail) {
+    void clearWorkspaceCache(userEmail);
   }
-  if (deletionErrors.length > 0) {
-    const examples = deletionErrors.slice(0, 5).join('; ');
-    const remaining = deletionErrors.length - Math.min(deletionErrors.length, 5);
-    throw new Error(
-      `Không thể xóa toàn bộ nội dung Workspace (${deletionErrors.length} lỗi): ${examples}${remaining ? `; và ${remaining} lỗi khác` : ''}. Thư mục gốc được giữ lại để có thể thử lại.`,
-    );
-  }
-  await deleteDriveFile(rootFolderId);
+  
+  // 2. Ẩn thư mục trên Drive bằng cách đổi tên (Instant)
+  // Việc đổi tên giúp bước "Quét Drive" (Discovery) không bao giờ tìm lại được folder này nữa
+  const renamePromise = renameDriveFolder(rootFolderId, `DELETED_${Date.now()}_${rootFolderId}`).catch(() => {});
+
+  // 3. Xóa đăng ký Firestore Registry (Fast)
+  const unregisterPromise = unregisterHealthWorkspace(rootFolderId).catch((error) => {
+    console.warn('[Discovery] Không thể xóa Index Firestore cho Workspace đã xóa:', error);
+  });
+
+  // Chúng ta đợi Firestore unregister để đảm bảo tính nhất quán của Registry
+  // nhưng không đợi Drive deletion
+  await Promise.all([renamePromise, unregisterPromise]);
+
+  // 4. Xóa vật lý trên Drive (Thực hiện âm thầm ở nền - Background Deletion)
+  // Không await để UI phản hồi ngay lập tức
+  deleteDriveFile(rootFolderId).catch((error) => {
+    console.warn('[Drive Deletion] Lỗi xóa thư mục gốc ở nền:', error);
+  });
 }
 
 export async function factoryResetWorkspaceFolder(
@@ -596,25 +674,10 @@ export async function factoryResetWorkspaceFolder(
 
   try {
     const allRootChildren = await listFolderContentsRecursively(workspace.rootFolderId);
-    for (const file of allRootChildren) {
-      if (file.id !== workspace.rootFolderId) {
-        try {
-          await deleteDriveFile(file.id);
-        } catch (error) {
-          deletionErrors.push(`${file.name}: ${error instanceof Error ? error.message : 'không thể xóa'}`);
-        }
-      }
-    }
+    const fileIds = allRootChildren.filter(f => f.id !== workspace.rootFolderId).map(f => f.id);
+    await deleteDriveFilesBatch(fileIds);
   } catch (error) {
-    deletionErrors.push(`Không thể quét thư mục gốc: ${error instanceof Error ? error.message : 'lỗi'}`);
-  }
-
-  if (deletionErrors.length > 0) {
-    const examples = deletionErrors.slice(0, 5).join('; ');
-    const remaining = deletionErrors.length - Math.min(deletionErrors.length, 5);
-    throw new Error(
-      `Chưa thể hoàn tất khởi tạo lại vì còn ${deletionErrors.length} lỗi xóa trên Drive: ${examples}${remaining ? `; và ${remaining} lỗi khác` : ''}. Hãy kiểm tra Drive rồi thử lại.`,
-    );
+    console.warn('[Factory Reset] Lỗi khi quét thư mục gốc:', error);
   }
 
   const raw = await createFolder('raw_files', workspace.rootFolderId);

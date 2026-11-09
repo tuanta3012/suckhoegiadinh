@@ -6,7 +6,9 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  query,
   setDoc,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -68,6 +70,34 @@ function memberInviteRef(rootFolderId: string, memberEmail: string) {
     'workspaces',
     rootFolderId,
   );
+}
+
+export async function findAdminWorkspaceRelay(
+  adminEmail: string,
+): Promise<{ rootFolderId: string; familyFileId: string } | null> {
+  const cleanEmail = normalizeEmail(adminEmail);
+  if (!cleanEmail) return null;
+
+  try {
+    const q = query(
+      collection(db, RELAY_COLLECTION),
+      where('adminEmail', '==', cleanEmail)
+    );
+    const snapshot = await getDocs(q);
+    if (snapshot.empty) return null;
+
+    const docs = snapshot.docs.map(d => d.data());
+    docs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const latest = docs[0];
+
+    return {
+      rootFolderId: latest.rootFolderId,
+      familyFileId: latest.familyFileId,
+    };
+  } catch (error) {
+    console.error('[WorkspaceRelay] Lỗi khi tìm Workspace qua email Admin:', error);
+    return null;
+  }
 }
 
 export async function registerHealthWorkspaceRelay(
@@ -243,5 +273,38 @@ export async function removeHealthWorkspaceAssignment(
   const batch = writeBatch(db);
   batch.delete(memberAssignmentRef(rootFolderId, cleanEmail));
   batch.delete(memberInviteRef(rootFolderId, cleanEmail));
+  await batch.commit();
+}
+export async function unregisterHealthWorkspace(
+  rootFolderId: string,
+): Promise<void> {
+  const currentEmail = authenticatedEmail();
+  const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
+  const snapshot = await getDoc(workspaceRef);
+  
+  if (!snapshot.exists()) return;
+  
+  const data = snapshot.data();
+  if (data.adminEmail !== currentEmail) {
+    throw new Error('Chỉ tài khoản Admin mới có quyền xóa đăng ký Workspace.');
+  }
+
+  const batch = writeBatch(db);
+  
+  // 1. Tìm và xóa tất cả lời mời của thành viên (để họ không thấy workspace đã xóa)
+  try {
+    const membersSnapshot = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
+    for (const memberDoc of membersSnapshot.docs) {
+      const memberEmail = memberDoc.id;
+      batch.delete(memberAssignmentRef(rootFolderId, memberEmail));
+      batch.delete(memberInviteRef(rootFolderId, memberEmail));
+    }
+  } catch (error) {
+    console.warn('[WorkspaceRelay] Không thể xóa lời mời khi hủy đăng ký:', error);
+  }
+
+  // 2. Xóa tài liệu gốc của Workspace
+  batch.delete(workspaceRef);
+  
   await batch.commit();
 }

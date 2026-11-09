@@ -362,10 +362,18 @@ export function detectDuplicateEvent(
         }
       }
 
-      // 4. Cùng loại hồ sơ (Type Match)
-      if (incoming.type && event.type && incoming.type === event.type) {
-        score += 15;
-        reasons.push(`Cùng loại tài liệu (${event.type})`);
+      // 4. Cùng loại hồ sơ (Type Match) hoặc loại bổ trợ (VD: khám tổng quát + xét nghiệm máu/chẩn đoán hình ảnh)
+      if (incoming.type && event.type) {
+        if (incoming.type === event.type) {
+          score += 15;
+          reasons.push(`Cùng loại tài liệu (${event.type})`);
+        } else if (
+          (incoming.type === 'comprehensive_exam' && (event.type === 'test_result' || event.type === 'imaging')) ||
+          (event.type === 'comprehensive_exam' && (incoming.type === 'test_result' || incoming.type === 'imaging'))
+        ) {
+          score += 15;
+          reasons.push(`Kết quả xét nghiệm/chẩn đoán hình ảnh bổ trợ cho hồ sơ khám (${incoming.type} & ${event.type})`);
+        }
       }
     } else {
       // Khác ngày: khó có thể là sự kiện trùng lặp hoàn toàn
@@ -402,7 +410,15 @@ export function detectDuplicateEvent(
     }
 
     // Đánh giá ngưỡng trùng lặp
-    if (score >= 60) {
+    const isDifferentSourceFile = Boolean(
+      incoming.sourceFileId &&
+      event.sourceFileId &&
+      incoming.sourceFileId !== event.sourceFileId
+    );
+    // Nếu là 2 tệp nguồn khác nhau cùng đợt khám (VD: khám tổng quát + xét nghiệm máu), ghép dữ liệu khi hệ số tương đồng >= 75
+    const requiredScore = isDifferentSourceFile ? 75 : 60;
+
+    if (score >= requiredScore) {
       const confidence: 'high' | 'medium' = score >= 75 ? 'high' : 'medium';
       if (!bestMatch || score > bestMatch.score) {
         bestMatch = {
@@ -535,12 +551,25 @@ export function mergeHealthEvents(
     mergedNotes = Array.from(new Set(rawNotes)).join('\n') || undefined;
   }
 
+  // 7. Gộp danh sách các tệp nguồn liên kết (additionalSources)
+  const existingSources = cleanExisting.additionalSources || (cleanExisting.sourceFileId ? [{ driveFileId: cleanExisting.sourceFileId, fileName: cleanExisting.sourceFileName }] : []);
+  const incomingSources = cleanIncoming.additionalSources || (cleanIncoming.sourceFileId ? [{ driveFileId: cleanIncoming.sourceFileId, fileName: cleanIncoming.sourceFileName }] : []);
+  
+  const sourcesMap = new Map<string, { driveFileId: string; fileName: string }>();
+  for (const s of [...existingSources, ...incomingSources]) {
+    if (s.driveFileId && !sourcesMap.has(s.driveFileId)) {
+      sourcesMap.set(s.driveFileId, s);
+    }
+  }
+  const mergedSources = Array.from(sourcesMap.values());
+
   return {
     ...cleanExisting,
-    title: cleanIncoming.title || cleanExisting.title,
+    title: cleanExisting.title || cleanIncoming.title,
     date: cleanIncoming.date || cleanExisting.date,
-    type: cleanIncoming.type || cleanExisting.type,
+    type: cleanExisting.type === 'comprehensive_exam' ? cleanExisting.type : (cleanIncoming.type || cleanExisting.type),
     facility: cleanIncoming.facility || cleanExisting.facility,
+    additionalSources: mergedSources.length > 1 ? mergedSources : cleanExisting.additionalSources,
     physicalExam: mergedPhysicalExam,
     diagnoses: mergedDiagnoses,
     medications: Array.from(medMap.values()),

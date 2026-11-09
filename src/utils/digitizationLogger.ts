@@ -8,6 +8,8 @@ export interface DigitizationLogEntry {
   level: 'info' | 'warn' | 'error';
   stage: string;
   message: string;
+  durationMs?: number;
+  source?: 'client' | 'server';
   data?: any;
 }
 
@@ -15,7 +17,7 @@ export const DIGITIZATION_LOGS_STORAGE_KEY = 'family_health_ai_digitization_logs
 
 class DigitizationLogger {
   private logs: DigitizationLogEntry[] = [];
-  private readonly MAX_LOGS = 1000;
+  private readonly MAX_LOGS = 3000;
 
   constructor() {
     try {
@@ -33,17 +35,34 @@ class DigitizationLogger {
     }
   }
 
-  log(level: 'info' | 'warn' | 'error', stage: string, message: string, data?: any) {
+  startTimer(): () => number {
+    const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    return () => {
+      const end = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      return Math.round(end - start);
+    };
+  }
+
+  log(
+    level: 'info' | 'warn' | 'error',
+    stage: string,
+    message: string,
+    data?: any,
+    durationMs?: number,
+    source: 'client' | 'server' = 'client',
+  ) {
     const entry: DigitizationLogEntry = {
       timestamp: new Date().toISOString(),
       level,
       stage,
       message,
+      durationMs,
+      source,
       data,
     };
     this.logs.push(entry);
     if (this.logs.length > this.MAX_LOGS) this.logs.shift();
-    
+
     // Save to localStorage
     try {
       if (typeof window !== 'undefined') {
@@ -54,7 +73,8 @@ class DigitizationLogger {
     }
 
     const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-    logFn(`[Digitization][${stage}] ${message}`, data || '');
+    const durStr = durationMs !== undefined ? ` [${durationMs}ms]` : '';
+    logFn(`[Digitization][${stage}] ${message}${durStr}`, data || '');
   }
 
   getLogs(): DigitizationLogEntry[] {
@@ -72,29 +92,64 @@ class DigitizationLogger {
     }
   }
 
-  async exportLogsAsFile(customLogs?: DigitizationLogEntry[]): Promise<boolean> {
+  async exportLogsAsFile(
+    customLogs?: DigitizationLogEntry[],
+    extraMetadata?: Record<string, unknown>,
+  ): Promise<boolean> {
     try {
-      // Prioritize customLogs (usually from server), then local logs, then default message
-      let logsToExport: DigitizationLogEntry[] = [];
-      
-      if (customLogs && Array.isArray(customLogs)) {
-        logsToExport = customLogs;
-      } else if (this.logs && this.logs.length > 0) {
-        logsToExport = this.logs;
-      }
+      // Kết hợp cả Client logs và Server logs theo trình tự thời gian
+      const clientLogs: DigitizationLogEntry[] = this.logs.map((l) => ({
+        ...l,
+        source: l.source || 'client',
+      }));
+      const serverLogs: DigitizationLogEntry[] = (customLogs || []).map((l) => ({
+        ...l,
+        source: l.source || 'server',
+      }));
 
-      if (logsToExport.length === 0) {
-        logsToExport = [{
-          timestamp: new Date().toISOString(),
-          level: 'info',
-          stage: 'SYSTEM',
-          message: 'Không có dữ liệu log nào được ghi nhận tại thời điểm xuất.'
-        }];
-      }
+      // Hợp nhất và sắp xếp theo mốc thời gian ISO
+      const mergedLogs = [...clientLogs, ...serverLogs].sort(
+        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      );
 
-      const jsonString = JSON.stringify(logsToExport, null, 2);
+      const finalLogs =
+        mergedLogs.length > 0
+          ? mergedLogs
+          : [
+              {
+                timestamp: new Date().toISOString(),
+                level: 'info' as const,
+                stage: 'SYSTEM',
+                message: 'Không có dữ liệu log nào được ghi nhận tại thời điểm xuất.',
+                source: 'client' as const,
+              },
+            ];
+
+      const exportPayload = {
+        title: 'Báo cáo Hoạt động Số hóa & Phân tích AI - Sức Khỏe Gia Đình',
+        exportedAt: new Date().toISOString(),
+        environment: {
+          platform: Capacitor.getPlatform(),
+          isNative: Capacitor.isNativePlatform(),
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+          ...(extraMetadata || {}),
+        },
+        statistics: {
+          totalEntries: finalLogs.length,
+          clientEntries: finalLogs.filter((l) => l.source === 'client').length,
+          serverEntries: finalLogs.filter((l) => l.source === 'server').length,
+          errorCount: finalLogs.filter((l) => l.level === 'error').length,
+          warnCount: finalLogs.filter((l) => l.level === 'warn').length,
+          infoCount: finalLogs.filter((l) => l.level === 'info').length,
+        },
+        logs: finalLogs,
+      };
+
+      const jsonString = JSON.stringify(exportPayload, null, 2);
       const dateStr = new Date().toISOString().slice(0, 10);
-      const fileName = `family_health_ai_digitization_logs_${dateStr}.json`;
+      const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, '-');
+      const fileName = `family_health_ai_logs_${dateStr}_${timeStr}.json`;
+
       if (Capacitor.isNativePlatform()) {
         const file = await Filesystem.writeFile({
           path: fileName,
@@ -103,10 +158,10 @@ class DigitizationLogger {
           encoding: Encoding.UTF8,
         });
         await Share.share({
-          title: 'Log ứng dụng Sức khỏe Gia đình',
-          text: 'Tệp log chẩn đoán của ứng dụng.',
+          title: 'Nhật ký hoạt động Sức Khỏe Gia Đình',
+          text: `Tệp log chẩn đoán AI & số hóa y tế (${finalLogs.length} sự kiện).`,
           url: file.uri,
-          dialogTitle: 'Xuất log ứng dụng',
+          dialogTitle: 'Chia sẻ hoặc lưu tệp log',
         });
         return true;
       }

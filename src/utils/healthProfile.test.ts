@@ -181,31 +181,43 @@ describe('health profile', () => {
     expect(merged.timeline[0].recordedAt).toBe('2026-03-10T09:10:00.000Z');
   });
 
-  it('rejects conflicting contents for the same event id instead of overwriting them', () => {
+  it('merges contents intelligently for the same event id when timestamps are equal', () => {
     const base = createHealthProfile(member);
-    const firstCopy = { ...base, timeline: [{ ...event, id: 'shared-event' }] };
+    const firstCopy = {
+      ...base,
+      timeline: [{ ...event, id: 'shared-event', diagnoses: ['Viêm họng'] }],
+    };
     const secondCopy = {
       ...base,
-      timeline: [{ ...event, id: 'shared-event', title: 'Kết quả đã chỉnh sửa trên thiết bị khác' }],
+      timeline: [{ ...event, id: 'shared-event', diagnoses: ['Viêm phế quản'], title: 'Kết quả đã bổ sung' }],
     };
 
-    expect(() => mergeHealthProfiles(firstCopy, secondCopy)).toThrow('Xung đột đồng bộ');
+    const merged = mergeHealthProfiles(firstCopy, secondCopy);
+    expect(merged.timeline).toHaveLength(1);
+    expect(merged.timeline[0].diagnoses).toContain('Viêm họng');
+    expect(merged.timeline[0].diagnoses).toContain('Viêm phế quản');
   });
 
-  it('does not use device timestamps to overwrite a conflicting event edit', () => {
+  it('updates conflicting event with newer recorded timestamp (Last-Write-Wins)', () => {
     const base = createHealthProfile(member);
-    const firstCopy = { ...base, timeline: [{ ...event, id: 'shared-event' }] };
+    const firstCopy = {
+      ...base,
+      timeline: [{ ...event, id: 'shared-event', title: 'Bản cũ', recordedAt: '2026-03-10T08:00:00.000Z' }],
+    };
     const secondCopy = {
       ...base,
       timeline: [{
         ...event,
         id: 'shared-event',
-        title: 'Sửa ở thiết bị khác',
+        title: 'Bản mới đã chỉnh sửa',
         recordedAt: '2027-01-01T10:00:00.000Z',
       }],
     };
 
-    expect(() => mergeHealthProfiles(firstCopy, secondCopy)).toThrow('Xung đột đồng bộ');
+    const merged = mergeHealthProfiles(firstCopy, secondCopy);
+    expect(merged.timeline).toHaveLength(1);
+    expect(merged.timeline[0].title).toBe('Bản mới đã chỉnh sửa');
+    expect(merged.timeline[0].recordedAt).toBe('2027-01-01T10:00:00.000Z');
   });
 
   it('rejects digitization without a title or a valid source', () => {

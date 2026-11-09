@@ -2,6 +2,7 @@ export type OcrRecoveryStatus = 'processing' | 'interrupted' | 'needs_review';
 
 export interface OcrRecoveryJob {
   driveFileId: string;
+  fileName?: string;
   status: OcrRecoveryStatus;
   progressPercent: number;
   updatedAt: number;
@@ -51,9 +52,12 @@ export function readOcrRecoveryJobs(
     .filter((job) => now - job.updatedAt <= MAX_RECOVERY_AGE_MS)
     .map((job) => ({
       driveFileId: job.driveFileId,
+      fileName: job.fileName,
       status: job.status === 'processing' ? 'interrupted' as const : job.status,
       progressPercent: Math.max(0, Math.min(100, job.progressPercent)),
       updatedAt: job.updatedAt,
+      totalPages: job.totalPages,
+      processedPages: job.processedPages,
     }));
   const normalized = JSON.stringify(jobs);
   if (normalized !== raw) storage.setItem(key, normalized);

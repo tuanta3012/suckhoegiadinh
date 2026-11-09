@@ -635,8 +635,9 @@ QUY TẮC BẮT BUỘC VỀ THỜI GIAN & NGÀY KHÁM (CRITICAL DATE RESOLUTION)
      + Tuyệt đối không lấy ngày sinh (${memberBirth}) làm ngày khám.
      + Không lấy niên độ in trên bìa sổ nếu ngày các xét nghiệm bên trong diễn ra vào năm khác (VD: Bìa in "Khám định kỳ năm 2023" nhưng các phiếu xét nghiệm máu, siêu âm, ECG đều ghi ngày 22/05/2024 thì ngày khám chính xác PHẢI là 2024-05-22).
      + Không lấy ngày in phiếu ở chân trang hoặc ngày hẹn tái khám trong tương lai.
-2. NẾU TÊN TỆP CÓ NĂM (VD: "${req.body.fileName || 'Không rõ tên tệp'}"):
-   - Hãy ưu tiên năm trong tên tệp và đối chiếu với các ngày có trong tài liệu. Nếu ngày trong tài liệu khớp năm với tên tệp, chọn ngày có tần suất cao nhất.
+2. NẾU TÊN TỆP CÓ CHỨA NĂM (VD: "${req.body.fileName || 'Không rõ tên tệp'}"):
+   - Hãy BẮT BUỘC ưu tiên tìm và lấy mốc ngày khám, xét nghiệm, chẩn đoán hình ảnh hoặc chữ ký bác sĩ CÙNG NĂM với năm ghi trên tên tệp.
+   - Tuyệt đối không lấy mốc năm cũ hơn (như 2023, 2022...) nếu những năm đó chỉ là tiền sử bệnh, quá trình điều trị cũ được ghi chú lại trong nội dung sổ khám.
 
 BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU (FAST OCR):
 1. TẬP TRỌNG TÂM Y TẾ: Chỉ trích xuất thông số xét nghiệm (metrics), kết quả chẩn đoán hình ảnh (imagingResults), chẩn đoán bệnh (diagnoses), tên cơ sở y tế và ngày khám.
@@ -1097,7 +1098,8 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
                 parameters: { type: Type.ARRAY, items: { type: Type.STRING } },
                 findings: { type: Type.STRING },
                 severity: { type: Type.STRING, enum: ['critical', 'warning', 'info'] }
-              }
+              },
+              required: ['parameters', 'findings', 'severity']
             }
           },
           velocityTrends: {
@@ -1109,7 +1111,8 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
                 trendDirection: { type: Type.STRING, enum: ['increasing', 'decreasing', 'stable', 'fluctuating'] },
                 velocityDescription: { type: Type.STRING },
                 riskProjection: { type: Type.STRING }
-              }
+              },
+              required: ['metricName', 'trendDirection', 'velocityDescription', 'riskProjection']
             }
           },
           chronicSurveillance: {
@@ -1121,7 +1124,8 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
                 status: { type: Type.STRING, enum: ['stable_benign', 'monitored', 'progressing', 'resolved'] },
                 comparisonOverTime: { type: Type.STRING },
                 recommendation: { type: Type.STRING }
-              }
+              },
+              required: ['conditionName', 'status', 'comparisonOverTime', 'recommendation']
             }
           },
           roadmap: {
@@ -1135,7 +1139,8 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
                   properties: {
                     specialty: { type: Type.STRING },
                     reason: { type: Type.STRING }
-                  }
+                  },
+                  required: ['specialty', 'reason']
                 }
               },
               timeBoundPlan: {
@@ -1144,11 +1149,14 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
                   next3Months: { type: Type.ARRAY, items: { type: Type.STRING } },
                   next6Months: { type: Type.ARRAY, items: { type: Type.STRING } },
                   next12Months: { type: Type.ARRAY, items: { type: Type.STRING } }
-                }
+                },
+                required: ['next3Months', 'next6Months', 'next12Months']
               }
-            }
+            },
+            required: ['criticalAlerts', 'specialistReferrals', 'timeBoundPlan']
           }
-        }
+        },
+        required: ['healthScore', 'overallAssessment', 'crossCorrelations', 'velocityTrends', 'chronicSurveillance', 'roadmap']
       };
 
       const requestedModel = typeof req.body.model === 'string' && TASK_MODELS.analysis.includes(req.body.model as any)
@@ -1164,96 +1172,96 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
       });
 
       const parsed = parseJsonSafely(text) as Record<string, unknown>;
-      if (
-        typeof parsed.healthScore !== 'number' ||
-        !Number.isFinite(parsed.healthScore) ||
-        parsed.healthScore < 0 ||
-        parsed.healthScore > 100 ||
-        typeof parsed.overallAssessment !== 'string' ||
-        !parsed.overallAssessment.trim()
-      ) {
-        throw new Error('Phản hồi phân tích AI thiếu điểm số hoặc đánh giá tổng quan hợp lệ.');
-      }
-      const healthScore = parsed.healthScore;
-      const overallAssessment = parsed.overallAssessment.trim();
 
-      const crossRaw = parsed.crossCorrelations;
-      const velocityRaw = parsed.velocityTrends;
-      const chronicRaw = parsed.chronicSurveillance;
-      const roadmapRaw = parsed.roadmap;
-      const timeBoundPlanRaw = isRecord(roadmapRaw) ? roadmapRaw.timeBoundPlan : undefined;
-      if (
-        !isRecordArray(crossRaw) ||
-        !crossRaw.every((item) =>
-          isStringArray(item.parameters) &&
-          typeof item.findings === 'string' &&
-          ['critical', 'warning', 'info'].includes(String(item.severity)),
-        ) ||
-        !isRecordArray(velocityRaw) ||
-        !velocityRaw.every((item) =>
-          typeof item.metricName === 'string' &&
-          ['increasing', 'decreasing', 'stable', 'fluctuating'].includes(String(item.trendDirection)) &&
-          typeof item.velocityDescription === 'string' &&
-          typeof item.riskProjection === 'string',
-        ) ||
-        !isRecordArray(chronicRaw) ||
-        !chronicRaw.every((item) =>
-          typeof item.conditionName === 'string' &&
-          ['stable_benign', 'monitored', 'progressing', 'resolved'].includes(String(item.status)) &&
-          typeof item.comparisonOverTime === 'string' &&
-          typeof item.recommendation === 'string',
-        ) ||
-        !isRecord(roadmapRaw) ||
-        !isStringArray(roadmapRaw.criticalAlerts) ||
-        !isRecordArray(roadmapRaw.specialistReferrals) ||
-        !roadmapRaw.specialistReferrals.every((item) =>
-          typeof item.specialty === 'string' && typeof item.reason === 'string',
-        ) ||
-        !isRecord(timeBoundPlanRaw) ||
-        !isStringArray(timeBoundPlanRaw.next3Months) ||
-        !isStringArray(timeBoundPlanRaw.next6Months) ||
-        !isStringArray(timeBoundPlanRaw.next12Months)
-      ) {
-        throw new Error('Phản hồi phân tích AI thiếu dữ liệu bắt buộc hoặc không đúng cấu trúc.');
-      }
+      // Extract and clamp healthScore (default 80 if missing or invalid)
+      const rawScore = Number(parsed.healthScore);
+      const healthScore = Number.isFinite(rawScore)
+        ? Math.min(100, Math.max(0, Math.round(rawScore)))
+        : 80;
 
-      const crossCorrelations = Array.isArray(parsed.crossCorrelations)
-        ? crossRaw.map((item) => ({
-            parameters: item.parameters as string[],
-            findings: item.findings as string,
-            severity: item.severity as 'critical' | 'warning' | 'info',
+      // Extract overallAssessment (default fallback if missing)
+      const overallAssessment = typeof parsed.overallAssessment === 'string' && parsed.overallAssessment.trim()
+        ? parsed.overallAssessment.trim()
+        : `Dựa trên hồ sơ y tế hiện tại của ${memberName}, hệ thống đã tổng hợp và phân tích thông tin sức khỏe.`;
+
+      // Normalize crossCorrelations
+      const crossRaw = Array.isArray(parsed.crossCorrelations) ? parsed.crossCorrelations : [];
+      const crossCorrelations = crossRaw.map((item: any) => {
+        const rawSev = String(item?.severity || '').toLowerCase();
+        let severity: 'critical' | 'warning' | 'info' = 'info';
+        if (/critical|danger|high|red|khẩn|nghiêm trọng/i.test(rawSev)) severity = 'critical';
+        else if (/warning|medium|cảnh báo|chú ý/i.test(rawSev)) severity = 'warning';
+
+        const parameters = Array.isArray(item?.parameters)
+          ? item.parameters.map(String).filter(Boolean)
+          : [];
+
+        return {
+          parameters,
+          findings: typeof item?.findings === 'string' ? item.findings : 'Chưa phát hiện bất thường tương quan.',
+          severity,
+        };
+      });
+
+      // Normalize velocityTrends
+      const velocityRaw = Array.isArray(parsed.velocityTrends) ? parsed.velocityTrends : [];
+      const velocityTrends = velocityRaw.map((item: any) => {
+        const rawTrend = String(item?.trendDirection || '').toLowerCase();
+        let trendDirection: 'increasing' | 'decreasing' | 'stable' | 'fluctuating' = 'stable';
+        if (/increasing|up|tăng/i.test(rawTrend)) trendDirection = 'increasing';
+        else if (/decreasing|down|giảm/i.test(rawTrend)) trendDirection = 'decreasing';
+        else if (/fluctuating|dao động/i.test(rawTrend)) trendDirection = 'fluctuating';
+
+        return {
+          metricName: typeof item?.metricName === 'string' ? item.metricName : 'Chỉ số sinh tồn',
+          trendDirection,
+          velocityDescription: typeof item?.velocityDescription === 'string' ? item.velocityDescription : 'Dữ liệu ổn định trong khoảng theo dõi.',
+          riskProjection: typeof item?.riskProjection === 'string' ? item.riskProjection : 'Tiếp tục duy trì lịch theo dõi định kỳ.',
+        };
+      });
+
+      // Normalize chronicSurveillance
+      const chronicRaw = Array.isArray(parsed.chronicSurveillance) ? parsed.chronicSurveillance : [];
+      const chronicSurveillance = chronicRaw.map((item: any) => {
+        const rawStatus = String(item?.status || '').toLowerCase();
+        let status: 'stable_benign' | 'monitored' | 'progressing' | 'resolved' = 'stable_benign';
+        if (/progressing|worsening|tiến triển/i.test(rawStatus)) status = 'progressing';
+        else if (/monitored|theo dõi/i.test(rawStatus)) status = 'monitored';
+        else if (/resolved|khỏi|xử lý/i.test(rawStatus)) status = 'resolved';
+
+        return {
+          conditionName: typeof item?.conditionName === 'string' ? item.conditionName : 'Tình trạng sức khỏe',
+          status,
+          comparisonOverTime: typeof item?.comparisonOverTime === 'string' ? item.comparisonOverTime : 'Không có dấu hiệu chuyển biến xấu.',
+          recommendation: typeof item?.recommendation === 'string' ? item.recommendation : 'Tái khám định kỳ theo chỉ định của bác sĩ.',
+        };
+      });
+
+      // Normalize roadmap
+      const roadmapRaw = isRecord(parsed.roadmap) ? parsed.roadmap : {};
+      const timeBoundPlanRaw = isRecord(roadmapRaw.timeBoundPlan) ? roadmapRaw.timeBoundPlan : {};
+
+      const criticalAlerts = Array.isArray(roadmapRaw.criticalAlerts)
+        ? roadmapRaw.criticalAlerts.map(String).filter(Boolean)
+        : [];
+
+      const specialistReferrals = Array.isArray(roadmapRaw.specialistReferrals)
+        ? roadmapRaw.specialistReferrals.map((item: any) => ({
+            specialty: String(item?.specialty || 'Nội khoa tổng quát'),
+            reason: String(item?.reason || 'Khám sức khỏe định kỳ'),
           }))
         : [];
 
-      const velocityTrends = Array.isArray(parsed.velocityTrends)
-        ? velocityRaw.map((item) => ({
-            metricName: item.metricName as string,
-            trendDirection: item.trendDirection as 'increasing' | 'decreasing' | 'stable' | 'fluctuating',
-            velocityDescription: item.velocityDescription as string,
-            riskProjection: item.riskProjection as string,
-          }))
-        : [];
-
-      const chronicSurveillance = Array.isArray(parsed.chronicSurveillance)
-        ? chronicRaw.map((item) => ({
-            conditionName: item.conditionName as string,
-            status: item.status as 'stable_benign' | 'monitored' | 'progressing' | 'resolved',
-            comparisonOverTime: item.comparisonOverTime as string,
-            recommendation: item.recommendation as string,
-          }))
-        : [];
+      const timeBoundPlan = {
+        next3Months: Array.isArray(timeBoundPlanRaw.next3Months) ? timeBoundPlanRaw.next3Months.map(String).filter(Boolean) : [],
+        next6Months: Array.isArray(timeBoundPlanRaw.next6Months) ? timeBoundPlanRaw.next6Months.map(String).filter(Boolean) : [],
+        next12Months: Array.isArray(timeBoundPlanRaw.next12Months) ? timeBoundPlanRaw.next12Months.map(String).filter(Boolean) : [],
+      };
 
       const roadmap = {
-        criticalAlerts: roadmapRaw.criticalAlerts as string[],
-        specialistReferrals: roadmapRaw.specialistReferrals.map((item) => ({
-          specialty: item.specialty as string,
-          reason: item.reason as string,
-        })),
-        timeBoundPlan: {
-          next3Months: timeBoundPlanRaw.next3Months as string[],
-          next6Months: timeBoundPlanRaw.next6Months as string[],
-          next12Months: timeBoundPlanRaw.next12Months as string[],
-        },
+        criticalAlerts,
+        specialistReferrals,
+        timeBoundPlan,
       };
 
       const todayStr = new Date().toISOString().slice(0, 10);

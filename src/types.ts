@@ -74,7 +74,8 @@ export interface HealthEvent {
   id: string;
   sourceFileId: string;
   sourceFileName: string;
-  type: 'medical_report' | 'prescription' | 'test_result' | 'vaccination' | 'discharge' | 'comprehensive_exam' | 'other';
+  additionalSources?: Array<{ driveFileId: string; fileName: string }>;
+  type: 'medical_report' | 'prescription' | 'test_result' | 'vaccination' | 'discharge' | 'comprehensive_exam' | 'imaging' | 'other';
   title: string;
   date: string;
   facility?: string;

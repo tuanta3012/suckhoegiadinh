@@ -1,106 +1,206 @@
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { FileText, UserCheck, UserPlus, X, OctagonX, ChevronRight, AlertCircle } from 'lucide-react';
+import type { FamilyMember } from '../types';
 
 interface UnresolvedSubjectModalProps {
   fileName: string;
   isSaving: boolean;
   error?: string;
+  members?: FamilyMember[];
+  batchStatus?: { current: number; total: number } | null;
   existingMemberName?: string;
   onDefer: () => void;
+  onSelectExistingMember?: (member: FamilyMember) => void;
   onCreateMember: (name: string) => void;
+  onCancelQueue?: () => void;
 }
 
 export function UnresolvedSubjectModal({
   fileName,
   isSaving,
   error,
+  members = [],
+  batchStatus,
   existingMemberName,
   onDefer,
+  onSelectExistingMember,
   onCreateMember,
+  onCancelQueue,
 }: UnresolvedSubjectModalProps) {
   const [name, setName] = useState('');
+  const [showAddForm, setShowAddForm] = useState(members.length === 0);
   const memberName = existingMemberName || name.trim();
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-3 overflow-y-auto animate-in fade-in duration-200"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !isSaving) onDefer();
       }}
     >
       <section
-        className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl"
+        className="my-auto w-full max-w-lg space-y-4 rounded-3xl bg-white p-5 shadow-2xl border border-slate-100 animate-in zoom-in-95 duration-200"
         role="dialog"
         aria-modal="true"
         aria-labelledby="unresolved-subject-title"
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 id="unresolved-subject-title" className="text-lg font-extrabold text-slate-900">
-              Chưa nhận diện được chủ thể
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap mb-1">
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[10px] font-extrabold text-amber-800">
+                <AlertCircle className="w-3 h-3 text-amber-600" />
+                Cần chọn hồ sơ gán dữ liệu
+              </span>
+              {batchStatus && (
+                <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-extrabold text-slate-600">
+                  Tệp {batchStatus.current}/{batchStatus.total} trong hàng đợi
+                </span>
+              )}
+            </div>
+            <h2 id="unresolved-subject-title" className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+              Chưa xác định được người bệnh
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Tạo thành viên mới để gán dữ liệu OCR. Tài liệu: {fileName}
+            <p className="mt-1 text-xs text-slate-600 font-medium flex items-center gap-1.5 truncate">
+              <FileText className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>Tệp:</span>
+              <strong className="text-slate-900 truncate font-extrabold">{fileName}</strong>
             </p>
           </div>
           <button
             type="button"
-            className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50"
-            aria-label="Để sau"
+            className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50 transition-colors"
+            aria-label="Đóng"
             disabled={isSaving}
             onClick={onDefer}
           >
-            <X className="h-4 w-4" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
+        {/* Existing Member Selection */}
+        {members.length > 0 && !existingMemberName && (
+          <div className="space-y-2">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+              1. Chọn hồ sơ thành viên có sẵn trong gia đình:
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-1">
+              {members.map((member) => (
+                <button
+                  key={member.id}
+                  type="button"
+                  disabled={isSaving}
+                  onClick={() => onSelectExistingMember?.(member)}
+                  className="flex items-center gap-2.5 p-2.5 rounded-2xl border border-slate-200 bg-slate-50/50 hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-950 transition-all text-left group disabled:opacity-50"
+                >
+                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-black text-xs shrink-0 group-hover:scale-105 transition-transform">
+                    {member.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-xs text-slate-800 truncate group-hover:text-emerald-900">
+                      {member.name}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-medium">
+                      {member.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-600 shrink-0" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Create New Member Form */}
         {existingMemberName ? (
-          <p className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-            Đã tạo thành viên <strong>{existingMemberName}</strong>. Tiếp tục để lưu dữ liệu OCR vào hồ sơ này.
+          <p className="rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900">
+            Đã tạo thành viên <strong className="font-extrabold text-emerald-950">{existingMemberName}</strong>. Bấm bên dưới để lưu tài liệu vào hồ sơ này.
           </p>
         ) : (
-          <label className="block space-y-1.5 text-sm font-semibold text-slate-700">
-            <span>Họ và tên thành viên mới</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && memberName && !isSaving) {
-                  onCreateMember(memberName);
-                }
-              }}
-              placeholder="Nhập họ và tên"
-              disabled={isSaving}
-              className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm disabled:bg-slate-50"
-            />
-          </label>
+          <div className="space-y-2 pt-1 border-t border-slate-100">
+            {members.length > 0 && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  2. Hoặc tạo hồ sơ cho thành viên mới:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowAddForm(!showAddForm)}
+                  className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>{showAddForm ? 'Thu gọn' : 'Tạo thành viên mới'}</span>
+                </button>
+              </div>
+            )}
+
+            {(showAddForm || members.length === 0) && (
+              <div className="space-y-2 bg-slate-50/80 p-3 rounded-2xl border border-slate-200">
+                <label className="block text-xs font-bold text-slate-700">
+                  Họ và tên thành viên mới
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && memberName && !isSaving) {
+                        onCreateMember(memberName);
+                      }
+                    }}
+                    placeholder="Ví dụ: Nguyễn Văn A, Mẹ, Con gái..."
+                    disabled={isSaving}
+                    className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 placeholder:font-normal focus:border-emerald-500 focus:outline-none disabled:bg-slate-100"
+                  />
+                  <button
+                    type="button"
+                    disabled={isSaving || !memberName}
+                    onClick={() => onCreateMember(memberName)}
+                    className="rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 text-xs font-bold text-white shrink-0 disabled:opacity-50 flex items-center gap-1 transition-colors"
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>Tạo & Gán</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {error && (
-          <p role="alert" className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          <p role="alert" className="rounded-2xl bg-rose-50 border border-rose-200 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
             {error}
           </p>
         )}
 
-        <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
-          <button
-            type="button"
-            disabled={isSaving}
-            onClick={onDefer}
-            className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
-          >
-            Để sau
-          </button>
-          <button
-            type="button"
-            disabled={isSaving || !memberName}
-            onClick={() => onCreateMember(memberName)}
-            className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
-          >
-            {isSaving ? 'Đang tạo và lưu…' : existingMemberName ? 'Lưu vào hồ sơ thành viên' : 'Tạo thành viên và gán dữ liệu'}
-          </button>
+        {/* Footer Actions */}
+        <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-3 flex-wrap">
+          {onCancelQueue ? (
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={onCancelQueue}
+              className="rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-3 py-2 text-xs font-bold disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+            >
+              <OctagonX className="w-4 h-4 shrink-0 text-rose-600" />
+              <span>Dừng toàn bộ hàng đợi</span>
+            </button>
+          ) : (
+            <div />
+          )}
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={onDefer}
+              className="rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-bold text-slate-700 disabled:opacity-50 transition-colors"
+            >
+              {batchStatus ? 'Bỏ qua tệp này & Tiếp tục' : 'Để sau'}
+            </button>
+          </div>
         </div>
       </section>
     </div>
