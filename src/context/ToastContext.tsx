@@ -20,6 +20,9 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string, type: ToastType = 'info', duration = 3500) => {
+    // Only allow error notifications (red) as requested by user
+    if (type !== 'error') return;
+
     if (timer.current) clearTimeout(timer.current);
     const id = ++nextId.current;
     setToast({ id, message, type });

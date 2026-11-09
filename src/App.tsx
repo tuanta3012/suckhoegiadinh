@@ -13,6 +13,7 @@ import {
   restoreGoogleAuthSession,
   signInWithGoogle,
   signOutGoogle,
+  trySilentRefresh,
 } from './utils/googleDriveService';
 
 export default function App() {
@@ -71,10 +72,22 @@ export default function App() {
       showToast('Phiên Google Drive đã hết hạn. Hãy bấm "Cấp quyền Drive" để tiếp tục.', 'error');
     };
     window.addEventListener('google-drive-auth-expired', handleDriveExpired);
+
+    // Auto-refresh token on app resume (useful for long-lived background sessions)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && auth.currentUser) {
+        void trySilentRefresh().then((token) => {
+          if (token) setDriveAuthorized(true);
+        });
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       cancelled = true;
       unsubscribe?.();
       window.removeEventListener('google-drive-auth-expired', handleDriveExpired);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [showToast]);
 

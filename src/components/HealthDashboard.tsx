@@ -1450,10 +1450,12 @@ export function HealthDashboard({
     if (pendingLocalUploadCount > 0 || Object.values(profiles).some((profile) => profile.syncPending)) {
       return 'pending';
     }
-    if (!driveAuthorized) return 'offline';
+    if (!driveAuthorized) {
+      return userEmail ? 'drive_expired' : 'offline';
+    }
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return 'unlinked';
     return 'online';
-  }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace]);
+  }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace, userEmail]);
 
   // Auto-connect workspace on mount or Drive authorization change
   const discoveryAttemptedRef = useRef(false);
@@ -3405,7 +3407,12 @@ export function HealthDashboard({
                 ) : syncStatus === 'unlinked' ? (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-slate-400 shrink-0" />
-                    <span className="truncate font-medium text-slate-500">Chưa liên kết</span>
+                    <span className="truncate font-medium text-slate-500">Chưa liên kết Drive</span>
+                  </>
+                ) : syncStatus === 'drive_expired' ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0 animate-pulse" />
+                    <span className="truncate font-semibold text-amber-700">Cần cấp lại quyền Drive</span>
                   </>
                 ) : (
                   <>
@@ -3576,8 +3583,22 @@ export function HealthDashboard({
                     </div>
                   </button>
 
-                  {/* 3. Đăng nhập / Đăng xuất */}
-                  <div className="pt-0.5 pb-0.5">
+                  {/* 3. Đăng nhập / Đăng xuất & Kết nối lại Drive */}
+                  <div className="pt-0.5 pb-0.5 space-y-1">
+                    {userEmail && !driveAuthorized && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowSettingsDropdown(false);
+                          onConnectDrive();
+                        }}
+                        className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-amber-500 text-white hover:bg-amber-600 transition-colors text-left text-xs font-bold shadow-sm"
+                      >
+                        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                        <span>Kết nối lại Google Drive</span>
+                      </button>
+                    )}
+                    
                     {userEmail ? (
                       <button
                         type="button"
@@ -3588,7 +3609,7 @@ export function HealthDashboard({
                         className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-rose-600 transition-colors text-left text-xs font-bold"
                       >
                         <LogOut className="w-4 h-4 shrink-0 text-rose-500" />
-                        <span>Đăng xuất</span>
+                        <span>Đăng xuất tài khoản</span>
                       </button>
                     ) : (
                       <button
@@ -3766,22 +3787,37 @@ export function HealthDashboard({
 
             {!driveAuthorized ? (
               <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-950 text-xs leading-relaxed space-y-2">
-                  <div className="flex items-center gap-2 font-bold text-emerald-900">
-                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>Quyền riêng tư tuyệt đối</span>
+                {userEmail ? (
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex items-start gap-2.5">
+                    <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-amber-900">
+                        Phiên Google Drive đã hết hạn
+                      </p>
+                      <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
+                        Tài khoản <span className="font-semibold">{userEmail}</span> đang đăng nhập nhưng cần cấp lại quyền truy cập Drive để xem và đồng bộ dữ liệu.
+                      </p>
+                    </div>
                   </div>
-                  <p>
-                    Dữ liệu y tế của bạn được mã hóa và lưu trữ trực tiếp trên tài khoản Google Drive cá nhân. Không máy chủ trung gian nào lưu giữ bệnh án của bạn.
-                  </p>
-                </div>
+                ) : (
+                  <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-950 text-xs leading-relaxed space-y-2">
+                    <div className="flex items-center gap-2 font-bold text-emerald-900">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Quyền riêng tư tuyệt đối</span>
+                    </div>
+                    <p>
+                      Dữ liệu y tế của bạn được mã hóa và lưu trữ trực tiếp trên tài khoản Google Drive cá nhân. Không máy chủ trung gian nào lưu giữ bệnh án của bạn.
+                    </p>
+                  </div>
+                )}
+                
                 <button
                   type="button"
                   onClick={onConnectDrive}
                   className="w-full flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold text-sm shadow-md shadow-emerald-600/20 transition-all"
                 >
                   <LogIn className="w-4 h-4" />
-                  <span>Đăng nhập Google & Cấp quyền Drive</span>
+                  <span>{userEmail ? 'Cấp lại quyền Google Drive' : 'Đăng nhập Google & Cấp quyền Drive'}</span>
                 </button>
               </div>
             ) : (
@@ -3915,7 +3951,7 @@ export function HealthDashboard({
                           className="py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
                         >
                           <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Đăng nhập Google</span>
+                          <span>{userEmail ? 'Cấp lại quyền Drive' : 'Đăng nhập Google'}</span>
                         </button>
                       ) : (
                         <button
