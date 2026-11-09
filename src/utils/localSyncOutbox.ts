@@ -347,6 +347,22 @@ export function createLocalSyncOutbox(store: OutboxFileStore = filesystemStore) 
     listUploads(accountEmail: string) {
       return listOperations(accountEmail, 'raw_upload');
     },
+    async getUpload(accountEmail: string, operationId: string): Promise<PendingUpload | undefined> {
+      try {
+        const operation = JSON.parse(await store.readText(operationPath(accountEmail, operationId)));
+        if (!isPendingOperation(operation)) {
+          throw new Error('Yêu cầu tải tài liệu cục bộ không hợp lệ; dữ liệu được giữ nguyên.');
+        }
+        return operation.kind === 'raw_upload' ? operation : undefined;
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('không hợp lệ; dữ liệu được giữ nguyên')) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : '';
+        if (/does not exist|not found|no such file|ENOENT/i.test(message)) return undefined;
+        throw error;
+      }
+    },
     async readUploadFile(operation: PendingUpload): Promise<File> {
       const payload = await store.readBase64(operation.payloadPath);
       return new File(
@@ -358,8 +374,9 @@ export function createLocalSyncOutbox(store: OutboxFileStore = filesystemStore) 
     async setUploadedFile(
       operation: PendingUpload,
       uploadedFile: PendingUpload['uploadedFile'],
+      workspaceRootId = operation.workspaceRootId,
     ): Promise<PendingUpload> {
-      const updated = { ...operation, uploadedFile };
+      const updated = { ...operation, uploadedFile, workspaceRootId };
       await store.writeText(operationPath(operation.accountEmail, operation.id), JSON.stringify(updated));
       return updated;
     },
@@ -401,5 +418,13 @@ export function fileFromPendingUpload(operation: PendingUpload): Promise<File> {
   if (!supportsDurableOfflineQueue()) {
     return Promise.reject(new Error('Hàng đợi tải ngoại tuyến chỉ được bật trong ứng dụng di động.'));
   }
+  return localSyncOutbox.readUploadFile(operation);
+}
+
+export async function fileFromLocalSource(sourceId: string, ownerKey: string): Promise<File> {
+  const match = /^local_file_(.+)$/.exec(sourceId);
+  if (!match) throw new Error('Mã tài liệu cục bộ không hợp lệ.');
+  const operation = await localSyncOutbox.getUpload(ownerKey, match[1]);
+  if (!operation) throw new Error('Không tìm thấy tài liệu gốc trong bộ nhớ của ứng dụng.');
   return localSyncOutbox.readUploadFile(operation);
 }

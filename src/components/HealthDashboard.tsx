@@ -88,6 +88,7 @@ import {
   type DriveFile,
 } from '../utils/healthDriveService';
 import {
+  fileFromLocalSource,
   fileFromPendingUpload,
   localSyncOutbox,
   supportsDurableOfflineQueue,
@@ -194,6 +195,7 @@ interface ChatMessage {
 const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
 const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
 const LOCAL_PROFILES_KEY = 'health_offline_profiles_v2';
+const APK_LOCAL_OWNER_KEY = 'apk-local-device';
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const UPDATE_SERVER_URL =
   'https://raw.githubusercontent.com/tuanta3012/suckhoegiadinh/refs/heads/main/version.json';
@@ -203,6 +205,7 @@ function isLocalProfileFileId(fileId: string): boolean {
 }
 
 function createDefaultLocalWorkspace(adminEmail: string | null, _adminName?: string | null): HealthDriveWorkspace {
+  const localMemberId = 'member_local_owner';
   return {
     rootFolderId: 'local_offline_workspace',
     familyFileId: 'local_family_file',
@@ -213,7 +216,16 @@ function createDefaultLocalWorkspace(adminEmail: string | null, _adminName?: str
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       adminEmail: adminEmail || 'offline@user',
-      members: [],
+      members: Capacitor.isNativePlatform()
+        ? [{
+            id: localMemberId,
+            name: _adminName?.trim() || 'Tôi',
+            email: adminEmail || undefined,
+            role: 'other',
+            driveFolderId: `local_folder_${localMemberId}`,
+            profileFileId: `local_profile_${localMemberId}`,
+          }]
+        : [],
     },
   };
 }
@@ -230,6 +242,11 @@ function loadNativeOfflineState(userEmail: string | null, userName?: string | nu
     workspace: createDefaultLocalWorkspace(userEmail, userName),
     profiles: {} as Record<string, HealthProfile>,
   };
+  if (fallback.workspace.rootFolderId === 'local_offline_workspace') {
+    fallback.profiles = Object.fromEntries(
+      fallback.workspace.family.members.map((member) => [member.id, createHealthProfile(member)]),
+    );
+  }
   if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
 
   const workspaceKey = offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail);
@@ -286,10 +303,43 @@ function loadNativeOfflineState(userEmail: string | null, userName?: string | nu
         parsedWorkspace.rootFolderId,
       );
     }
+    if (parsedWorkspace.rootFolderId === 'local_offline_workspace') {
+      for (const member of parsedWorkspace.family.members) {
+        parsedProfiles[member.id] ||= createHealthProfile(member);
+      }
+    }
     return { workspace: parsedWorkspace, profiles: parsedProfiles };
   } catch (error) {
     console.warn('[Offline cache] Could not restore native workspace data.', error);
     return fallback;
+  }
+}
+
+function loadGuestLocalState(): {
+  workspace: HealthDriveWorkspace;
+  profiles: Record<string, HealthProfile>;
+} | null {
+  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return null;
+  try {
+    const workspaceValue = localStorage.getItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, null));
+    if (!workspaceValue) return null;
+    const workspace = JSON.parse(workspaceValue) as HealthDriveWorkspace;
+    if (
+      workspace.rootFolderId !== 'local_offline_workspace' ||
+      !Array.isArray(workspace.family?.members)
+    ) return null;
+    const profilesValue = localStorage.getItem(offlineCacheKey(LOCAL_PROFILES_KEY, null));
+    const profiles = profilesValue ? JSON.parse(profilesValue) as Record<string, HealthProfile> : {};
+    if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) {
+      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
+    }
+    for (const member of workspace.family.members) {
+      profiles[member.id] ||= createHealthProfile(member);
+    }
+    return { workspace, profiles };
+  } catch (error) {
+    console.warn('[Offline cache] Could not inspect guest data for Drive import.', error);
+    return null;
   }
 }
 
@@ -359,6 +409,8 @@ export function HealthDashboard({
 
   const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(offlineStartup.workspace);
   const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(offlineStartup.profiles);
+  const [localImportAvailable, setLocalImportAvailable] = useState(false);
+  const [isImportingLocalData, setIsImportingLocalData] = useState(false);
 
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
   const [selectedMemberId, setSelectedMemberId] = useState<string>(
@@ -696,11 +748,18 @@ export function HealthDashboard({
     memberId?: string,
   ): Promise<void> {
     if (files.length === 0) return;
+    if (files.some((file) => file.size > MAX_UPLOAD_BYTES)) {
+      showToast('Mỗi tệp phải nhỏ hơn hoặc bằng 25 MB.', 'error');
+      return;
+    }
     const currentWorkspace = workspaceRef.current;
     if (!currentWorkspace) {
       showToast('Chưa có hồ sơ đích để lưu tài liệu.', 'error');
       return;
     }
+    const isLocalOnlyWorkspace =
+      currentWorkspace.rootFolderId === 'local_offline_workspace' &&
+      supportsDurableOfflineQueue();
 
     let targetMember =
       currentWorkspace.family.members.find((member) => member.id === memberId) ||
@@ -720,7 +779,7 @@ export function HealthDashboard({
           const loadedProfiles = await reloadProfiles(updatedWorkspace);
           profilesRef.current = loadedProfiles;
           targetMember = updatedWorkspace.family.members.find((member) => member.id === newMemberId);
-        } else if (supportsDurableOfflineQueue() && userEmail) {
+        } else if (supportsDurableOfflineQueue() && offlineOwnerKey) {
           const localMember: FamilyMember = {
             id: newMemberId,
             name: 'Thành viên mới',
@@ -730,7 +789,7 @@ export function HealthDashboard({
           };
           const localProfile = { ...createHealthProfile(localMember), syncPending: true };
           await localSyncOutbox.enqueueMemberSave(
-            userEmail,
+            offlineOwnerKey,
             currentWorkspace.rootFolderId,
             localMember,
             localProfile,
@@ -766,18 +825,20 @@ export function HealthDashboard({
     }
 
     const queuedIds: Array<string | undefined> = [];
-    if (supportsDurableOfflineQueue() && userEmail) {
+    if (supportsDurableOfflineQueue() && offlineOwnerKey) {
       try {
         for (const file of files) {
           const operation = await localSyncOutbox.enqueueUpload(
-            userEmail,
+            offlineOwnerKey,
             currentWorkspace.rootFolderId,
             targetMember,
             file,
           );
           queuedIds.push(operation.id);
         }
-        setPendingLocalUploadCount((count) => count + queuedIds.length);
+        if (!isLocalOnlyWorkspace) {
+          setPendingLocalUploadCount((count) => count + queuedIds.length);
+        }
       } catch (error) {
         showToast(
           error instanceof Error
@@ -793,17 +854,17 @@ export function HealthDashboard({
 
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
     if (!driveAuthorized || !isOnline || currentWorkspace.rootFolderId === 'local_offline_workspace') {
-      if (supportsDurableOfflineQueue() && userEmail) {
+      if (supportsDurableOfflineQueue() && offlineOwnerKey) {
         showToast(
-          currentWorkspace.rootFolderId === 'local_offline_workspace'
-            ? `Đã lưu ${files.length} tài liệu trên thiết bị. Kết nối hoặc tạo thư mục Drive dùng chung để đồng bộ.`
+          isLocalOnlyWorkspace
+            ? `Đã lưu ${files.length} tài liệu trên thiết bị; chưa đồng bộ lên Google Drive.`
             : `Đã lưu ${files.length} tài liệu trên thiết bị; sẽ tải lên khi Drive có thể truy cập.`,
           'info',
         );
       } else {
         showToast('Không có kết nối Drive và trình duyệt không hỗ trợ hàng đợi ngoại tuyến bền vững.', 'error');
       }
-      return;
+      if (!isLocalOnlyWorkspace) return;
     }
 
     const firstPendingId = queuedIds[0];
@@ -833,16 +894,15 @@ export function HealthDashboard({
   }
 
   async function getPendingUpload(operationId: string): Promise<PendingUpload | undefined> {
-    if (!supportsDurableOfflineQueue() || !userEmail) return undefined;
-    return (await localSyncOutbox.listUploads(userEmail))
-      .find((operation) => operation.id === operationId);
+    if (!supportsDurableOfflineQueue() || !offlineOwnerKey) return undefined;
+    return localSyncOutbox.getUpload(offlineOwnerKey, operationId);
   }
 
   async function completePendingUpload(operationId?: string): Promise<void> {
-    if (!operationId || !supportsDurableOfflineQueue() || !userEmail) return;
+    if (!operationId || !supportsDurableOfflineQueue() || !offlineOwnerKey) return;
     const pending = await getPendingUpload(operationId);
     if (!pending) return;
-    await localSyncOutbox.complete(userEmail, operationId);
+    await localSyncOutbox.complete(offlineOwnerKey, operationId);
     setPendingLocalUploadCount((count) => Math.max(0, count - 1));
   }
 
@@ -1049,7 +1109,9 @@ export function HealthDashboard({
       digitizationLogger.clearLogs();
 
       const freshWs = createDefaultLocalWorkspace(userEmail, userName);
-      const freshProf = {};
+      const freshProf = Object.fromEntries(
+        freshWs.family.members.map((member) => [member.id, createHealthProfile(member)]),
+      );
 
       workspaceRef.current = freshWs;
       profilesRef.current = freshProf;
@@ -1106,6 +1168,51 @@ export function HealthDashboard({
   });
 
   const members = prioritizeMemberForEmail(workspace?.family.members || [], userEmail);
+  const offlineOwnerKey =
+    userEmail?.trim().toLowerCase() ||
+    (supportsDurableOfflineQueue() ? 'apk-local-device' : null);
+  const canUseLocalWorkspace =
+    supportsDurableOfflineQueue() &&
+    workspace?.rootFolderId === 'local_offline_workspace';
+  useEffect(() => {
+    let cancelled = false;
+    const activeWorkspace = workspaceRef.current;
+    const guestLocalState = loadGuestLocalState();
+    if (
+      !guestLocalState ||
+      !userEmail ||
+      !driveAuthorized ||
+      !activeWorkspace ||
+      activeWorkspace.rootFolderId === 'local_offline_workspace'
+    ) {
+      setLocalImportAvailable(false);
+      return;
+    }
+
+    const importMarker = `health_guest_imported_${encodeURIComponent(userEmail.trim().toLowerCase())}_${activeWorkspace.rootFolderId}`;
+    if (localStorage.getItem(importMarker) === 'true') {
+      setLocalImportAvailable(false);
+      return;
+    }
+    const hasProfileData = Object.values(guestLocalState.profiles).some(
+      (profile) => profile.timeline.length > 0 || profile.sources.length > 0,
+    );
+    const hasMultipleMembers = guestLocalState.workspace.family.members.length > 1;
+    void localSyncOutbox.listUploads(APK_LOCAL_OWNER_KEY)
+      .then((uploads) => {
+        if (!cancelled) {
+          setLocalImportAvailable(hasProfileData || hasMultipleMembers || uploads.length > 0);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('[Local data import] Could not inspect stored documents.', error);
+        if (!cancelled) setLocalImportAvailable(hasProfileData || hasMultipleMembers);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [driveAuthorized, userEmail, workspace?.rootFolderId]);
   const isWorkspaceAdmin = Boolean(
     !workspace ||
       workspace.rootFolderId === 'local_offline_workspace' ||
@@ -1233,6 +1340,18 @@ export function HealthDashboard({
 
   const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
     const authIdentity = authIdentityRef.current;
+    if (nextWorkspace.rootFolderId === 'local_offline_workspace') {
+      const localProfiles = Object.fromEntries(
+        nextWorkspace.family.members.map((member) => [
+          member.id,
+          profilesRef.current[member.id] || createHealthProfile(member),
+        ]),
+      );
+      profilesRef.current = localProfiles;
+      setProfiles(localProfiles);
+      setProfileErrors({});
+      return localProfiles;
+    }
     if (!authIdentity.driveAuthorized || !authIdentity.userEmail) return {};
     let activeWorkspace = nextWorkspace;
     if (supportsDurableOfflineQueue()) {
@@ -1655,6 +1774,136 @@ export function HealthDashboard({
     void reloadWorkspaceAssignments();
   }, [reloadWorkspaceAssignments]);
 
+  async function importGuestLocalDataToDrive() {
+    const sourceState = loadGuestLocalState();
+    const destination = workspaceRef.current;
+    if (!sourceState || !userEmail || !driveAuthorized || !destination ||
+        destination.rootFolderId === 'local_offline_workspace') {
+      showToast('Hãy kết nối Google Drive và mở kho đích trước khi sao chép dữ liệu.', 'error');
+      return;
+    }
+
+    const confirmed = await confirm({
+      title: 'Sao chép dữ liệu trên thiết bị lên Drive?',
+      message: `Hồ sơ và tài liệu cục bộ sẽ được sao chép vào kho Drive ${destination.rootFolderId} của ${userEmail}. Bản cục bộ vẫn được giữ trên thiết bị; dữ liệu y tế sẽ được tải lên Google Drive.`,
+      confirmLabel: 'Sao chép lên Drive',
+      cancelLabel: 'Để sau',
+    });
+    if (!confirmed) return;
+
+    setIsImportingLocalData(true);
+    setErrorMessage('');
+    try {
+      let nextWorkspace = destination;
+      const uploads = await localSyncOutbox.listUploads(APK_LOCAL_OWNER_KEY);
+      const uploadsById = new Map(uploads.map((operation) => [operation.id, operation]));
+      const nextProfiles = { ...profilesRef.current };
+
+      for (const localMember of sourceState.workspace.family.members) {
+        const existingMember =
+          nextWorkspace.family.members.find(
+            (member) =>
+              member.name.trim().toLocaleLowerCase() === localMember.name.trim().toLocaleLowerCase() ||
+              Boolean(
+                member.email &&
+                  localMember.email &&
+                  member.email.trim().toLowerCase() === localMember.email.trim().toLowerCase(),
+              ),
+          );
+        let targetMember = existingMember;
+        if (!targetMember) {
+          const {
+            id: localMemberId,
+            driveFolderId: _localFolderId,
+            profileFileId: _localProfileFileId,
+            ...memberInput
+          } = localMember;
+          const memberId = nextWorkspace.family.members.some((member) => member.id === localMemberId)
+            ? `member_${crypto.randomUUID().slice(0, 12)}`
+            : localMemberId;
+          nextWorkspace = await addDriveFamilyMember(nextWorkspace, { ...memberInput, id: memberId });
+          targetMember = nextWorkspace.family.members.find((member) => member.id === memberId);
+          if (!targetMember) {
+            throw new Error(`Không thể tạo hồ sơ Drive cho ${localMember.name}.`);
+          }
+          workspaceRef.current = nextWorkspace;
+          setWorkspace(nextWorkspace);
+        }
+
+        const localProfile = sourceState.profiles[localMember.id] || createHealthProfile(localMember);
+        const sourceIdMap = new Map<string, string>();
+        const importedSources: HealthSource[] = [];
+        for (const source of localProfile.sources) {
+          if (!source.driveFileId.startsWith('local_file_')) {
+            importedSources.push(source);
+            sourceIdMap.set(source.driveFileId, source.driveFileId);
+            continue;
+          }
+          const uploadId = source.driveFileId.slice('local_file_'.length);
+          const operation = uploadsById.get(uploadId) ||
+            await localSyncOutbox.getUpload(APK_LOCAL_OWNER_KEY, uploadId);
+          if (!operation) {
+            throw new Error(`Không tìm thấy tệp gốc "${source.fileName}" trên thiết bị.`);
+          }
+          let uploaded = operation.workspaceRootId === nextWorkspace.rootFolderId
+            ? operation.uploadedFile
+            : undefined;
+          if (!uploaded) {
+            const file = await fileFromPendingUpload(operation);
+            uploaded = await uploadRawHealthFile(targetMember, file);
+            await localSyncOutbox.setUploadedFile(operation, uploaded, nextWorkspace.rootFolderId);
+          }
+          sourceIdMap.set(source.driveFileId, uploaded.id);
+          importedSources.push({
+            ...source,
+            driveFileId: uploaded.id,
+            fileName: uploaded.name,
+            mimeType: uploaded.mimeType,
+            uploadedAt: uploaded.createdTime,
+          });
+        }
+
+        const importedProfile: HealthProfile = {
+          ...localProfile,
+          member: targetMember,
+          sources: importedSources,
+          timeline: localProfile.timeline.map((event) => ({
+            ...event,
+            sourceFileId: sourceIdMap.get(event.sourceFileId) || event.sourceFileId,
+          })),
+        };
+        let remoteProfile = nextProfiles[targetMember.id];
+        if (!remoteProfile) {
+          remoteProfile = existingMember
+            ? parseHealthProfile(await loadHealthProfile(targetMember.profileFileId), targetMember)
+            : createHealthProfile(targetMember);
+        }
+        const savedProfile = await saveHealthProfile(
+          targetMember.profileFileId,
+          mergeHealthProfiles(remoteProfile, importedProfile),
+        );
+        nextProfiles[targetMember.id] = savedProfile;
+        profilesRef.current = nextProfiles;
+        setProfiles({ ...nextProfiles });
+      }
+
+      workspaceRef.current = nextWorkspace;
+      setWorkspace(nextWorkspace);
+      localStorage.setItem(
+        `health_guest_imported_${encodeURIComponent(userEmail.trim().toLowerCase())}_${nextWorkspace.rootFolderId}`,
+        'true',
+      );
+      setLocalImportAvailable(false);
+      showToast('Đã sao chép hồ sơ và tài liệu cục bộ lên Google Drive. Bản trên thiết bị vẫn được giữ lại.', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Không thể sao chép dữ liệu cục bộ lên Google Drive.';
+      setErrorMessage(message);
+      showToast(`Sao chép chưa hoàn tất; dữ liệu gốc vẫn được giữ trên thiết bị. ${message}`, 'error');
+    } finally {
+      setIsImportingLocalData(false);
+    }
+  }
+
   async function handleCreateWorkspace() {
     if (!driveAuthorized) {
       onConnectDrive();
@@ -1670,10 +1919,10 @@ export function HealthDashboard({
 
 
       if (previousWorkspace?.rootFolderId === 'local_offline_workspace') {
-        if (supportsDurableOfflineQueue() && userEmail) {
+        if (supportsDurableOfflineQueue() && offlineOwnerKey && userEmail) {
           for (const member of previousWorkspace.family.members) {
             await localSyncOutbox.enqueueMemberSave(
-              userEmail,
+              offlineOwnerKey,
               created.rootFolderId,
               member,
               localProfiles[member.id] || profiles[member.id],
@@ -1768,7 +2017,7 @@ export function HealthDashboard({
         (typeof navigator !== 'undefined' && !navigator.onLine) ||
         workspace.rootFolderId === 'local_offline_workspace'
       ) {
-        if (!supportsDurableOfflineQueue() || !userEmail) {
+        if (!supportsDurableOfflineQueue() || !offlineOwnerKey) {
           throw new Error('Không thể lưu yêu cầu thêm thành viên ngoại tuyến trên trình duyệt này.');
         }
         const localMember: FamilyMember = {
@@ -1778,7 +2027,7 @@ export function HealthDashboard({
         };
         const localProfile = { ...createHealthProfile(localMember), syncPending: true };
         await localSyncOutbox.enqueueMemberSave(
-          userEmail,
+          offlineOwnerKey,
           workspace.rootFolderId,
           localMember,
           localProfile,
@@ -1834,7 +2083,7 @@ export function HealthDashboard({
         (typeof navigator !== 'undefined' && !navigator.onLine) ||
         workspace.rootFolderId === 'local_offline_workspace'
       ) {
-        if (!supportsDurableOfflineQueue() || !userEmail) {
+        if (!supportsDurableOfflineQueue() || !offlineOwnerKey) {
           throw new Error('Không thể lưu yêu cầu thêm thành viên ngoại tuyến trên trình duyệt này.');
         }
         const localMember: FamilyMember = {
@@ -1846,7 +2095,7 @@ export function HealthDashboard({
         };
         const localProfile = { ...createHealthProfile(localMember), syncPending: true };
         await localSyncOutbox.enqueueMemberSave(
-          userEmail,
+          offlineOwnerKey,
           workspace.rootFolderId,
           localMember,
           localProfile,
@@ -1917,7 +2166,7 @@ export function HealthDashboard({
         (typeof navigator !== 'undefined' && !navigator.onLine) ||
         workspace.rootFolderId === 'local_offline_workspace'
       ) {
-        if (!supportsDurableOfflineQueue() || !userEmail) {
+        if (!supportsDurableOfflineQueue() || !offlineOwnerKey) {
           throw new Error('Không thể lưu chỉnh sửa ngoại tuyến trên trình duyệt này.');
         }
         const updatedMember = { ...editingMember, ...updates, name };
@@ -1931,7 +2180,7 @@ export function HealthDashboard({
             }
           : undefined;
         await localSyncOutbox.enqueueMemberSave(
-          userEmail,
+          offlineOwnerKey,
           workspace.rootFolderId,
           updatedMember,
           updatedProfile,
@@ -2050,9 +2299,9 @@ export function HealthDashboard({
       } else {
         next = queueForSync();
       }
-      if (supportsDurableOfflineQueue() && userEmail) {
+      if (supportsDurableOfflineQueue() && offlineOwnerKey) {
         await localSyncOutbox.discardMemberOperations(
-          userEmail,
+          offlineOwnerKey,
           member.id,
           workspace.rootFolderId,
           member.profileFileId,
@@ -2134,37 +2383,36 @@ export function HealthDashboard({
       showToast('Hãy kết nối Google Drive trước khi tải tài liệu.', 'error');
       return;
     }
+    const currentWorkspace = workspaceRef.current;
+    const isLocalOnlyWorkspace =
+      currentWorkspace.rootFolderId === 'local_offline_workspace' &&
+      supportsDurableOfflineQueue();
 
-    try {
-      // Robust Token Validation before any Drive or AI work
-      const token = await getValidGoogleAccessToken();
-      if (!token) throw new Error('Không lấy được access token.');
-    } catch {
-      if (pendingUploadId) {
-        processingPendingUploadIdsRef.current.delete(pendingUploadId);
-        showToast('Tài liệu đã được lưu trên thiết bị và sẽ được thử tải lên khi Drive có thể truy cập.', 'info');
+    if (!isLocalOnlyWorkspace) {
+      try {
+        const token = await getValidGoogleAccessToken();
+        if (!token) throw new Error('Không lấy được access token.');
+      } catch {
+        if (pendingUploadId) {
+          processingPendingUploadIdsRef.current.delete(pendingUploadId);
+          showToast('Tài liệu đã được lưu trên thiết bị và sẽ được thử tải lên khi Drive có thể truy cập.', 'info');
+          setQueueStatus(null);
+          setUploadQueue([]);
+          uploadQueueRef.current = [];
+          pendingUploadIdsRef.current = [];
+          return;
+        }
+        digitizationLogger.log('error', 'drive', 'Lỗi xác thực Google Drive trước khi upload');
+        showToast('Phiên Google Drive đã hết hạn hoặc chưa được cấp quyền. Vui lòng kết nối lại Drive.', 'error');
+        setIsUploading(false);
         setQueueStatus(null);
-        setUploadQueue([]);
-        uploadQueueRef.current = [];
-        pendingUploadIdsRef.current = [];
         return;
       }
-      digitizationLogger.log('error', 'drive', 'Lỗi xác thực Google Drive trước khi upload');
-      showToast('Phiên Google Drive đã hết hạn hoặc chưa được cấp quyền. Vui lòng kết nối lại Drive.', 'error');
-      setIsUploading(false);
-      setQueueStatus(null);
-      return;
     }
 
     // TỰ ĐỘNG KHỞI TẠO THÀNH VIÊN ĐẦU TIÊN NẾU CHƯA CÓ (Quick Start Flow)
     // SỬ DỤNG REF để lấy danh sách thành viên mới nhất
-    const currentWorkspace = workspaceRef.current;
-    if (currentWorkspace.rootFolderId === 'local_offline_workspace') {
-      if (pendingUploadId) {
-        processingPendingUploadIdsRef.current.delete(pendingUploadId);
-        showToast('Tài liệu đang chờ tạo hoặc kết nối Workspace Google Drive.', 'info');
-        return;
-      }
+    if (currentWorkspace.rootFolderId === 'local_offline_workspace' && !isLocalOnlyWorkspace) {
       showToast('Hãy kết nối hoặc tạo Workspace Google Drive trước khi tải tài liệu.', 'error');
       return;
     }
@@ -2203,6 +2451,11 @@ export function HealthDashboard({
 
     // KIỂM TRA HỒ SƠ SẴN SÀNG (Robust Loading for Batch)
     let currentProfile = profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id];
+    if (!currentProfile && isLocalOnlyWorkspace) {
+      currentProfile = createHealthProfile(effectiveMember);
+      profilesRef.current[effectiveMember.id] = currentProfile;
+      setProfiles((previous) => ({ ...previous, [effectiveMember!.id]: currentProfile! }));
+    }
     if (!currentProfile) {
       try {
         const remote = await loadHealthProfile(effectiveMember.profileFileId);
@@ -2313,9 +2566,11 @@ export function HealthDashboard({
         ...prev,
         file: processedFile,
         progressPercent: 25,
-        progressMessage: existingDriveFileId
-          ? 'Tệp đã có trên Drive. Đang chạy AI Vision quét dữ liệu...'
-          : 'Đang tải tệp đã tối ưu lên Google Drive...',
+        progressMessage: isLocalOnlyWorkspace
+          ? 'Đang chuẩn bị tài liệu đã lưu trên thiết bị để số hóa...'
+          : existingDriveFileId
+            ? 'Tệp đã có trên Drive. Đang chạy AI Vision quét dữ liệu...'
+            : 'Đang tải tệp đã tối ưu lên Google Drive...',
       }));
     } catch (error) {
       console.warn('[Preprocessing Warning]:', error);
@@ -2324,7 +2579,46 @@ export function HealthDashboard({
     }
 
     try {
-      if (existingDriveFileId) {
+      if (isLocalOnlyWorkspace) {
+        if (!pendingUploadId || !offlineOwnerKey) {
+          throw new Error('Không thể xác định tài liệu đã lưu trong bộ nhớ của ứng dụng.');
+        }
+        const localFile: DriveFile = {
+          id: `local_file_${pendingUploadId}`,
+          name: processedFile.name,
+          mimeType: processedFile.type || 'application/octet-stream',
+          createdTime: new Date().toISOString(),
+          size: String(processedFile.size),
+        };
+        const { hash } = await computeFileFingerprint(processedFile);
+        const isPdfDoc = processedFile.type.includes('pdf') || processedFile.name.toLowerCase().endsWith('.pdf');
+        const totalPages = isPdfDoc ? await getPdfPageCount(await processedFile.arrayBuffer()) : 1;
+        const source: HealthSource = {
+          driveFileId: localFile.id,
+          fileName: localFile.name,
+          fileSize: processedFile.size,
+          fileHash: hash,
+          mimeType: localFile.mimeType,
+          uploadedAt: localFile.createdTime,
+          status: 'pending',
+          totalPages,
+          processedPages: 0,
+        };
+        const staged = addHealthSource(
+          profilesRef.current[effectiveMember.id] || currentProfile || createHealthProfile(effectiveMember),
+          source,
+        );
+        const savedProfile = await saveHealthProfile(effectiveMember.profileFileId, staged);
+        profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
+        setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
+        setTrackerState((previous) => ({
+          ...previous,
+          driveFile: localFile,
+          progressPercent: 35,
+          progressMessage: 'Tài liệu đã lưu an toàn trên thiết bị. Đang số hóa bằng Gemini...',
+        }));
+        await runDocumentExtraction(processedFile, effectiveMember, localFile.id);
+      } else if (existingDriveFileId) {
         // Tệp đã có trên Google Drive: Tái sử dụng tệp gốc, KHÔNG tạo bản sao trùng lặp trên Drive
         const existingSource = currentProfile?.sources.find(
           (source) => source.driveFileId === existingDriveFileId,
@@ -2599,7 +2893,9 @@ export function HealthDashboard({
           isOpen: true,
           step: 'error',
           progressMessage: 'Không thể lưu kết quả OCR.',
-          error: 'Tài liệu đã được tải lên Drive nhưng chưa lưu được vào hồ sơ.',
+          error: workspaceRef.current?.rootFolderId === 'local_offline_workspace'
+            ? 'Tài liệu đã lưu trên thiết bị nhưng chưa lưu được kết quả vào hồ sơ.'
+            : 'Tài liệu đã được tải lên Drive nhưng chưa lưu được vào hồ sơ.',
         }));
       }
     } catch (error) {
@@ -2612,7 +2908,12 @@ export function HealthDashboard({
         progressMessage: 'Lỗi nhận dạng tài liệu',
         error: msg,
       }));
-      showToast('Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.', 'info');
+      showToast(
+        workspaceRef.current?.rootFolderId === 'local_offline_workspace'
+          ? 'Tài liệu vẫn được giữ trên thiết bị. Bạn có thể nhập thủ công hoặc thử lại khi có mạng.'
+          : 'Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.',
+        'info',
+      );
       processNextInQueue();
     }
   }
@@ -2798,7 +3099,12 @@ export function HealthDashboard({
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
     setDigitizationError('');
-    showToast('Tài liệu vẫn được giữ trên Drive và chưa gán vào hồ sơ nào. Có thể chạy lại OCR sau.', 'info');
+    showToast(
+      workspaceRef.current?.rootFolderId === 'local_offline_workspace'
+        ? 'Tài liệu vẫn được giữ trên thiết bị và chưa gán vào hồ sơ nào. Có thể chạy lại OCR sau.'
+        : 'Tài liệu vẫn được giữ trên Drive và chưa gán vào hồ sơ nào. Có thể chạy lại OCR sau.',
+      'info',
+    );
     processNextInQueue();
   }
 
@@ -2874,7 +3180,9 @@ export function HealthDashboard({
 
     setIsUploading(true);
     try {
-      const blob = await downloadDriveFile(job.driveFileId);
+      const blob = job.driveFileId.startsWith('local_file_')
+        ? await fileFromLocalSource(job.driveFileId, offlineOwnerKey || 'apk-local-device')
+        : await downloadDriveFile(job.driveFileId);
       if (blob.size > MAX_UPLOAD_BYTES) {
         throw new Error('Tài liệu trên Drive vượt quá giới hạn 25 MB.');
       }
@@ -3771,6 +4079,31 @@ export function HealthDashboard({
           </div>
         )}
 
+        {localImportAvailable && workspace?.rootFolderId !== 'local_offline_workspace' && (
+          <section className="mb-4 rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sky-950">
+            <div className="flex items-start gap-3">
+              <Cloud className="mt-0.5 h-5 w-5 shrink-0 text-sky-700" />
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-extrabold">Có dữ liệu ngoại tuyến trên thiết bị</h3>
+                <p className="mt-1 text-xs leading-relaxed text-sky-900">
+                  Dữ liệu chỉ được sao chép lên kho Drive khi bạn xác nhận. Bản cục bộ sẽ được giữ nguyên.
+                </p>
+                <button
+                  type="button"
+                  disabled={isImportingLocalData || isUploading || isLoading}
+                  onClick={() => void importGuestLocalDataToDrive()}
+                  className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-700 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-sky-800 disabled:opacity-50"
+                >
+                  {isImportingLocalData
+                    ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                    : <Cloud className="h-4 w-4" />}
+                  {isImportingLocalData ? 'Đang sao chép...' : 'Sao chép dữ liệu lên Drive'}
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* Setup Screen if no workspace is opened */}
         {!workspace ? (
           <div className="max-w-xl mx-auto my-6 bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm">
@@ -3902,7 +4235,7 @@ export function HealthDashboard({
                     </div>
                     <h3 className="text-base font-black text-slate-900 tracking-tight">Chưa có dữ liệu y tế</h3>
                     <p className="mt-0.5 text-xs text-slate-500 max-w-xs mx-auto">
-                      Lưu trữ Offline-First an toàn & bảo mật.
+                      Hồ sơ và tài liệu lưu riêng trên thiết bị; Gemini cần Internet để số hóa và phân tích.
                     </p>
 
                     {/* Compact 3-Step Chips */}
@@ -4126,7 +4459,7 @@ export function HealthDashboard({
                     <button
                       type="button"
                       onClick={handleFileUploadTrigger}
-                      disabled={!driveAuthorized || isUploading}
+                      disabled={(!driveAuthorized && !canUseLocalWorkspace) || isUploading}
                       className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
                     >
                       <FileUp className="w-4 h-4" />
@@ -4135,7 +4468,7 @@ export function HealthDashboard({
                     <button
                       type="button"
                       onClick={() => setShowRawFilesModal(true)}
-                      disabled={!driveAuthorized}
+                      disabled={!driveAuthorized && !canUseLocalWorkspace}
                       className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-teal-200 bg-teal-50/80 hover:bg-teal-100 text-teal-900 font-bold text-xs transition-all disabled:opacity-50 shrink-0"
                       title="Quản lý tài liệu gốc và trạng thái số hóa"
                     >
@@ -5200,6 +5533,7 @@ export function HealthDashboard({
         workspace={workspace}
         members={members}
         profiles={profiles}
+        localOwnerKey={offlineOwnerKey || 'apk-local-device'}
         onClose={() => setShowRawFilesModal(false)}
         onRefreshWorkspace={async () => {
           if (workspace) {
@@ -5207,6 +5541,13 @@ export function HealthDashboard({
           }
         }}
         onRunOcrForSource={async (member, source) => {
+          let file: File;
+          if (source.driveFileId.startsWith('local_file_')) {
+            file = await fileFromLocalSource(
+              source.driveFileId,
+              offlineOwnerKey || 'apk-local-device',
+            );
+          } else {
           // Tải tệp từ Drive về làm File object để OCR lại
           const token = await getGoogleAccessToken();
           const response = await fetch(`https://www.googleapis.com/drive/v3/files/${source.driveFileId}?alt=media`, {
@@ -5214,7 +5555,8 @@ export function HealthDashboard({
           });
           if (!response.ok) throw new Error('Không thể tải tệp từ Google Drive.');
           const blob = await response.blob();
-          const file = new File([blob], source.fileName, { type: source.mimeType });
+          file = new File([blob], source.fileName, { type: source.mimeType });
+          }
 
           setTrackerState({
             isOpen: true,

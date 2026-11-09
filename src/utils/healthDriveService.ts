@@ -21,6 +21,7 @@ const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JSON_MIME = 'application/json';
 const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size';
+const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
 
 class DriveConflictError extends Error {}
 
@@ -368,6 +369,12 @@ export async function openHealthWorkspace(
 }
 
 export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: HealthFamily): Promise<HealthDriveWorkspace> {
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return {
+      ...workspace,
+      family: { ...family, updatedAt: new Date().toISOString() },
+    };
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`, {
       headers: { Authorization: `Bearer ${accessToken()}` },
@@ -421,6 +428,19 @@ export async function addDriveFamilyMember(
   );
   if (duplicate) throw new Error('Tên thành viên này đã có trong gia đình.');
 
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    const member: FamilyMember = {
+      ...input,
+      name: normalizedName,
+      driveFolderId: `local_folder_${input.id}`,
+      profileFileId: `local_profile_${input.id}`,
+    };
+    return saveHealthFamily(workspace, {
+      ...workspace.family,
+      members: [...workspace.family.members, member],
+    });
+  }
+
   const rawFolder = await createFolder(input.id, workspace.family.rawFilesFolderId);
   const profile = {
     schemaVersion: 1,
@@ -463,6 +483,9 @@ export async function updateDriveFamilyMember(
   );
   const updatedMember = members.find((member) => member.id === memberId);
   if (!updatedMember) throw new Error('Không tìm thấy thành viên cần cập nhật.');
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return saveHealthFamily(workspace, { ...workspace.family, members });
+  }
   const profileData = await loadHealthProfile(updatedMember.profileFileId);
   const profile = parseHealthProfile(profileData, existingMember);
   const updatedProfile = { ...profile, member: updatedMember };
@@ -489,6 +512,18 @@ export async function deleteDriveFamilyMember(
 ): Promise<{ workspace: HealthDriveWorkspace }> {
   const member = workspace.family.members.find((item) => item.id === memberId);
   if (!member) throw new Error('Không tìm thấy thành viên cần xóa trong Workspace hiện tại.');
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return {
+      workspace: {
+        ...workspace,
+        family: {
+          ...workspace.family,
+          members: workspace.family.members.filter((item) => item.id !== memberId),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    };
+  }
   if (!member.driveFolderId || !member.profileFileId) {
     throw new Error('Thành viên thiếu ID thư mục hoặc hồ sơ Drive; không thể xóa an toàn.');
   }
@@ -689,6 +724,9 @@ function shouldQueueProfileSave(error: unknown): boolean {
 }
 
 export async function saveHealthProfile(fileId: string, profile: HealthProfile): Promise<HealthProfile> {
+  if (isLocalProfileFileId(fileId)) {
+    return { ...profile, member: { ...profile.member, profileFileId: fileId } };
+  }
   const accountEmail = getSignedInGoogleEmail();
   let localProfile = profile;
   const queuedSaves = supportsDurableOfflineQueue() && accountEmail
@@ -769,6 +807,7 @@ export async function moveDriveFileToMember(
   fileId: string,
   destinationMember: FamilyMember,
 ): Promise<void> {
+  if (fileId.startsWith('local_file_')) return;
   const metadata = await driveRequest<{ parents?: string[] }>(
     `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=parents`,
   );

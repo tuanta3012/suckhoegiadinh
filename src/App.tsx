@@ -8,6 +8,7 @@ import { RELEASE_APP_VERSION } from './version';
 import { useToast } from './context/ToastContext';
 import {
   auth,
+  ensureGeminiAuthUser,
   initGoogleAuth,
   isGoogleTokenValid,
   restoreGoogleAuthSession,
@@ -42,6 +43,11 @@ export default function App() {
     void restoreGoogleAuthSession()
       .then(() => {
         if (cancelled) return;
+        if (Capacitor.isNativePlatform()) {
+          void ensureGeminiAuthUser().catch((error: unknown) => {
+            console.warn('[Firebase Auth] Could not initialize anonymous Gemini access.', error);
+          });
+        }
         unsubscribe = initGoogleAuth(
           (firebaseUser, token) => {
             if (!firebaseUser.email) {

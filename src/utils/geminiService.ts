@@ -9,8 +9,7 @@ import type {
   JsonValue,
   Medication,
 } from '../types';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth } from './googleDriveService';
+import { ensureGeminiAuthUser } from './googleDriveService';
 import { buildApiUrl } from './apiConfig';
 
 const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
@@ -46,22 +45,7 @@ export interface ExtractionProgressUpdate {
 }
 
 async function getAuthenticatedUserToken(): Promise<string> {
-  let user = auth.currentUser;
-  if (!user) {
-    user = await new Promise((resolve) => {
-      const unsub = onAuthStateChanged(auth, (u) => {
-        unsub();
-        resolve(u);
-      });
-      setTimeout(() => {
-        unsub();
-        resolve(auth.currentUser);
-      }, 2500);
-    });
-  }
-  if (!user) {
-    throw new Error('Vui lòng đăng nhập tài khoản Google để sử dụng tính năng AI Gemini.');
-  }
+  const user = await ensureGeminiAuthUser();
   return user.getIdToken();
 }
 
@@ -245,8 +229,7 @@ export async function extractHealthEventWithProgress(
     modelUsed: 'gemini-3.5-flash-lite',
   });
 
-  const user = auth.currentUser;
-  if (!user) throw new Error('Đăng nhập Google trước khi sử dụng tính năng số hóa AI.');
+  const user = await ensureGeminiAuthUser();
   const controller = new AbortController();
   let abortReason: 'idle' | 'total' | null = null;
   const totalTimeout = window.setTimeout(() => {

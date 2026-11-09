@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { FamilyMember, HealthProfile, HealthSource } from '../types';
 import { downloadDriveFile, type HealthDriveWorkspace } from '../utils/healthDriveService';
+import { fileFromLocalSource } from '../utils/localSyncOutbox';
 
 import { formatDateTimeVN } from '../utils/formatters';
 
@@ -22,6 +23,7 @@ interface RawFilesManagerModalProps {
   workspace: HealthDriveWorkspace | null;
   members: FamilyMember[];
   profiles: Record<string, HealthProfile>;
+  localOwnerKey: string;
   onClose: () => void;
   onRunOcrForSource: (member: FamilyMember, source: HealthSource) => Promise<void>;
   onRefreshWorkspace: () => Promise<void>;
@@ -33,6 +35,7 @@ export function RawFilesManagerModal({
   workspace,
   members,
   profiles,
+  localOwnerKey,
   onClose,
   onRunOcrForSource,
   onRefreshWorkspace,
@@ -186,7 +189,9 @@ export function RawFilesManagerModal({
                           }
                           setViewingId(source.driveFileId);
                           try {
-                            const downloaded = await downloadDriveFile(source.driveFileId);
+                            const downloaded = source.driveFileId.startsWith('local_file_')
+                              ? await fileFromLocalSource(source.driveFileId, localOwnerKey)
+                              : await downloadDriveFile(source.driveFileId);
                             const blob = source.mimeType
                               ? new Blob([downloaded], { type: source.mimeType })
                               : downloaded;

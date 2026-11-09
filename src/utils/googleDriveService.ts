@@ -4,6 +4,7 @@ import {
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithCredential,
+  signInAnonymously,
   signInWithPopup,
   signOut,
   setPersistence,
@@ -41,6 +42,23 @@ let silentRefreshInFlight: Promise<string | null> | null = null;
 const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).catch((error: unknown) => {
   console.error('[Firebase Auth] Could not configure local persistence.', error);
 });
+let anonymousSignInInFlight: Promise<User> | null = null;
+
+export async function ensureGeminiAuthUser(): Promise<User> {
+  await firebasePersistenceReady;
+  if (auth.currentUser) return auth.currentUser;
+  if (!isNative) {
+    throw new Error('Vui lòng đăng nhập tài khoản Google để sử dụng tính năng AI Gemini.');
+  }
+  if (!anonymousSignInInFlight) {
+    anonymousSignInInFlight = signInAnonymously(auth)
+      .then(({ user }) => user)
+      .finally(() => {
+        anonymousSignInInFlight = null;
+      });
+  }
+  return anonymousSignInInFlight;
+}
 
 export function getGoogleAccessToken(): string | null {
   if (cachedAccessToken) return cachedAccessToken;
@@ -190,6 +208,7 @@ export async function signOutGoogle(): Promise<void> {
   await signOut(auth);
   if (isNative) {
     await GoogleAuth.signOut();
+    await ensureGeminiAuthUser();
   }
 }
 

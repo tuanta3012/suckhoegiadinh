@@ -89,6 +89,31 @@ describe('local sync outbox', () => {
       .toEqual([second.id]);
   });
 
+  it('retrieves a local document payload by its operation id', async () => {
+    const store = new MemoryStore();
+    const outbox = createLocalSyncOutbox(store);
+    const operation = {
+      id: 'local-upload-1',
+      kind: 'raw_upload',
+      accountEmail: 'apk-local-device',
+      workspaceRootId: 'local_offline_workspace',
+      member,
+      fileName: 'record.pdf',
+      mimeType: 'application/pdf',
+      fileSize: 10,
+      payloadPath: 'health_sync_outbox_v1/apk-local-device/local-upload-1.bin',
+      queuedAt: 1,
+    };
+    await store.writeBase64(operation.payloadPath, 'c2Vuc2l2ZQ==');
+    await store.writeText(
+      'health_sync_outbox_v1/apk-local-device/local-upload-1.json',
+      JSON.stringify(operation),
+    );
+
+    await expect(outbox.getUpload('apk-local-device', 'local-upload-1')).resolves.toEqual(operation);
+    await expect(outbox.getUpload('apk-local-device', 'missing')).resolves.toBeUndefined();
+  });
+
   it('discards pending member and profile writes when that member is deleted', async () => {
     const outbox = createLocalSyncOutbox(new MemoryStore());
     await outbox.enqueueMemberSave('lan@example.com', 'workspace-1', member, profile, true);
