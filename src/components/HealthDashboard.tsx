@@ -3235,8 +3235,8 @@ export function HealthDashboard({
     setShowUploadMemberPicker(true);
   }
 
-  async function handleCameraCapture(isAutoRetry = false) {
-    if (!isAutoRetry && pickedMemberIdForBatchRef.current === undefined) {
+  async function handleCameraCapture(skipMemberPicker = false) {
+    if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
       setIsCameraTriggerActive(true);
       setShowUploadMemberPicker(true);
       return;
@@ -5398,7 +5398,7 @@ export function HealthDashboard({
                 type="button"
                 onClick={() => {
                   setShowQuickActionModal(false);
-                  void handleCameraCapture();
+                  void handleCameraCapture(true);
                 }}
                 className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 text-emerald-950 font-bold text-xs transition-all text-left"
               >
@@ -5417,7 +5417,9 @@ export function HealthDashboard({
                 type="button"
                 onClick={() => {
                   setShowQuickActionModal(false);
-                  handleFileUploadTrigger();
+                  setIsFileTriggerActive(false);
+                  setIsCameraTriggerActive(false);
+                  fileInputRef.current?.click();
                 }}
                 className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 text-slate-900 font-bold text-xs transition-all text-left"
               >
