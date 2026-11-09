@@ -2,6 +2,7 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -17,9 +18,17 @@ interface HealthMetricChartPoint {
 interface HealthMetricsChartProps {
   data: HealthMetricChartPoint[];
   metricName: string;
+  standardKey?: string;
+  minNormal?: number;
+  maxNormal?: number;
 }
 
-export default function HealthMetricsChart({ data, metricName }: HealthMetricsChartProps) {
+export default function HealthMetricsChart({
+  data,
+  metricName,
+  minNormal,
+  maxNormal,
+}: HealthMetricsChartProps) {
   if (data.length === 1) {
     return (
       <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
@@ -35,6 +44,8 @@ export default function HealthMetricsChart({ data, metricName }: HealthMetricsCh
       </div>
     );
   }
+
+  const hasRange = typeof minNormal === 'number' && typeof maxNormal === 'number';
 
   return (
     <div className="h-56 w-full pt-2">
@@ -53,6 +64,23 @@ export default function HealthMetricsChart({ data, metricName }: HealthMetricsCh
             stroke="#cbd5e1"
             domain={['auto', 'auto']}
           />
+          {hasRange && (
+            <ReferenceArea
+              y1={minNormal}
+              y2={maxNormal}
+              fill="#10b981"
+              fillOpacity={0.12}
+              stroke="#10b981"
+              strokeDasharray="3 3"
+              strokeOpacity={0.4}
+              label={{
+                value: 'Khoảng an toàn',
+                fill: '#047857',
+                fontSize: 10,
+                position: 'insideTopRight',
+              }}
+            />
+          )}
           <Tooltip
             contentStyle={{
               backgroundColor: '#0f172a',

@@ -119,6 +119,7 @@ import {
 import {
   buildHealthMetricChartData,
   getHealthMetricDisplayName,
+  getHealthMetricInfo,
   getHealthMetricStandardKey,
 } from '../utils/healthMetricService';
 import {
@@ -4639,34 +4640,7 @@ export function HealthDashboard({
 
                 {selectedProfile && (
                   <div className="space-y-5">
-                    {Object.keys(selectedProfile.summary.latestMetrics || {}).length > 0 && (
-                      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs">
-                        <div className="mb-3">
-                          <h3 className="text-sm font-extrabold text-slate-900">Tóm tắt chỉ số mới nhất</h3>
-                          <p className="mt-1 text-xs text-slate-500">
-                            Dữ liệu gần nhất đã tổng hợp từ các lần khám.
-                          </p>
-                        </div>
-                        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                          {Object.entries(selectedProfile.summary.latestMetrics || {}).map(([key, metric]) => (
-                            <li
-                              key={key}
-                              className="min-w-0 rounded-xl border border-slate-100 bg-slate-50 p-3"
-                            >
-                              <p className="truncate text-xs font-bold text-slate-700">
-                                {getHealthMetricDisplayName(metric.standardKey || key)}
-                              </p>
-                              <p className="mt-1 break-words text-sm font-extrabold text-slate-900">
-                                {metric.value} <span className="text-xs font-semibold text-slate-500">{metric.unit}</span>
-                              </p>
-                              <p className="mt-1 text-[11px] text-slate-500">
-                                Ngày ghi nhận: {formatDateVN(metric.date)}
-                              </p>
-                            </li>
-                          ))}
-                        </ul>
-                      </section>
-                    )}
+
 
                     <AiDeepAnalysisCard
                       analysis={selectedProfile.aiDeepAnalysis}
@@ -4680,43 +4654,66 @@ export function HealthDashboard({
                       error={analysisError}
                     />
 
-                    {metricOptions.length > 0 && (
-                      <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs">
-                        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <h4 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
-                              <Activity className="h-4 w-4 text-teal-600" />
-                              <span>Diễn biến chỉ số sức khỏe</span>
-                            </h4>
-                            <p className="mt-0.5 text-xs text-slate-500">
-                              Xu hướng qua các lần khám đã ghi nhận
+                    {metricOptions.length > 0 && (() => {
+                      const metricInfo = getHealthMetricInfo(selectedMetric);
+                      return (
+                        <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <h4 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                                <Activity className="h-4 w-4 text-teal-600" />
+                                <span>Diễn biến chỉ số sức khỏe</span>
+                              </h4>
+                              <p className="mt-0.5 text-xs text-slate-500">
+                                Xu hướng qua các lần khám đã ghi nhận
+                              </p>
+                            </div>
+                            <div className="flex max-w-full items-center gap-1 overflow-x-auto no-scrollbar">
+                              {metricOptions.map(({ key, label }) => (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  onClick={() => setSelectedMetric(key)}
+                                  className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold whitespace-nowrap transition-all ${
+                                    selectedMetric === key
+                                      ? 'bg-slate-900 text-white shadow-xs'
+                                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Metric Explanation & Normal Range Banner */}
+                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3.5 space-y-1.5 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-extrabold text-emerald-950 text-sm">
+                                {metricInfo.name}
+                              </span>
+                              {metricInfo.normalRangeText ? (
+                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-emerald-800 shadow-2xs border border-emerald-200">
+                                  🛡️ Khoảng an toàn: {metricInfo.normalRangeText}
+                                </span>
+                              ) : null}
+                            </div>
+                            <p className="text-emerald-900/90 leading-relaxed font-medium">
+                              {metricInfo.description}
                             </p>
                           </div>
-                          <div className="flex max-w-full items-center gap-1 overflow-x-auto no-scrollbar">
-                            {metricOptions.map(({ key, label }) => (
-                              <button
-                                key={key}
-                                type="button"
-                                onClick={() => setSelectedMetric(key)}
-                                className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold whitespace-nowrap transition-all ${
-                                  selectedMetric === key
-                                    ? 'bg-slate-900 text-white shadow-xs'
-                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
+
+                          <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
+                            <HealthMetricsChart
+                              data={chartData}
+                              metricName={getHealthMetricDisplayName(selectedMetric)}
+                              minNormal={metricInfo.minNormal}
+                              maxNormal={metricInfo.maxNormal}
+                            />
+                          </Suspense>
                         </div>
-                        <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
-                          <HealthMetricsChart
-                            data={chartData}
-                            metricName={getHealthMetricDisplayName(selectedMetric)}
-                          />
-                        </Suspense>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 )}
 
