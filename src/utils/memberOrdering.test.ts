@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FamilyMember } from '../types';
-import { findMemberForEmail, prioritizeMemberForEmail } from './memberOrdering';
+import { findMemberForEmail, isMemberForEmail, prioritizeMemberForEmail } from './memberOrdering';
 
 const members = [
   { id: 'm1', name: 'Lan', email: 'lan@example.com' },
@@ -11,6 +11,8 @@ const members = [
 describe('member ordering by signed-in email', () => {
   it('finds the matching member without case or whitespace sensitivity', () => {
     expect(findMemberForEmail(members, ' ha@Example.com ')?.id).toBe('m3');
+    expect(isMemberForEmail(members[2], 'ha@example.com')).toBe(true);
+    expect(isMemberForEmail(members[0], 'ha@example.com')).toBe(false);
   });
 
   it('moves the matching member to the front without changing other members order', () => {

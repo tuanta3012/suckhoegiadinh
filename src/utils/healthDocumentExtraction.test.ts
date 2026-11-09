@@ -57,4 +57,18 @@ describe('mergeExtractedBatches', () => {
     expect(merged.notes).toContain('Trang đầu.');
     expect(merged.advice).toBe('Tái khám sau một tuần.\nUống đủ nước.');
   });
+
+  it('uses the document title and filename to correct a conflicting model type', () => {
+    const merged = mergeExtractedBatches([{
+      firstPage: 1,
+      lastPage: 4,
+      extracted: {
+        title: 'Khám sức khỏe định kỳ năm 2026',
+        type: 'test_result',
+        metrics: [{ name: 'Creatinin', value: 77.5, unit: 'µmol/L' }],
+      },
+    }], undefined, 'kham-suc-khoe-2026.pdf');
+
+    expect(merged.type).toBe('comprehensive_exam');
+  });
 });

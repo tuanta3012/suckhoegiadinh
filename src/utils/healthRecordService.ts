@@ -12,6 +12,61 @@ export function sanitizeMetricName(name: string): string {
     .trim();
 }
 
+function normalizeMetricLabel(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+const METRIC_STANDARDIZATION_MAP: Array<{
+  standardKey: string;
+  aliases: string[];
+}> = [
+  { standardKey: 'CREATININ', aliases: ['creatinin', 'creatinine', 'dinh luong creatinin', 'dinh luong creatinine', 'serum creatinine', 'creatinin huyet thanh', 'creatinine huyet thanh'] },
+  { standardKey: 'ACID_URIC', aliases: ['acid uric', 'axit uric', 'uric acid', 'dinh luong acid uric', 'dinh luong axit uric', 'serum uric acid'] },
+  { standardKey: 'TSH', aliases: ['tsh', 'hormone kich thich tuyen giap', 'thyroid stimulating hormone'] },
+  { standardKey: 'WBC', aliases: ['wbc', 'bach cau', 'so luong bach cau', 'white blood cell', 'white blood cells', 'leukocyte count'] },
+  { standardKey: 'RBC', aliases: ['rbc', 'hong cau', 'so luong hong cau', 'red blood cell', 'red blood cells', 'erythrocyte count'] },
+  { standardKey: 'HGB', aliases: ['hgb', 'hb', 'hemoglobin', 'haemoglobin', 'huyet sac to'] },
+  { standardKey: 'HCT', aliases: ['hct', 'hematocrit', 'haematocrit'] },
+  { standardKey: 'PLT', aliases: ['plt', 'platelet', 'platelets', 'tieu cau'] },
+  { standardKey: 'GLUCOSE', aliases: ['glucose', 'glu', 'glucoza', 'duong huyet', 'blood glucose', 'fasting blood glucose'] },
+  { standardKey: 'HBA1C', aliases: ['hba1c', 'hemoglobin a1c', 'glycated hemoglobin', 'glycosylated hemoglobin'] },
+  { standardKey: 'UREA', aliases: ['urea', 'bun', 'blood urea nitrogen', 'ure huyet'] },
+  { standardKey: 'EGFR', aliases: ['egfr', 'estimated glomerular filtration rate', 'do loc cau than uoc tinh'] },
+  { standardKey: 'CHOLESTEROL', aliases: ['cholesterol', 'total cholesterol', 'cholesterol toan phan'] },
+  { standardKey: 'HDL_C', aliases: ['hdl', 'hdl c', 'hdl cholesterol', 'hdl cholesterol c'] },
+  { standardKey: 'LDL_C', aliases: ['ldl', 'ldl c', 'ldl cholesterol', 'ldl cholesterol c'] },
+  { standardKey: 'TRIGLYCERID', aliases: ['triglycerid', 'triglyceride', 'triglycerides', 'triglycerid toan phan'] },
+  { standardKey: 'AST', aliases: ['ast', 'got', 'sgot', 'aspartate aminotransferase'] },
+  { standardKey: 'ALT', aliases: ['alt', 'gpt', 'sgpt', 'alanine aminotransferase'] },
+  { standardKey: 'GGT', aliases: ['ggt', 'gamma gt', 'gamma glutamyl transferase'] },
+  { standardKey: 'FT4', aliases: ['ft4', 'free t4', 'free thyroxine', 'thyroxine tu do'] },
+  { standardKey: 'FT3', aliases: ['ft3', 'free t3', 'free triiodothyronine', 'triiodothyronine tu do'] },
+];
+
+const METRIC_ALIAS_TO_KEY = new Map(
+  METRIC_STANDARDIZATION_MAP.flatMap(({ standardKey, aliases }) =>
+    aliases.map((alias) => [normalizeMetricLabel(alias), standardKey] as const),
+  ),
+);
+
+function findCanonicalMetricKey(value: string): string | undefined {
+  const normalized = normalizeMetricLabel(value);
+  const exact = METRIC_ALIAS_TO_KEY.get(normalized);
+  if (exact) return exact;
+
+  for (const [alias, standardKey] of METRIC_ALIAS_TO_KEY) {
+    if (normalized.startsWith(`${alias} `) || normalized.endsWith(` ${alias}`)) return standardKey;
+  }
+  return undefined;
+}
+
 /**
  * Tiền xử lý dữ liệu trước khi gửi cho Phân tích Chuyên sâu (AI Deep-Dive):
  * 1. Lọc chỉ số thông minh:
@@ -134,6 +189,7 @@ export function prepareDataForDeepDive(member: any, profile: any) {
 export function standardizeMetricKey(rawKey: string, unit: string, metricName: string = ''): string {
   let key = rawKey.trim().toUpperCase();
   const lowerUnit = (unit || '').trim().toLowerCase();
+  const normalizedName = normalizeMetricLabel(metricName || '');
   const lowerName = (metricName || '').trim().toLowerCase();
   const compactKey = key.replace(/[_\s-]+/g, ' ').trim();
   const canonicalAliases: Record<string, string> = {
@@ -153,6 +209,22 @@ export function standardizeMetricKey(rawKey: string, unit: string, metricName: s
   };
   key = canonicalAliases[compactKey] || key;
 
+  const isUrineContext =
+    key.startsWith('URINE_') ||
+    normalizedName.includes('nuoc tieu') ||
+    normalizedName.includes('urine') ||
+    normalizedName.includes('can lang') ||
+    lowerUnit.includes('/hpf') ||
+    lowerUnit.includes('ery/ul') ||
+    lowerUnit.includes('leu/ul');
+
+  if (!isUrineContext) {
+    const canonicalNameKey = findCanonicalMetricKey(metricName);
+    const canonicalRawKey = findCanonicalMetricKey(rawKey);
+    const canonicalKey = canonicalNameKey || canonicalRawKey;
+    if (canonicalKey) return canonicalKey;
+  }
+
   // 1. Xử lý lỗi hậu tố số đếm từ LLM (VD: NEU_1, LYM_2, MONO_#)
   if (/^(NEU|LYM|MONO|EOS|BASO)(_|\s)*\d+$/.test(key)) {
     key = key.replace(/(_|\s)*\d+$/, '_#');
@@ -165,15 +237,6 @@ export function standardizeMetricKey(rawKey: string, unit: string, metricName: s
   }
 
   // 2. Phân định Máu vs Nước tiểu
-  const isUrineContext = 
-    lowerName.includes('nước tiểu') || 
-    lowerName.includes('urine') || 
-    lowerName.includes('cặn lắng') ||
-    lowerUnit.includes('/ul') || 
-    lowerUnit.includes('/µl') ||
-    lowerUnit.includes('ery/ul') ||
-    lowerUnit.includes('leu/ul');
-
   if (isUrineContext) {
     // Chuẩn hóa các key phổ biến trong nước tiểu
     if (key === 'WBC' || key === 'LEU' || lowerName.includes('bạch cầu')) return 'URINE_LEU';

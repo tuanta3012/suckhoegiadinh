@@ -128,6 +128,36 @@ describe('health profile', () => {
     expect(merged.sources[0].subjectStatus).toBe('unresolved');
   });
 
+  it('keeps comprehensive and imaging event types and extracted document details after reload', () => {
+    const profile = parseHealthProfile({
+      timeline: [
+        {
+          ...event,
+          id: 'checkup-event',
+          sourceFileName: 'kham-suc-khoe.pdf',
+          type: 'test_result',
+          title: 'Khám sức khỏe định kỳ',
+          doctorName: 'Bác sĩ Nguyễn Văn A',
+          customCategory: 'Khám đoàn thể',
+          physicalExam: { height_cm: 170, classification: 'Loại I' },
+        },
+        {
+          ...event,
+          id: 'imaging-event',
+          sourceFileName: 'sieu-am.pdf',
+          type: 'imaging',
+          title: 'Siêu âm ổ bụng',
+          imagingResults: [{ modality: 'Siêu âm', findings: '', conclusion: 'Bình thường.' }],
+        },
+      ],
+    }, member);
+
+    expect(profile.timeline.map((item) => item.type)).toEqual(['comprehensive_exam', 'imaging']);
+    expect(profile.timeline[0].doctorName).toBe('Bác sĩ Nguyễn Văn A');
+    expect(profile.timeline[0].physicalExam?.classification).toBe('Loại I');
+    expect(profile.timeline[1].imagingResults?.[0].conclusion).toBe('Bình thường.');
+  });
+
   it('merges timeline and sources without dropping existing events', () => {
     const first = createHealthProfile(member, '2026-01-01T00:00:00.000Z');
     const original = {

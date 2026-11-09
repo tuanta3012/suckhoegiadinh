@@ -7,16 +7,9 @@ import type {
   HealthSource,
 } from '../types';
 import { mergeHealthEvents } from './deduplicationService';
+import { classifyHealthEventType, HEALTH_EVENT_TYPES } from './healthEventType';
 
-const EVENT_TYPES = new Set<HealthEvent['type']>([
-  'comprehensive_exam',
-  'medical_report',
-  'prescription',
-  'test_result',
-  'vaccination',
-  'discharge',
-  'other',
-]);
+const EVENT_TYPES = new Set<HealthEvent['type']>(HEALTH_EVENT_TYPES);
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -344,16 +337,51 @@ export function summarizeTimeline(
 
 function sanitizeTimelineEvent(raw: any): HealthEvent | null {
   if (!raw || typeof raw !== 'object') return null;
-  const eventTypes: HealthEvent['type'][] = [
-    'comprehensive_exam',
-    'medical_report',
-    'prescription',
-    'test_result',
-    'vaccination',
-    'discharge',
-    'other',
-  ];
-  const type = eventTypes.includes(raw.type) ? raw.type : 'medical_report';
+  const type = classifyHealthEventType(raw, raw.sourceFileName) ||
+    (EVENT_TYPES.has(raw.type) ? raw.type : 'medical_report');
+  const physicalExam = isJsonRecord(raw.physicalExam)
+    ? {
+        height_cm: typeof raw.physicalExam.height_cm === 'number' ? raw.physicalExam.height_cm : undefined,
+        weight_kg: typeof raw.physicalExam.weight_kg === 'number' ? raw.physicalExam.weight_kg : undefined,
+        bmi: typeof raw.physicalExam.bmi === 'number' ? raw.physicalExam.bmi : undefined,
+        bp_mmHg: typeof raw.physicalExam.bp_mmHg === 'string' ? raw.physicalExam.bp_mmHg : undefined,
+        pulse_bpm: typeof raw.physicalExam.pulse_bpm === 'number' ? raw.physicalExam.pulse_bpm : undefined,
+        classification: typeof raw.physicalExam.classification === 'string'
+          ? raw.physicalExam.classification
+          : undefined,
+      }
+    : undefined;
+  const vaccinations = Array.isArray(raw.vaccinations)
+    ? raw.vaccinations.flatMap((item: any) => {
+        if (!isJsonRecord(item) || !isNonEmptyString(item.vaccineName)) return [];
+        return [{
+          vaccineName: item.vaccineName,
+          targetDisease: typeof item.targetDisease === 'string' ? item.targetDisease : undefined,
+          doseNumber: typeof item.doseNumber === 'string' || typeof item.doseNumber === 'number'
+            ? item.doseNumber
+            : undefined,
+          lotNumber: typeof item.lotNumber === 'string' ? item.lotNumber : undefined,
+          manufacturer: typeof item.manufacturer === 'string' ? item.manufacturer : undefined,
+          injectionSite: typeof item.injectionSite === 'string' ? item.injectionSite : undefined,
+          administeredDate: typeof item.administeredDate === 'string' ? item.administeredDate : '',
+          nextDoseDate: typeof item.nextDoseDate === 'string' ? item.nextDoseDate : null,
+          reactionNotes: typeof item.reactionNotes === 'string' ? item.reactionNotes : undefined,
+        }];
+      })
+    : [];
+  const hospitalization = isJsonRecord(raw.hospitalization)
+    ? {
+        admissionDate: typeof raw.hospitalization.admissionDate === 'string' ? raw.hospitalization.admissionDate : undefined,
+        dischargeDate: typeof raw.hospitalization.dischargeDate === 'string' ? raw.hospitalization.dischargeDate : undefined,
+        department: typeof raw.hospitalization.department === 'string' ? raw.hospitalization.department : undefined,
+        treatmentSummary: typeof raw.hospitalization.treatmentSummary === 'string'
+          ? raw.hospitalization.treatmentSummary
+          : undefined,
+        surgicalNotes: typeof raw.hospitalization.surgicalNotes === 'string'
+          ? raw.hospitalization.surgicalNotes
+          : undefined,
+      }
+    : undefined;
   return {
     id: String(raw.id || `event_${crypto.randomUUID().slice(0, 8)}`),
     sourceFileId: String(raw.sourceFileId || 'legacy_source'),
@@ -365,8 +393,13 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
     medications: Array.isArray(raw.medications) ? raw.medications : [],
     metrics: Array.isArray(raw.metrics) ? raw.metrics : [],
     imagingResults: Array.isArray(raw.imagingResults) ? raw.imagingResults : [],
+    vaccinations,
+    hospitalization,
     recordedAt: String(raw.recordedAt || new Date().toISOString()),
     facility: raw.facility ? String(raw.facility) : undefined,
+    doctorName: raw.doctorName ? String(raw.doctorName) : undefined,
+    customCategory: raw.customCategory ? String(raw.customCategory) : undefined,
+    physicalExam,
     advice: raw.advice ? String(raw.advice) : undefined,
     nextFollowUp: raw.nextFollowUp ? String(raw.nextFollowUp) : undefined,
     notes: raw.notes ? String(raw.notes) : undefined,

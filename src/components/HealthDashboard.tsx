@@ -101,8 +101,13 @@ import {
   queueMemberDeletion,
   readPendingMemberDeletions,
 } from '../utils/pendingMemberDeletions';
-import { findMemberForEmail, prioritizeMemberForEmail } from '../utils/memberOrdering';
+import {
+  findMemberForEmail,
+  isMemberForEmail,
+  prioritizeMemberForEmail,
+} from '../utils/memberOrdering';
 import { getGoogleAccessToken, getValidGoogleAccessToken } from '../utils/googleDriveService';
+import { HEALTH_EVENT_TYPES } from '../utils/healthEventType';
 import {
   addHealthSource,
   createHealthProfile,
@@ -111,6 +116,11 @@ import {
   parseHealthProfile,
   summarizeTimeline,
 } from '../utils/healthProfile';
+import {
+  buildHealthMetricChartData,
+  getHealthMetricDisplayName,
+  getHealthMetricStandardKey,
+} from '../utils/healthMetricService';
 import {
   analyzeComprehensiveHealth,
   askHealthAssistant,
@@ -391,6 +401,7 @@ const EVENT_TYPE_OPTIONS: Array<{
   { value: 'medical_report', label: 'Khám bệnh', color: 'emerald', icon: Stethoscope },
   { value: 'prescription', label: 'Đơn thuốc', color: 'blue', icon: Pill },
   { value: 'test_result', label: 'Xét nghiệm', color: 'purple', icon: Activity },
+  { value: 'imaging', label: 'Chẩn đoán hình ảnh', color: 'indigo', icon: Activity },
   { value: 'vaccination', label: 'Tiêm chủng', color: 'teal', icon: HeartPulse },
   { value: 'discharge', label: 'Ra viện', color: 'indigo', icon: FileHeart },
   { value: 'other', label: 'Khác', color: 'slate', icon: FileText },
@@ -502,10 +513,28 @@ export function HealthDashboard({
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
   const queueStatusRef = useRef<{ current: number; total: number } | null>(null);
+  const [queueElapsedSeconds, setQueueElapsedSeconds] = useState(0);
+  const queueStartedAtRef = useRef<number | null>(null);
   const updateQueueStatus = useCallback((next: { current: number; total: number } | null) => {
     queueStatusRef.current = next;
     setQueueStatus(next);
   }, []);
+  useEffect(() => {
+    if (!queueStatus) {
+      queueStartedAtRef.current = null;
+      setQueueElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = queueStartedAtRef.current ?? Date.now();
+    queueStartedAtRef.current = startedAt;
+    const updateElapsedTime = () => {
+      setQueueElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    };
+    updateElapsedTime();
+    const intervalId = window.setInterval(updateElapsedTime, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [queueStatus]);
   const [pendingLocalUploadCount, setPendingLocalUploadCount] = useState(0);
   const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
 
@@ -548,10 +577,11 @@ export function HealthDashboard({
     }
   }, [workspace?.rootFolderId]);
 
-  const previousUserEmailRef = useRef(userEmail);
+  const normalizedUserEmail = userEmail?.trim().toLowerCase() || null;
+  const previousUserEmailRef = useRef(normalizedUserEmail);
   useEffect(() => {
-    if (previousUserEmailRef.current === userEmail) return;
-    previousUserEmailRef.current = userEmail;
+    if (previousUserEmailRef.current === normalizedUserEmail) return;
+    previousUserEmailRef.current = normalizedUserEmail;
     const nextOfflineState = loadNativeOfflineState(userEmail);
     setWorkspace(nextOfflineState.workspace);
     shouldRefreshCachedWorkspaceRef.current =
@@ -574,14 +604,14 @@ export function HealthDashboard({
     setWorkspaceAssignments([]);
     setEditingMember(null);
     setErrorMessage('');
-  }, [userEmail]);
+  }, [normalizedUserEmail, userEmail]);
 
   useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== userEmail) return;
+    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
     try {
       localStorage.setItem(
         offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail),
@@ -590,10 +620,10 @@ export function HealthDashboard({
     } catch (error) {
       console.warn('[Offline cache] Could not persist native workspace.', error);
     }
-  }, [userEmail, workspace]);
+  }, [normalizedUserEmail, userEmail, workspace]);
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== userEmail) return;
+    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
     const key = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
     try {
       if (Object.keys(profiles).length > 0) {
@@ -604,7 +634,7 @@ export function HealthDashboard({
     } catch (error) {
       console.warn('[Offline cache] Could not persist native health profiles.', error);
     }
-  }, [profiles, userEmail]);
+  }, [normalizedUserEmail, profiles, userEmail]);
 
   useEffect(() => {
     profilesRef.current = profiles;
@@ -953,6 +983,8 @@ export function HealthDashboard({
     pendingUploadIdsRef.current = queuedIds.slice(1);
     setUploadQueue(files.slice(1));
     const initialStatus = { current: 1, total: files.length };
+    queueStartedAtRef.current = Date.now();
+    setQueueElapsedSeconds(0);
     updateQueueStatus(initialStatus);
     showToast(
       files.length === 1
@@ -1312,42 +1344,31 @@ export function HealthDashboard({
     members.find((member) => member.id === trackerState.memberId) || selectedMember;
 
   // Extract all available vital metrics from selected member's timeline
-  const metricNames = useMemo(() => {
+  const metricOptions = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
-    const set = new Set<string>();
+    const keys = new Set<string>();
     for (const event of selectedProfile.timeline) {
       for (const m of event.metrics) {
-        if (m.name) set.add(m.name);
+        const key = getHealthMetricStandardKey(m);
+        if (key) keys.add(key);
       }
     }
-    return Array.from(set);
+    return Array.from(keys).map((key) => ({
+      key,
+      label: getHealthMetricDisplayName(key),
+    }));
   }, [selectedProfile]);
 
   useEffect(() => {
-    if (metricNames.length > 0 && !metricNames.includes(selectedMetric)) {
-      setSelectedMetric(metricNames[0]);
+    if (metricOptions.length > 0 && !metricOptions.some(({ key }) => key === selectedMetric)) {
+      setSelectedMetric(metricOptions[0].key);
     }
-  }, [metricNames, selectedMetric]);
+  }, [metricOptions, selectedMetric]);
 
   // Chart data for chosen metric
   const chartData = useMemo(() => {
     if (!selectedProfile?.timeline || !selectedMetric) return [];
-    return selectedProfile.timeline
-      .filter((event) => event.metrics.some((m) => m.name === selectedMetric))
-      .sort(
-        (a, b) =>
-          new Date(a.date || a.recordedAt).getTime() -
-          new Date(b.date || b.recordedAt).getTime(),
-      )
-      .map((event) => {
-        const met = event.metrics.find((m) => m.name === selectedMetric);
-        return {
-          date: event.date,
-          value: met?.value,
-          unit: met?.unit || '',
-          facility: event.facility || '',
-        };
-      });
+    return buildHealthMetricChartData(selectedProfile.timeline, selectedMetric);
   }, [selectedProfile, selectedMetric]);
 
   // Filtered timeline
@@ -4021,9 +4042,7 @@ export function HealthDashboard({
                     <div className="max-h-60 overflow-y-auto space-y-0.5">
                       {members.map((m) => {
                         const isCurrent = m.id === selectedMember?.id;
-                        const isSignedInMember =
-                          Boolean(userEmail) &&
-                          m.email?.trim().toLowerCase() === userEmail?.trim().toLowerCase();
+                        const isSignedInMember = isMemberForEmail(m, userEmail);
                         const count = profiles[m.id]?.timeline?.length || 0;
                         return (
                           <button
@@ -4618,6 +4637,89 @@ export function HealthDashboard({
                   </div>
                 )}
 
+                {selectedProfile && (
+                  <div className="space-y-5">
+                    {Object.keys(selectedProfile.summary.latestMetrics || {}).length > 0 && (
+                      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs">
+                        <div className="mb-3">
+                          <h3 className="text-sm font-extrabold text-slate-900">Tóm tắt chỉ số mới nhất</h3>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Dữ liệu gần nhất đã tổng hợp từ các lần khám.
+                          </p>
+                        </div>
+                        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {Object.entries(selectedProfile.summary.latestMetrics || {}).map(([key, metric]) => (
+                            <li
+                              key={key}
+                              className="min-w-0 rounded-xl border border-slate-100 bg-slate-50 p-3"
+                            >
+                              <p className="truncate text-xs font-bold text-slate-700">
+                                {getHealthMetricDisplayName(metric.standardKey || key)}
+                              </p>
+                              <p className="mt-1 break-words text-sm font-extrabold text-slate-900">
+                                {metric.value} <span className="text-xs font-semibold text-slate-500">{metric.unit}</span>
+                              </p>
+                              <p className="mt-1 text-[11px] text-slate-500">
+                                Ngày ghi nhận: {formatDateVN(metric.date)}
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+
+                    <AiDeepAnalysisCard
+                      analysis={selectedProfile.aiDeepAnalysis}
+                      aiAnalysis={selectedProfile.aiAnalysis}
+                      medicalHistory={selectedProfile.medicalHistory}
+                      narrativeSummary={selectedProfile.summary.narrative}
+                      isAnalyzing={isSummarizing}
+                      onRetry={() => void handleAiSummary('gemini-3.6-flash')}
+                      onRefine={() => void handleRefineAndOrganize()}
+                      isRefining={isRefining}
+                      error={analysisError}
+                    />
+
+                    {metricOptions.length > 0 && (
+                      <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs">
+                        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <h4 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                              <Activity className="h-4 w-4 text-teal-600" />
+                              <span>Diễn biến chỉ số sức khỏe</span>
+                            </h4>
+                            <p className="mt-0.5 text-xs text-slate-500">
+                              Xu hướng qua các lần khám đã ghi nhận
+                            </p>
+                          </div>
+                          <div className="flex max-w-full items-center gap-1 overflow-x-auto no-scrollbar">
+                            {metricOptions.map(({ key, label }) => (
+                              <button
+                                key={key}
+                                type="button"
+                                onClick={() => setSelectedMetric(key)}
+                                className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold whitespace-nowrap transition-all ${
+                                  selectedMetric === key
+                                    ? 'bg-slate-900 text-white shadow-xs'
+                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
+                          <HealthMetricsChart
+                            data={chartData}
+                            metricName={getHealthMetricDisplayName(selectedMetric)}
+                          />
+                        </Suspense>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Compact Family Members List */}
                 <div>
                   <div className="flex items-center justify-between mb-2.5">
@@ -4674,8 +4776,7 @@ export function HealthDashboard({
                                   <h4 className="font-bold text-slate-900 text-xs truncate">
                                     {m.name}
                                   </h4>
-                                  {Boolean(userEmail) &&
-                                    m.email?.trim().toLowerCase() === userEmail?.trim().toLowerCase() && (
+                                  {isMemberForEmail(m, userEmail) && (
                                       <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 shrink-0">
                                         Bạn
                                       </span>
@@ -4744,58 +4845,6 @@ export function HealthDashboard({
                   </div>
                 </div>
 
-                {/* AI 4-Layer Medical Deep-Dive Engine & Summary */}
-                <AiDeepAnalysisCard
-                  analysis={selectedProfile?.aiDeepAnalysis}
-                  aiAnalysis={selectedProfile?.aiAnalysis}
-                  medicalHistory={selectedProfile?.medicalHistory}
-                  narrativeSummary={selectedProfile?.summary.narrative}
-                  isAnalyzing={isSummarizing}
-                  onRetry={() => void handleAiSummary('gemini-3.6-flash')}
-                  onRefine={() => void handleRefineAndOrganize()}
-                  isRefining={isRefining}
-                  error={analysisError}
-                />
-
-                {/* Vital Metrics Trend Chart */}
-                {metricNames.length > 0 && (
-                  <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
-                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                      <div>
-                        <h4 className="font-extrabold text-slate-900 text-sm flex items-center gap-2">
-                          <Activity className="w-4 h-4 text-teal-600" />
-                          <span>Diễn biến chỉ số sức khỏe</span>
-                        </h4>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Theo dõi biểu đồ thay đổi qua từng đợt khám bệnh
-                        </p>
-                      </div>
-
-                      {/* Metric Selector Tabs */}
-                      <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
-                        {metricNames.map((name) => (
-                          <button
-                            key={name}
-                            type="button"
-                            onClick={() => setSelectedMetric(name)}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
-                              selectedMetric === name
-                                ? 'bg-slate-900 text-white shadow-xs'
-                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                            }`}
-                          >
-                            {name}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
-                      <HealthMetricsChart data={chartData} metricName={selectedMetric} />
-                    </Suspense>
-                  </div>
-                )}
-
                 {/* Timeline Filter Tabs */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
                   <button
@@ -4850,7 +4899,7 @@ export function HealthDashboard({
                     filteredTimeline.map((event) => {
                       const opt =
                         EVENT_TYPE_OPTIONS.find((t) => t.value === event.type) ||
-                        EVENT_TYPE_OPTIONS[5];
+                        EVENT_TYPE_OPTIONS[EVENT_TYPE_OPTIONS.length - 1];
                       const IconComp = opt.icon;
 
                       return (
@@ -5296,8 +5345,7 @@ export function HealthDashboard({
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <p className="font-bold text-slate-900 text-sm">{m.name}</p>
-                                {Boolean(userEmail) &&
-                                  m.email?.trim().toLowerCase() === userEmail?.trim().toLowerCase() && (
+                                {isMemberForEmail(m, userEmail) && (
                                     <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
                                       Bạn
                                     </span>
@@ -5467,43 +5515,43 @@ export function HealthDashboard({
         />
 
         {queueStatus && (
-          <div className="fixed bottom-20 left-4 right-4 z-50 max-w-lg mx-auto bg-slate-900/95 backdrop-blur-xl shadow-2xl rounded-3xl border border-slate-700/60 overflow-hidden animate-in slide-in-from-bottom-4 transition-all">
+          <div className="fixed bottom-20 left-4 right-4 z-50 max-w-lg mx-auto bg-white/95 backdrop-blur-xl shadow-2xl rounded-3xl border border-emerald-100 overflow-hidden animate-in slide-in-from-bottom-4 transition-all">
             <div className="p-4 flex flex-col gap-3">
               {/* Header Row */}
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/30 shadow-inner">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 border border-emerald-100">
                     <RefreshCw className="w-5 h-5 animate-spin" />
                   </div>
                   <div className="min-w-0">
-                    <h3 className="font-extrabold text-sm sm:text-base text-white tracking-tight truncate">
-                      Đang xử lý hàng đợi y tế ({queueStatus.current}/{queueStatus.total})
+                    <h3 className="font-extrabold text-sm sm:text-base text-slate-900 tracking-tight truncate">
+                      Đang xử lý
                     </h3>
-                    <p className="text-xs text-slate-300 font-medium truncate mt-0.5">
-                      <span className="text-emerald-400 font-semibold">Đang xử lý:</span> {trackerState.file?.name || 'Tệp tài liệu'}
+                    <p className="text-xs text-slate-600 font-medium truncate mt-0.5">
+                      {trackerState.file?.name || 'Tệp tài liệu'}
                     </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={handleCancelBatchQueue}
-                  className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs transition-all shadow-md active:scale-95 shrink-0 cursor-pointer"
+                  className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs transition-all shadow-sm active:scale-95 shrink-0 cursor-pointer"
                 >
                   Dừng xử lý
                 </button>
               </div>
 
               {/* Status Details Row */}
-              <div className="grid grid-cols-2 gap-2 py-1.5 px-3 bg-slate-950/60 rounded-2xl border border-slate-800/80 text-[11px]">
-                <div className="text-slate-300 font-medium truncate">
-                  <span className="text-slate-400 font-normal">Trang xử lý: </span>
-                  <span className="text-emerald-400 font-bold">
+              <div className="grid grid-cols-2 gap-2 py-1.5 px-3 bg-slate-50 rounded-2xl border border-slate-200 text-[11px]">
+                <div className="text-slate-600 font-medium truncate">
+                  <span className="text-slate-500 font-normal">Trang xử lý: </span>
+                  <span className="text-emerald-700 font-bold">
                     {trackerState.processedPages || 1}/{trackerState.totalPages || 1}
                   </span>
                 </div>
-                <div className="text-slate-300 font-medium truncate text-right">
-                  <span className="text-slate-400 font-normal">Tiếp theo: </span>
-                  <span className="text-slate-200 font-semibold truncate">
+                <div className="text-slate-600 font-medium truncate text-right">
+                  <span className="text-slate-500 font-normal">Tiếp theo: </span>
+                  <span className="text-slate-800 font-semibold truncate">
                     {uploadQueue.length > 0 ? uploadQueue[0].name : 'Hoàn tất...'}
                   </span>
                 </div>
@@ -5511,20 +5559,29 @@ export function HealthDashboard({
 
               {/* Progress Bar Section */}
               <div className="space-y-1.5 pt-0.5">
-                <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-400 px-0.5">
+                <div className="flex items-center justify-between gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 px-0.5">
                   <span>TIẾN ĐỘ TỔNG QUÁT</span>
-                  <span className="text-emerald-400 font-extrabold text-xs">
-                    {Math.min(99, Math.round(((queueStatus.current - 1 + (trackerState.progressPercent || 0) / 100) / queueStatus.total) * 100))}%
+                  <span className="flex items-center gap-2 shrink-0 normal-case tracking-normal">
+                    <span
+                      className="inline-flex items-center gap-1 text-slate-600 font-semibold"
+                      aria-label={`Thời gian xử lý: ${queueElapsedSeconds} giây`}
+                    >
+                      <Clock className="w-3 h-3" />
+                      {queueElapsedSeconds} giây
+                    </span>
+                    <span className="text-emerald-700 font-extrabold text-xs">
+                      {Math.min(99, Math.round(((queueStatus.current - 1 + (trackerState.progressPercent || 0) / 100) / queueStatus.total) * 100))}%
+                    </span>
                   </span>
                 </div>
-                <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden flex gap-1 p-0.5 border border-slate-700/50">
+                <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden flex gap-1 p-0.5 border border-slate-200">
                   {Array.from({ length: queueStatus.total }).map((_, i) => {
                     const isDone = i < queueStatus.current - 1;
                     const isCurrent = i === queueStatus.current - 1;
                     const currentProgress = trackerState.progressPercent || 20;
 
                     return (
-                      <div key={i} className="h-full flex-1 bg-slate-800 rounded-full overflow-hidden relative">
+                      <div key={i} className="h-full flex-1 bg-slate-200 rounded-full overflow-hidden relative">
                         {isDone && <div className="h-full w-full bg-emerald-500 rounded-full" />}
                         {isCurrent && (
                           <div
@@ -5539,8 +5596,8 @@ export function HealthDashboard({
               </div>
             </div>
 
-            <div className="bg-slate-950/70 px-4 py-2 border-t border-slate-800/80">
-              <p className="text-[10px] text-slate-400 italic text-center font-medium">
+            <div className="bg-slate-50 px-4 py-2 border-t border-slate-100">
+              <p className="text-[10px] text-slate-500 italic text-center font-medium">
                 AI xử lý tự động; kết quả sẽ xuất hiện trong Dòng thời gian sau khi hoàn tất.
               </p>
             </div>
@@ -6450,7 +6507,7 @@ function validDateOrEmpty(value?: string): string {
 }
 
 function validEventType(value?: string): HealthEvent['type'] {
-  return EVENT_TYPE_OPTIONS.some((item) => item.value === value)
+  return HEALTH_EVENT_TYPES.includes(value as HealthEvent['type'])
     ? (value as HealthEvent['type'])
     : 'other';
 }
@@ -6512,8 +6569,7 @@ function UploadMemberPickerModal({
           <div className="grid grid-cols-1 gap-2">
             {members.map((member) => {
               const isSignedInMember =
-                Boolean(userEmail) &&
-                member.email?.trim().toLowerCase() === userEmail?.trim().toLowerCase();
+                isMemberForEmail(member, userEmail);
               return (
               <button
                 key={member.id}

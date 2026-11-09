@@ -20,10 +20,18 @@ interface HealthMetricsChartProps {
 }
 
 export default function HealthMetricsChart({ data, metricName }: HealthMetricsChartProps) {
-  if (data.length < 2) {
+  if (data.length === 1) {
     return (
       <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
-        Cần ghi nhận ít nhất 2 mốc thời gian để vẽ biểu đồ diễn biến {metricName}.
+        Chỉ số này hiện chỉ ghi nhận 1 mốc dữ liệu, cần từ 2 mốc thời gian trở lên để hiển thị biểu đồ diễn biến
+      </div>
+    );
+  }
+
+  if (data.length === 0) {
+    return (
+      <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
+        Chưa có dữ liệu hợp lệ để hiển thị biểu đồ diễn biến {metricName}.
       </div>
     );
   }

@@ -1,3 +1,4 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import {
   getGoogleAccessToken,
   getSignedInGoogleEmail,
@@ -25,11 +26,20 @@ const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
 
 async function deleteDriveFilesBatch(fileIds: string[], concurrency = 5): Promise<void> {
   const ids = [...new Set(fileIds)].filter(Boolean);
+  const failures: string[] = [];
   for (let i = 0; i < ids.length; i += concurrency) {
     const batch = ids.slice(i, i + concurrency);
-    await Promise.all(batch.map((id) => deleteDriveFile(id).catch((err) => {
-      console.warn(`[Drive Deletion] Không thể xóa tệp ${id}:`, err);
-    })));
+    const results = await Promise.allSettled(batch.map((id) => deleteDriveFile(id)));
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const fileId = batch[index];
+        failures.push(fileId);
+        console.warn(`[Drive Deletion] Không thể xóa tệp ${fileId}:`, result.reason);
+      }
+    });
+  }
+  if (failures.length > 0) {
+    throw new Error(`Không thể xóa ${failures.length}/${ids.length} tệp trên Google Drive.`);
   }
 }
 
@@ -60,11 +70,45 @@ function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
-async function authenticatedDriveFetch(url: string, init: RequestInit = {}): Promise<Response> {
+async function performDriveFetch(
+  url: string,
+  init: RequestInit,
+  headers: Headers,
+  nativeJsonResponse: boolean,
+): Promise<Response> {
+  const canUseNativeHttp = Capacitor.isNativePlatform() &&
+    (nativeJsonResponse || !url.includes('alt=media')) &&
+    (init.body === undefined || typeof init.body === 'string');
+  if (!canUseNativeHttp) return fetch(url, { ...init, headers });
+
+  const nativeResponse = await CapacitorHttp.request({
+    url,
+    method: init.method || 'GET',
+    headers: Object.fromEntries(headers.entries()),
+    data: typeof init.body === 'string' ? init.body : undefined,
+    responseType: 'text',
+    connectTimeout: 20000,
+    readTimeout: 30000,
+  });
+  const body = typeof nativeResponse.data === 'string'
+    ? nativeResponse.data
+    : JSON.stringify(nativeResponse.data ?? '');
+  const responseBody = [204, 205, 304].includes(nativeResponse.status) ? null : body;
+  return new Response(responseBody, {
+    status: nativeResponse.status,
+    headers: nativeResponse.headers,
+  });
+}
+
+async function authenticatedDriveFetch(
+  url: string,
+  init: RequestInit = {},
+  nativeJsonResponse = false,
+): Promise<Response> {
   const token = await getValidGoogleAccessToken();
   const headers = new Headers(init.headers);
   headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(url, { ...init, headers });
+  const response = await performDriveFetch(url, init, headers, nativeJsonResponse);
   if (response.status !== 401) return response;
 
   const refreshedToken = await trySilentRefresh(true);
@@ -75,17 +119,21 @@ async function authenticatedDriveFetch(url: string, init: RequestInit = {}): Pro
     throw new Error('Google Drive từ chối phiên hiện tại. Hãy đăng nhập lại để cấp quyền Drive.');
   }
   headers.set('Authorization', `Bearer ${refreshedToken}`);
-  return fetch(url, { ...init, headers });
+  return performDriveFetch(url, init, headers, nativeJsonResponse);
 }
 
-async function driveRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
+async function driveRequest<T>(
+  url: string,
+  init: RequestInit = {},
+  nativeJsonResponse = false,
+): Promise<T> {
   const response = await authenticatedDriveFetch(url, {
     ...init,
     headers: {
       Authorization: `Bearer ${accessToken()}`,
       ...init.headers,
     },
-  });
+  }, nativeJsonResponse);
   if (response.status === 412) {
     throw new DriveConflictError('Hồ sơ vừa được thay đổi trên một thiết bị khác.');
   }
@@ -142,19 +190,53 @@ async function listFiles(
   return files;
 }
 
-async function listFolderContentsRecursively(folderId: string, visited = new Set<string>()): Promise<DriveFile[]> {
-  if (visited.has(folderId)) return [];
-  visited.add(folderId);
-  const children = await listFiles(folderId);
+async function listFolderContentsRecursively(folderId: string): Promise<DriveFile[]> {
+  const visited = new Set([folderId]);
+  const pendingFolders = [folderId];
   const descendants: DriveFile[] = [];
-  for (const child of children) {
-    if (child.mimeType === FOLDER_MIME) {
-      descendants.push(...await listFolderContentsRecursively(child.id, visited));
-    } else {
-      descendants.push(child);
+
+  while (pendingFolders.length > 0) {
+    const batch = pendingFolders.splice(0, 5);
+    const childrenByFolder = await Promise.all(batch.map((id) => listFiles(id)));
+    for (const children of childrenByFolder) {
+      descendants.push(...children);
+      for (const child of children) {
+        if (child.mimeType === FOLDER_MIME && !visited.has(child.id)) {
+          visited.add(child.id);
+          pendingFolders.push(child.id);
+        }
+      }
     }
   }
-  return [...descendants, ...children.filter((child) => child.mimeType === FOLDER_MIME)];
+  return descendants;
+}
+
+function cacheWorkspaceForAdmin(workspace: HealthDriveWorkspace): void {
+  const userEmail = getSignedInGoogleEmail();
+  if (!userEmail || workspace.family.adminEmail?.trim().toLowerCase() !== userEmail) return;
+  try {
+    const cacheKey = `health_ws_cache_${encodeURIComponent(userEmail)}`;
+    localStorage.setItem(cacheKey, JSON.stringify({
+      rootFolderId: workspace.rootFolderId,
+      familyFileId: workspace.familyFileId,
+    }));
+  } catch (error) {
+    console.warn('[Discovery] Không thể lưu cache Workspace cục bộ.', error);
+  }
+}
+
+function getCachedWorkspaceFileId(rootFolderId: string): string | undefined {
+  const userEmail = getSignedInGoogleEmail();
+  if (!userEmail || typeof localStorage === 'undefined') return undefined;
+  try {
+    const cached = JSON.parse(
+      localStorage.getItem(`health_ws_cache_${encodeURIComponent(userEmail)}`) || 'null',
+    ) as { rootFolderId?: string; familyFileId?: string } | null;
+    return cached?.rootFolderId === rootFolderId ? cached.familyFileId : undefined;
+  } catch (error) {
+    console.warn('[Discovery] Không thể đọc cache Workspace cục bộ.', error);
+    return undefined;
+  }
 }
 
 async function createFolder(name: string, parentId?: string): Promise<DriveFile> {
@@ -354,8 +436,12 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
     const existingChildren = await listFiles(existingRoot.id);
     let raw = existingChildren.find((c) => c.name === 'raw_files' && c.mimeType === FOLDER_MIME);
     let profiles = existingChildren.find((c) => c.name === 'profiles' && c.mimeType === FOLDER_MIME);
-    if (!raw) raw = await createFolder('raw_files', existingRoot.id);
-    if (!profiles) profiles = await createFolder('profiles', existingRoot.id);
+    const [createdRaw, createdProfiles] = await Promise.all([
+      raw ? Promise.resolve(raw) : createFolder('raw_files', existingRoot.id),
+      profiles ? Promise.resolve(profiles) : createFolder('profiles', existingRoot.id),
+    ]);
+    raw = createdRaw;
+    profiles = createdProfiles;
 
     const now = new Date().toISOString();
     const family: HealthFamily = {
@@ -380,12 +466,14 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
       relayRegistrationError =
         error instanceof Error ? error.message : 'Không đăng ký được Workspace trên Firestore.';
     }
-    return {
+    const workspace = {
       rootFolderId: existingRoot.id,
       familyFileId: manifest.id,
       family,
       relayRegistrationError,
     };
+    cacheWorkspaceForAdmin(workspace);
+    return workspace;
   }
 
   // Khởi tạo thư mục hoàn toàn mới với tên "Suc khoe gia dinh"
@@ -417,7 +505,9 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
     relayRegistrationError =
       error instanceof Error ? error.message : 'Không đăng ký được Workspace trên Firestore.';
   }
-  return { rootFolderId: root.id, familyFileId: manifest.id, family, relayRegistrationError };
+  const workspace = { rootFolderId: root.id, familyFileId: manifest.id, family, relayRegistrationError };
+  cacheWorkspaceForAdmin(workspace);
+  return workspace;
 }
 
 export async function openHealthWorkspace(
@@ -425,8 +515,9 @@ export async function openHealthWorkspace(
   knownManifestFileId?: string,
 ): Promise<HealthDriveWorkspace> {
   // Tối ưu: Lấy metadata và nội dung song song nếu đã biết manifest ID
-  const manifestIdPromise = knownManifestFileId 
-    ? Promise.resolve(knownManifestFileId)
+  const cachedManifestFileId = knownManifestFileId || getCachedWorkspaceFileId(rootFolderId);
+  const manifestIdPromise = cachedManifestFileId
+    ? Promise.resolve(cachedManifestFileId)
     : listFiles(rootFolderId, 'family.json', JSON_MIME).then(files => files[0]?.id);
 
   const [root, manifestFileId] = await Promise.all([
@@ -439,12 +530,14 @@ export async function openHealthWorkspace(
 
   const familyResponse = await driveRequest<HealthFamily>(
     `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
+    {},
+    true,
   );
   if (familyResponse.schemaVersion !== 1 || !Array.isArray(familyResponse.members)) {
     throw new Error('Tệp family.json không hợp lệ hoặc không được hỗ trợ.');
   }
   const deletedMembers = mergeFamilyMemberTombstones(familyResponse.deletedMembers);
-  return {
+  const workspace = {
     rootFolderId,
     familyFileId: manifestFileId,
     family: {
@@ -453,6 +546,8 @@ export async function openHealthWorkspace(
       members: excludeDeletedFamilyMembers(familyResponse.members, deletedMembers),
     },
   };
+  cacheWorkspaceForAdmin(workspace);
+  return workspace;
 }
 
 export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: HealthFamily): Promise<HealthDriveWorkspace> {
@@ -653,15 +748,19 @@ export async function deleteHealthWorkspaceFolder(rootFolderId: string): Promise
     console.warn('[Discovery] Không thể xóa Index Firestore cho Workspace đã xóa:', error);
   });
 
-  // Chúng ta đợi Firestore unregister để đảm bảo tính nhất quán của Registry
-  // nhưng không đợi Drive deletion
+  // Đợi đồng bộ cache và registry; việc xóa toàn bộ dữ liệu Drive vẫn chạy nền.
   await Promise.all([renamePromise, unregisterPromise]);
 
-  // 4. Xóa vật lý trên Drive (Thực hiện âm thầm ở nền - Background Deletion)
-  // Không await để UI phản hồi ngay lập tức
-  deleteDriveFile(rootFolderId).catch((error) => {
-    console.warn('[Drive Deletion] Lỗi xóa thư mục gốc ở nền:', error);
-  });
+  // 4. Xóa dữ liệu con rồi mới xóa thư mục gốc; không chặn phản hồi UI.
+  void (async () => {
+    try {
+      const descendants = await listFolderContentsRecursively(rootFolderId);
+      await deleteDriveFilesBatch(descendants.map((file) => file.id));
+      await deleteDriveFile(rootFolderId);
+    } catch (error) {
+      console.warn('[Drive Deletion] Không thể xóa toàn bộ Workspace trên Drive.', error);
+    }
+  })();
 }
 
 export async function factoryResetWorkspaceFolder(
@@ -670,18 +769,13 @@ export async function factoryResetWorkspaceFolder(
 ): Promise<HealthDriveWorkspace> {
   // We'll keep this but the UI will now primarily use deleteHealthWorkspaceFolder
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
-  const deletionErrors: string[] = [];
+  const allRootChildren = await listFolderContentsRecursively(workspace.rootFolderId);
+  await deleteDriveFilesBatch(allRootChildren.map((file) => file.id));
 
-  try {
-    const allRootChildren = await listFolderContentsRecursively(workspace.rootFolderId);
-    const fileIds = allRootChildren.filter(f => f.id !== workspace.rootFolderId).map(f => f.id);
-    await deleteDriveFilesBatch(fileIds);
-  } catch (error) {
-    console.warn('[Factory Reset] Lỗi khi quét thư mục gốc:', error);
-  }
-
-  const raw = await createFolder('raw_files', workspace.rootFolderId);
-  const profiles = await createFolder('profiles', workspace.rootFolderId);
+  const [raw, profiles] = await Promise.all([
+    createFolder('raw_files', workspace.rootFolderId),
+    createFolder('profiles', workspace.rootFolderId),
+  ]);
   const now = new Date().toISOString();
   const resetFamily: HealthFamily = {
     schemaVersion: 1,
@@ -752,7 +846,11 @@ async function removeFamilyMemberFromManifest(
 }
 
 export async function loadHealthProfile(fileId: string): Promise<HealthProfile> {
-  return driveRequest<HealthProfile>(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`);
+  return driveRequest<HealthProfile>(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,
+    {},
+    true,
+  );
 }
 
 async function saveHealthProfileRemote(fileId: string, profile: HealthProfile): Promise<HealthProfile> {

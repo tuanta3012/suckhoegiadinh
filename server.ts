@@ -646,14 +646,16 @@ BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU (FAST OCR):
 4. TRÁNH LẶP DỮ LIỆU & TOKEN THỊ GIÁC: Không sinh các đoạn mô tả hình ảnh, không lặp lại cùng tên chỉ số xét nghiệm giữa các trang/batch.
 
 QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
-1. PHÂN LOẠI TÀI LIỆU (type):
-   - "comprehensive_exam": Sổ/Phiếu khám sức khỏe định kỳ tổng quát, khám đoàn thể.
+1. PHÂN LOẠI TÀI LIỆU (type) — phân loại theo mục đích/chủ đề chính của tài liệu, KHÔNG chỉ dựa vào loại dữ liệu có trong đó:
+   - "comprehensive_exam": Sổ/Phiếu khám sức khỏe định kỳ tổng quát, khám đoàn thể. Nếu tài liệu có tiêu đề hoặc tên tệp như "Khám sức khỏe định kỳ", "Khám tổng quát", "Khám sức khỏe năm ...", PHẢI chọn loại này dù tài liệu kèm nhiều phiếu xét nghiệm, siêu âm hoặc ECG.
    - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu...
    - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG...).
    - "prescription": Đơn thuốc, toa thuốc điều trị ngoại trú/nội trú.
    - "vaccination": Phiếu tiêm chủng, sổ tiêm ngừa vắc xin.
    - "discharge": Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án nội trú.
    - "other": Tài liệu y tế khác (giấy chuyển tuyến, hóa đơn, giấy hẹn tái khám, bảng theo dõi huyết áp tại nhà...). Khi type là "other", BẮT BUỘC cung cấp "customCategory" (VD: "Giấy chuyển tuyến", "Bảng theo dõi huyết áp") và lưu các thông tin dạng key-value vào "extractedData".
+   - PHÂN BIỆT: "test_result" chỉ dùng khi tài liệu chính là phiếu trả kết quả xét nghiệm; nhiều chỉ số xét nghiệm nằm trong một bộ khám sức khỏe tổng quát KHÔNG làm đổi loại khỏi "comprehensive_exam".
+   - Với PDF gồm nhiều loại giấy tờ, chọn loại của tài liệu/chủ đề chính thể hiện ở bìa, tiêu đề hoặc tên tệp; không chọn loại chỉ vì một trang phụ có thuốc, xét nghiệm hoặc chẩn đoán hình ảnh.
 
 2. THÔNG TIN BÁC SĨ & ĐƠN VỊ:
    - "facility": Tên bệnh viện, phòng khám, trung tâm y tế.
@@ -863,7 +865,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
 
             onBatchComplete?.(
               completedBatches,
-              mergeExtractedBatches(availableResults, preferredYear),
+              mergeExtractedBatches(availableResults, preferredYear, fileNameStr),
               Array.from(new Set(availableResults.map((r) => r.modelUsed))).join(', '),
               batch,
             );
@@ -881,7 +883,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
         const preferredYear = fileYearMatch ? fileYearMatch[0] : undefined;
 
         return {
-          extracted: mergeExtractedBatches(completeResults, preferredYear),
+          extracted: mergeExtractedBatches(completeResults, preferredYear, fileNameStr),
           modelUsed: Array.from(new Set(completeResults.map((result) => result.modelUsed))).join(', '),
         };
       };

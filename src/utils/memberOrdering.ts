@@ -4,13 +4,19 @@ function normalizeEmail(email?: string | null): string {
   return email?.trim().toLowerCase() || '';
 }
 
+export function isMemberForEmail(
+  member: Pick<FamilyMember, 'email'>,
+  email?: string | null,
+): boolean {
+  const normalizedEmail = normalizeEmail(email);
+  return Boolean(normalizedEmail && normalizeEmail(member.email) === normalizedEmail);
+}
+
 export function findMemberForEmail(
   members: FamilyMember[],
   email?: string | null,
 ): FamilyMember | undefined {
-  const normalizedEmail = normalizeEmail(email);
-  if (!normalizedEmail) return undefined;
-  return members.find((member) => normalizeEmail(member.email) === normalizedEmail);
+  return members.find((member) => isMemberForEmail(member, email));
 }
 
 export function prioritizeMemberForEmail(

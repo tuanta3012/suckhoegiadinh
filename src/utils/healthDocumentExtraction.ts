@@ -1,5 +1,6 @@
 import { normalizeModalityKey } from './deduplicationService';
 import { standardizeMetricKey } from './healthRecordService';
+import { classifyHealthEventType } from './healthEventType';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -308,7 +309,11 @@ export function resolveConsensusDate(
   return bestDate;
 }
 
-export function mergeExtractedBatches(batches: ExtractedPageBatch[], preferredYear?: string): JsonRecord {
+export function mergeExtractedBatches(
+  batches: ExtractedPageBatch[],
+  preferredYear?: string,
+  fileName?: string,
+): JsonRecord {
   const values = batches.map(({ extracted }) => cleanExtractedJson(extracted));
   const merged: JsonRecord = {};
   for (const key of [
@@ -368,5 +373,8 @@ export function mergeExtractedBatches(batches: ExtractedPageBatch[], preferredYe
     .filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
     .map((item) => item.trim())));
   if (advice.length) merged.advice = advice.join('\n');
-  return cleanExtractedJson(merged);
+  const cleaned = cleanExtractedJson(merged);
+  const classifiedType = classifyHealthEventType(cleaned, fileName);
+  if (classifiedType) cleaned.type = classifiedType;
+  return cleaned;
 }

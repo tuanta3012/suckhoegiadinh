@@ -8,24 +8,18 @@ import type {
   ImagingResult,
   JsonValue,
   Medication,
+  VaccinationRecord,
+  HospitalizationRecord,
 } from '../types';
 import { ensureGeminiAuthUser } from './googleDriveService';
 import { buildApiUrl } from './apiConfig';
 import { digitizationLogger } from './digitizationLogger';
+import { classifyHealthEventType, isHealthEventType } from './healthEventType';
 
 const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
 const OCR_REQUEST_TIMEOUT_MS = 600_000;
 const OCR_IDLE_TIMEOUT_MS = 240_000;
 const ASSISTANT_REQUEST_TIMEOUT_MS = 120_000;
-
-const EVENT_TYPES = new Set<HealthEvent['type']>([
-  'medical_report',
-  'prescription',
-  'test_result',
-  'vaccination',
-  'discharge',
-  'other',
-]);
 
 export interface ExtractionProgressUpdate {
   stage:
@@ -126,7 +120,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
 /**
  * Bóc tách một phần JSON đang stream về để hiển thị trực tiếp cho người dùng
  */
-export function extractPartialJson(text: string): Partial<HealthEvent> {
+export function extractPartialJson(text: string, fileName?: string): Partial<HealthEvent> {
   const result: Partial<HealthEvent> = {};
   if (!text || typeof text !== 'string') return result;
 
@@ -137,7 +131,7 @@ export function extractPartialJson(text: string): Partial<HealthEvent> {
     if (match) {
       const parsed = JSON.parse(match[0]) as Record<string, unknown>;
       if (parsed && typeof parsed === 'object') {
-        return normalizeExtractedEvent(parsed);
+        return normalizeExtractedEvent(parsed, fileName);
       }
     }
   } catch {
@@ -162,7 +156,7 @@ export function extractPartialJson(text: string): Partial<HealthEvent> {
   if (facilityMatch) result.facility = facilityMatch[1].trim();
 
   const typeMatch = text.match(/"type"\s*:\s*"([^"]+)"/i);
-  if (typeMatch && EVENT_TYPES.has(typeMatch[1].trim() as HealthEvent['type'])) {
+  if (typeMatch && isHealthEventType(typeMatch[1].trim())) {
     result.type = typeMatch[1].trim() as HealthEvent['type'];
   }
 
@@ -235,7 +229,10 @@ export function extractPartialJson(text: string): Partial<HealthEvent> {
   const adviceMatch = text.match(/"advice"\s*:\s*"([^"]+)"/i);
   if (adviceMatch) result.advice = adviceMatch[1].trim();
 
-  return result;
+  return {
+    ...result,
+    type: classifyHealthEventType(result, fileName) || result.type,
+  };
 }
 
 /**
@@ -364,13 +361,13 @@ export async function extractHealthEventWithProgress(
             progressPercent: data.progressPercent ?? 48,
             message: data.message || 'Đang chờ mô hình đọc tài liệu...',
             modelUsed: activeModel,
-            partialEvent: data.extracted ? normalizeExtractedEvent(data.extracted) : undefined,
+            partialEvent: data.extracted ? normalizeExtractedEvent(data.extracted, file.name) : undefined,
             totalPages: docTotalPages,
             processedPages: docProcessedPages,
           });
         } else if (data.type === 'chunk' && data.text) {
           accumulated += data.text;
-          const partial = extractPartialJson(accumulated);
+          const partial = extractPartialJson(accumulated, file.name);
           onProgress?.({
             stage: 'extracting_content',
             progressPercent: Math.min(88, 48 + Math.floor(accumulated.length / 25)),
@@ -393,7 +390,7 @@ export async function extractHealthEventWithProgress(
       throw new Error('Luồng OCR kết thúc nhưng không có kết quả hoàn chỉnh. Tài liệu vẫn được lưu trên Google Drive.');
     }
 
-    const normalized = normalizeExtractedEvent(finalExtracted);
+    const normalized = normalizeExtractedEvent(finalExtracted, file.name);
     if (
       !normalized.title &&
       !normalized.patientName &&
@@ -821,7 +818,7 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-function normalizeExtractedEvent(value: Record<string, unknown>): Partial<HealthEvent> {
+function normalizeExtractedEvent(value: Record<string, unknown>, fileName?: string): Partial<HealthEvent> {
   const medications: Medication[] = Array.isArray(value.medications)
     ? value.medications.flatMap((item) => {
         if (!isRecord(item) || typeof item.name !== 'string' || !item.name.trim()) return [];
@@ -829,8 +826,11 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
           {
             name: item.name.trim(),
             dosage: optionalString(item.dosage),
+            quantity: optionalString(item.quantity),
             frequency: optionalString(item.frequency),
+            timing: optionalString(item.timing),
             duration: optionalString(item.duration),
+            instructions: optionalString(item.instructions),
           },
         ];
       })
@@ -847,6 +847,7 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
             standardKey: optionalString(item.standardKey),
             value: numericValue,
             unit: optionalString(item.unit) || '',
+            refRange: optionalString(item.refRange),
             status: optionalString(item.status),
           },
         ];
@@ -864,14 +865,52 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
       })
     : [];
 
+  const vaccinations: VaccinationRecord[] = Array.isArray(value.vaccinations)
+    ? value.vaccinations.flatMap((item) => {
+        if (!isRecord(item) || typeof item.vaccineName !== 'string' || !item.vaccineName.trim()) return [];
+        return [{
+          vaccineName: item.vaccineName.trim(),
+          targetDisease: optionalString(item.targetDisease),
+          doseNumber: typeof item.doseNumber === 'string' || typeof item.doseNumber === 'number'
+            ? item.doseNumber
+            : undefined,
+          lotNumber: optionalString(item.lotNumber),
+          manufacturer: optionalString(item.manufacturer),
+          injectionSite: optionalString(item.injectionSite),
+          administeredDate: optionalString(item.administeredDate) || '',
+          nextDoseDate: optionalString(item.nextDoseDate) || null,
+          reactionNotes: optionalString(item.reactionNotes),
+        }];
+      })
+    : [];
+  const hospitalization: HospitalizationRecord | undefined = isRecord(value.hospitalization)
+    ? {
+        admissionDate: optionalString(value.hospitalization.admissionDate),
+        dischargeDate: optionalString(value.hospitalization.dischargeDate),
+        department: optionalString(value.hospitalization.department),
+        treatmentSummary: optionalString(value.hospitalization.treatmentSummary),
+        surgicalNotes: optionalString(value.hospitalization.surgicalNotes),
+      }
+    : undefined;
+  const physicalExam = isRecord(value.physicalExam)
+    ? {
+        height_cm: typeof value.physicalExam.height_cm === 'number' ? value.physicalExam.height_cm : undefined,
+        weight_kg: typeof value.physicalExam.weight_kg === 'number' ? value.physicalExam.weight_kg : undefined,
+        bmi: typeof value.physicalExam.bmi === 'number' ? value.physicalExam.bmi : undefined,
+        bp_mmHg: optionalString(value.physicalExam.bp_mmHg),
+        pulse_bpm: typeof value.physicalExam.pulse_bpm === 'number' ? value.physicalExam.pulse_bpm : undefined,
+        classification: optionalString(value.physicalExam.classification),
+      }
+    : undefined;
+
   return {
     title: optionalString(value.title),
     date: isIsoDate(value.date) ? value.date : undefined,
-    type:
-      typeof value.type === 'string' && EVENT_TYPES.has(value.type as HealthEvent['type'])
-        ? (value.type as HealthEvent['type'])
-        : undefined,
+    type: classifyHealthEventType(value as Partial<HealthEvent> & Record<string, unknown>, fileName),
     facility: optionalString(value.facility),
+    doctorName: optionalString(value.doctorName),
+    customCategory: optionalString(value.customCategory),
+    physicalExam,
     diagnoses: Array.isArray(value.diagnoses)
       ? value.diagnoses
           .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -880,6 +919,8 @@ function normalizeExtractedEvent(value: Record<string, unknown>): Partial<Health
     medications,
     metrics,
     imagingResults,
+    vaccinations,
+    hospitalization,
     advice: optionalString(value.advice),
     nextFollowUp: isIsoDate(value.nextFollowUp) ? value.nextFollowUp : undefined,
     notes: optionalString(value.notes),
