@@ -207,8 +207,11 @@ export async function signOutGoogle(): Promise<void> {
   await clearAccessToken();
   await signOut(auth);
   if (isNative) {
-    await GoogleAuth.signOut();
-    await ensureGeminiAuthUser();
+    try {
+      await GoogleAuth.signOut();
+    } catch {
+      // ignore native sign out errors
+    }
   }
 }
 

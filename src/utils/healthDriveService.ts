@@ -733,34 +733,35 @@ export async function deleteDriveFamilyMember(
 export async function deleteHealthWorkspaceFolder(rootFolderId: string): Promise<void> {
   if (!rootFolderId.trim()) throw new Error('Thiếu mã thư mục Workspace cần xóa.');
   
-  // 1. Xóa cache cục bộ ngay lập tức (Tốc độ Sheets)
+  // 1. Xóa cache cục bộ ngay lập tức
   const userEmail = getSignedInGoogleEmail();
   if (userEmail) {
     void clearWorkspaceCache(userEmail);
   }
   
-  // 2. Ẩn thư mục trên Drive bằng cách đổi tên (Instant)
-  // Việc đổi tên giúp bước "Quét Drive" (Discovery) không bao giờ tìm lại được folder này nữa
-  const renamePromise = renameDriveFolder(rootFolderId, `DELETED_${Date.now()}_${rootFolderId}`).catch(() => {});
-
-  // 3. Xóa đăng ký Firestore Registry (Fast)
+  // 2. Xóa đăng ký Firestore Registry
   const unregisterPromise = unregisterHealthWorkspace(rootFolderId).catch((error) => {
     console.warn('[Discovery] Không thể xóa Index Firestore cho Workspace đã xóa:', error);
   });
 
-  // Đợi đồng bộ cache và registry; việc xóa toàn bộ dữ liệu Drive vẫn chạy nền.
-  await Promise.all([renamePromise, unregisterPromise]);
-
-  // 4. Xóa dữ liệu con rồi mới xóa thư mục gốc; không chặn phản hồi UI.
-  void (async () => {
+  // 3. Xóa dữ liệu con và thư mục gốc
+  // Chúng ta thực hiện xóa thư mục gốc trực tiếp. Drive API v3 delete trên một thư mục
+  // sẽ xóa toàn bộ nội dung bên trong nó một cách đệ quy.
+  try {
+    await deleteDriveFile(rootFolderId);
+  } catch (error) {
+    console.warn('[Drive Deletion] Không thể xóa thư mục gốc, thử xóa đệ quy thủ công...', error);
+    // Fallback: Nếu xóa thư mục gốc lỗi, thử xóa từng phần
     try {
       const descendants = await listFolderContentsRecursively(rootFolderId);
       await deleteDriveFilesBatch(descendants.map((file) => file.id));
       await deleteDriveFile(rootFolderId);
-    } catch (error) {
-      console.warn('[Drive Deletion] Không thể xóa toàn bộ Workspace trên Drive.', error);
+    } catch (innerError) {
+      console.warn('[Drive Deletion] Thất bại hoàn toàn khi xóa Workspace trên Drive.', innerError);
     }
-  })();
+  }
+
+  await unregisterPromise;
 }
 
 export async function factoryResetWorkspaceFolder(

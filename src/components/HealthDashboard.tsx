@@ -217,7 +217,11 @@ function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
-function createDefaultLocalWorkspace(adminEmail: string | null, _adminName?: string | null): HealthDriveWorkspace {
+function createDefaultLocalWorkspace(
+  adminEmail: string | null, 
+  _adminName?: string | null,
+  emptyMembers = false
+): HealthDriveWorkspace {
   const localMemberId = 'member_local_owner';
   return {
     rootFolderId: 'local_offline_workspace',
@@ -229,7 +233,7 @@ function createDefaultLocalWorkspace(adminEmail: string | null, _adminName?: str
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       adminEmail: adminEmail || 'offline@user',
-      members: Capacitor.isNativePlatform()
+      members: (Capacitor.isNativePlatform() && !emptyMembers)
         ? [{
             id: localMemberId,
             name: _adminName?.trim() || 'Tôi',
@@ -1170,10 +1174,8 @@ export function HealthDashboard({
     const canDeleteRemote = canDeleteDrive;
 
     // 2. Tạo trạng thái mới sạch sẽ ngay lập tức
-    const freshWs = createDefaultLocalWorkspace(userEmail, userName);
-    const freshProf = Object.fromEntries(
-      freshWs.family.members.map((member) => [member.id, createHealthProfile(member)]),
-    );
+    const freshWs = createDefaultLocalWorkspace(userEmail, userName, true);
+    const freshProf = {};
 
     // 3. Xóa cache "Sổ đăng ký" (Registry) ngay lập tức để Sync/Discovery không tìm lại folder cũ
     if (oldUserEmail) {
@@ -4686,20 +4688,20 @@ export function HealthDashboard({
                             </div>
                           </div>
 
-                          {/* Metric Explanation & Normal Range Banner */}
-                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3.5 space-y-1.5 text-xs">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="font-extrabold text-emerald-950 text-sm">
+                          {/* Metric Explanation & Normal Range Banner (2-line layout) */}
+                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 shadow-xs space-y-1 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                              <span className="font-extrabold text-emerald-950 text-sm shrink-0">
                                 {metricInfo.name}
                               </span>
-                              {metricInfo.normalRangeText ? (
-                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-emerald-800 shadow-2xs border border-emerald-200">
+                              {metricInfo.normalRangeText && !metricInfo.normalRangeText.includes('Tham khảo') ? (
+                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-800 shadow-2xs border border-emerald-200 shrink-0">
                                   🛡️ Khoảng an toàn: {metricInfo.normalRangeText}
                                 </span>
                               ) : null}
                             </div>
-                            <p className="text-emerald-900/90 leading-relaxed font-medium">
-                              {metricInfo.description}
+                            <p className="text-emerald-900/90 leading-snug font-medium line-clamp-1">
+                              {metricInfo.description.length > 80 ? metricInfo.description.slice(0, 77) + '...' : metricInfo.description}
                             </p>
                           </div>
 

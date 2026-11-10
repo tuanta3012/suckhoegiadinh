@@ -4,7 +4,7 @@ import type { FamilyMember } from '../types';
 
 export type EditableFamilyMember = Pick<
   FamilyMember,
-  'name' | 'email' | 'gender' | 'birthDate' | 'role'
+  'name' | 'email' | 'gender' | 'birthDate'
 >;
 
 interface MemberEditModalProps {
@@ -33,7 +33,6 @@ export function MemberEditModal({
   const [email, setEmail] = useState(member.email || '');
   const [birthDate, setBirthDate] = useState(toDateInputValue(member.birthDate));
   const [gender, setGender] = useState<NonNullable<FamilyMember['gender']>>(member.gender || 'other');
-  const [role, setRole] = useState(member.role || 'other');
 
   return (
     <div
@@ -55,7 +54,6 @@ export function MemberEditModal({
             email: email.trim().toLowerCase() || undefined,
             birthDate: birthDate || undefined,
             gender,
-            role: role.trim() || 'other',
           });
         }}
       >
@@ -120,19 +118,7 @@ export function MemberEditModal({
               <option value="female">Nữ</option>
             </select>
           </label>
-          <label className="text-xs font-semibold text-slate-700">
-            Quan hệ trong gia đình
-            <select
-              value={role}
-              onChange={(event) => setRole(event.target.value)}
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal"
-            >
-              <option value="father">Bố</option>
-              <option value="mother">Mẹ</option>
-              <option value="child">Con</option>
-              <option value="other">Khác</option>
-            </select>
-          </label>
+
         </div>
 
         <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">

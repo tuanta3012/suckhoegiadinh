@@ -1,3 +1,4 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import type {
   AiAnalysisBlock,
   AiDeepAnalysisResult,
@@ -15,6 +16,37 @@ import { ensureGeminiAuthUser } from './googleDriveService';
 import { buildApiUrl } from './apiConfig';
 import { digitizationLogger } from './digitizationLogger';
 import { classifyHealthEventType, isHealthEventType } from './healthEventType';
+
+async function getAuthenticatedUserToken(): Promise<string> {
+  const user = await ensureGeminiAuthUser();
+  // Mã ID Token được Firebase cấp cho cả người dùng "Ẩn danh" (Anonymous) 
+  // để máy chủ xác thực và ngăn chặn các cuộc tấn công lạm dụng API.
+  return user.getIdToken();
+}
+
+async function performServerFetch(url: string, init: RequestInit): Promise<Response> {
+  if (!Capacitor.isNativePlatform()) {
+    return fetch(url, init);
+  }
+
+  const nativeResponse = await CapacitorHttp.request({
+    url,
+    method: init.method || 'GET',
+    headers: init.headers as Record<string, string>,
+    data: init.body ? JSON.parse(init.body as string) : undefined,
+    connectTimeout: 20000,
+    readTimeout: 60000,
+  });
+
+  const body = typeof nativeResponse.data === 'string'
+    ? nativeResponse.data
+    : JSON.stringify(nativeResponse.data ?? '');
+
+  return new Response(body, {
+    status: nativeResponse.status,
+    headers: nativeResponse.headers,
+  });
+}
 
 const GEMINI_REQUEST_TIMEOUT_MS = 300_000;
 const OCR_REQUEST_TIMEOUT_MS = 600_000;
@@ -39,11 +71,6 @@ export interface ExtractionProgressUpdate {
   processedPages?: number;
 }
 
-async function getAuthenticatedUserToken(): Promise<string> {
-  const user = await ensureGeminiAuthUser();
-  return user.getIdToken();
-}
-
 /**
  * Server-side Gemini API invocation helper with logging & execution duration tracking
  */
@@ -55,7 +82,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
   const timeout = window.setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(buildApiUrl(`/api/gemini/${endpoint}`), {
+    response = await performServerFetch(buildApiUrl(`/api/gemini/${endpoint}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -83,7 +110,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
       undefined,
       durationMs,
     );
-    throw error;
+    throw new Error('Không thể kết nối tới máy chủ AI. Hãy kiểm tra mạng Internet của bạn.');
   } finally {
     window.clearTimeout(timeout);
   }
@@ -623,15 +650,24 @@ export async function streamHealthAssistant(
   onChunk: (chunk: string) => void
 ): Promise<string> {
   const token = await getAuthenticatedUserToken();
-  const response = await fetch(buildApiUrl('/api/gemini/ask-assistant'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    signal: AbortSignal.timeout(ASSISTANT_REQUEST_TIMEOUT_MS),
-    body: JSON.stringify({ question, member, profile, stream: true }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(buildApiUrl('/api/gemini/ask-assistant'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(ASSISTANT_REQUEST_TIMEOUT_MS),
+      body: JSON.stringify({ question, member, profile, stream: true }),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error('Yêu cầu tới trợ lý AI quá hạn (Hết thời gian chờ).');
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Lỗi kết nối máy chủ trợ lý AI (${msg}). Hãy kiểm tra mạng Internet của bạn.`);
+  }
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null) as { error?: string } | null;
