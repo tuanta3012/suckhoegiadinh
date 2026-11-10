@@ -19,7 +19,7 @@ describe('backend API URL configuration', () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
     vi.stubEnv('VITE_BACKEND_URL', '');
 
-    expect(() => getApiBaseUrl()).toThrow('BACKEND_API_URL');
+    expect(() => getApiBaseUrl()).toThrow('VITE_BACKEND_URL');
   });
 
   it('keeps web requests same-origin when no backend URL is configured', () => {

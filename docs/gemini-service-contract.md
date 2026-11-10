@@ -6,7 +6,7 @@ Enable the Anonymous sign-in provider in Firebase Authentication for the APK's F
 
 ## Backend URL and native CORS
 
-Web builds use same-origin `/api/gemini/*` requests. Native builds require `VITE_BACKEND_URL`; Android release builds receive it from the GitHub Actions `BACKEND_API_URL` secret. Set that secret to the HTTPS origin of a publicly reachable deployment of this repository's Express server, not an AI Studio preview URL. The APK workflow rejects a missing or malformed URL instead of publishing an APK with a non-working OCR endpoint.
+Web builds use same-origin `/api/gemini/*` requests. Native builds require `VITE_BACKEND_URL`; Android release builds receive it from the GitHub Actions `VITE_BACKEND_URL` secret. Set that secret to the HTTPS origin of a publicly reachable deployment of this repository's Express server, not an AI Studio preview URL. The APK workflow checks the status endpoint, Gemini key configuration, and expected OCR model before building, and rejects redirects or unconfigured backends.
 
 The Express server permits Capacitor's `https://localhost` origin by default. Add any separately hosted web-app origins to the server's comma-separated `CORS_ALLOWED_ORIGINS` environment variable. The server handles authenticated `Authorization` preflight requests without enabling wildcard origins or credential cookies.
 
