@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { HealthEvent, HealthMetric } from '../types';
 import { standardizeMetricKey } from './healthRecordService';
-import { buildHealthMetricChartData, getHealthMetricStandardKey } from './healthMetricService';
+import {
+  buildHealthMetricChartData,
+  getHealthMetricRangeStatus,
+  getHealthMetricStandardKey,
+} from './healthMetricService';
 
 function makeEvent(
   date: string,
@@ -64,6 +68,66 @@ describe('buildHealthMetricChartData', () => {
       { date: '2023-01-01', value: 297.4, unit: 'µmol/L', facility: '' },
       { date: '2024-01-01', value: 500, unit: 'µmol/L', facility: '' },
     ]);
+  });
+
+  describe('getHealthMetricRangeStatus', () => {
+    it('flags high and low values using the metric reference range', () => {
+      expect(getHealthMetricRangeStatus({
+        name: 'Glucose',
+        value: 7.2,
+        unit: 'mmol/L',
+      })).toBe('warning_high');
+      expect(getHealthMetricRangeStatus({
+        name: 'TSH',
+        value: 0.2,
+        unit: 'mIU/L',
+      })).toBe('warning_low');
+    });
+
+    it('normalizes supported equivalent units before comparing ranges', () => {
+      expect(getHealthMetricRangeStatus({
+        name: 'Glucose',
+        value: 130,
+        unit: 'mg/dL',
+      })).toBe('warning_high');
+      expect(getHealthMetricRangeStatus({
+        name: 'Creatinin',
+        value: 1.1,
+        unit: 'mg/dL',
+      }, 'male')).toBe('normal');
+    });
+
+    it('uses sex-specific ranges and keeps one-sided ranges one-sided', () => {
+      expect(getHealthMetricRangeStatus({
+        name: 'Creatinin',
+        value: 100,
+        unit: 'µmol/L',
+      }, 'female')).toBe('warning_high');
+      expect(getHealthMetricRangeStatus({
+        name: 'Creatinin',
+        value: 100,
+        unit: 'µmol/L',
+      }, 'male')).toBe('normal');
+      expect(getHealthMetricRangeStatus({
+        name: 'Cholesterol',
+        value: 2,
+        unit: 'mmol/L',
+      })).toBe('normal');
+    });
+
+    it('prioritizes explicit warning and critical statuses and ignores unknown ranges', () => {
+      expect(getHealthMetricRangeStatus({
+        name: 'Glucose',
+        value: 5,
+        unit: 'mmol/L',
+        status: 'critical_high',
+      })).toBe('critical_high');
+      expect(getHealthMetricRangeStatus({
+        name: 'Unmapped metric',
+        value: 500,
+        unit: 'units',
+      })).toBe('unknown');
+    });
   });
 
   it('consolidates same-day aliases into one point and normalizes equivalent TSH units', () => {

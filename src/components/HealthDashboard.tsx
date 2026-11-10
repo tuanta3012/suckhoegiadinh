@@ -128,6 +128,7 @@ import {
   buildHealthMetricChartData,
   getHealthMetricDisplayName,
   getHealthMetricInfo,
+  getHealthMetricRangeStatus,
   getHealthMetricStandardKey,
 } from '../utils/healthMetricService';
 import {
@@ -190,8 +191,10 @@ import {
   updateBatchNotificationProgress,
   updateBatchNotificationComplete,
   requestNotificationPermission,
+  scheduleFollowUpNotifications,
   setupBackgroundAppResumeListener,
 } from '../utils/backgroundNotificationService';
+import { getFollowUpRemindersForSignedInMember } from '../utils/followUpReminders';
 
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 
@@ -223,6 +226,15 @@ const APK_LOCAL_OWNER_KEY = 'apk-local-device';
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const UPDATE_SERVER_URL =
   'https://raw.githubusercontent.com/tuanta3012/suckhoegiadinh/refs/heads/main/version.json';
+const EXTRACTION_NOTIFICATION_PHASES: Record<ExtractionProgressUpdate['stage'], string> = {
+  preparing: 'Chuẩn bị',
+  reading_document: 'Đọc tài liệu',
+  waiting_for_model: 'Chờ Gemini',
+  retrying_model: 'Thử lại AI',
+  extracting_content: 'Nhận dạng',
+  matching_patient: 'Ghép hồ sơ',
+  completed: 'Lưu kết quả',
+};
 
 function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
@@ -513,6 +525,7 @@ export function HealthDashboard({
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
   const queueStatusRef = useRef<{ current: number; total: number } | null>(null);
+  const batchFailureCountRef = useRef(0);
   const [queueElapsedSeconds, setQueueElapsedSeconds] = useState(0);
   const queueStartedAtRef = useRef<number | null>(null);
   const updateQueueStatus = useCallback((next: { current: number; total: number } | null) => {
@@ -759,6 +772,24 @@ export function HealthDashboard({
     }
   }
 
+  function notifyBatchProgress(
+    fileName: string,
+    memberName: string | undefined,
+    phase: string,
+    progressPercent?: number,
+  ) {
+    const status = queueStatusRef.current;
+    if (!status) return;
+    void updateBatchNotificationProgress({
+      current: status.current,
+      total: status.total,
+      fileName,
+      memberName,
+      phase,
+      progressPercent,
+    });
+  }
+
   function processNextInQueue() {
     const queue = uploadQueueRef.current.length > 0 ? uploadQueueRef.current : uploadQueue;
     const currentStatus = queueStatusRef.current;
@@ -783,12 +814,7 @@ export function HealthDashboard({
       );
 
       showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${currentStatus.total} (${nextFile.name})...`, 'info');
-      void updateBatchNotificationProgress({
-        current: nextCurrent,
-        total: currentStatus.total,
-        fileName: nextFile.name,
-        memberName: selectedMember?.name,
-      });
+      notifyBatchProgress(nextFile.name, selectedMember?.name, 'Chuẩn bị');
 
       void beginDigitization(nextFile, {
         memberId: pickedMemberIdForBatchRef.current,
@@ -809,7 +835,9 @@ export function HealthDashboard({
         void updateBatchNotificationComplete({
           total: finalTotal,
           memberName: selectedMember?.name,
+          failedCount: batchFailureCountRef.current,
         });
+        batchFailureCountRef.current = 0;
       }
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
@@ -983,6 +1011,7 @@ export function HealthDashboard({
     pendingUploadIdsRef.current = queuedIds.slice(1);
     setUploadQueue(files.slice(1));
     const initialStatus = { current: 1, total: files.length };
+    batchFailureCountRef.current = 0;
     queueStartedAtRef.current = Date.now();
     setQueueElapsedSeconds(0);
     updateQueueStatus(initialStatus);
@@ -998,6 +1027,7 @@ export function HealthDashboard({
       total: files.length,
       fileName: files[0].name,
       memberName: targetMember.name,
+      phase: 'Chuẩn bị',
     });
     void beginDigitization(files[0], {
       memberId,
@@ -1410,41 +1440,23 @@ export function HealthDashboard({
     return list.filter((event) => event.type === timelineFilter);
   }, [selectedProfile, timelineFilter]);
 
-  // Upcoming follow-up reminders across all members
-  const upcomingFollowUps = useMemo(() => {
-    const list: Array<{
-      member: FamilyMember;
-      event: HealthEvent;
-      followUpDate: string;
-      daysRemaining: number;
-    }> = [];
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+  // Follow-up reminders belong to the member profile linked to the signed-in account.
+  const upcomingFollowUps = useMemo(
+    () => getFollowUpRemindersForSignedInMember(members, profiles, userEmail),
+    [members, profiles, userEmail],
+  );
 
-    for (const member of members) {
-      const prof = profiles[member.id];
-      if (!prof?.timeline) continue;
-      for (const event of prof.timeline) {
-        if (event.nextFollowUp) {
-          const fDate = new Date(event.nextFollowUp);
-          if (!isNaN(fDate.getTime())) {
-            const diffTime = fDate.getTime() - now.getTime();
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            if (diffDays >= -14) {
-              // Show recent and future follow-ups
-              list.push({
-                member,
-                event,
-                followUpDate: event.nextFollowUp,
-                daysRemaining: diffDays,
-              });
-            }
-          }
-        }
-      }
-    }
-    return list.sort((a, b) => a.daysRemaining - b.daysRemaining);
-  }, [members, profiles]);
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    void scheduleFollowUpNotifications(
+      upcomingFollowUps.map(({ member, event, followUpDate }) => ({
+        eventId: event.id,
+        eventTitle: event.title,
+        followUpDate,
+        memberName: member.name,
+      })),
+    );
+  }, [upcomingFollowUps]);
 
   const totalTimelineEvents = useMemo(() => {
     return Object.values(profiles).reduce((sum, p) => sum + (p?.timeline?.length || 0), 0);
@@ -2811,6 +2823,7 @@ export function HealthDashboard({
       totalPages: 1,
       processedPages: 0,
     });
+    notifyBatchProgress(file.name, effectiveMember.name, 'Chuẩn bị', 10);
 
     // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload
     let processedFile: File = file;
@@ -2850,6 +2863,12 @@ export function HealthDashboard({
             ? 'Tệp đã có trên Drive. Đang chạy AI Vision quét dữ liệu...'
             : 'Đang tải tệp đã tối ưu lên Google Drive...',
       }));
+      notifyBatchProgress(
+        file.name,
+        effectiveMember.name,
+        isLocalOnlyWorkspace || existingDriveFileId ? 'Chuẩn bị OCR' : 'Tải lên Drive',
+        25,
+      );
     } catch (error) {
       console.warn('[Preprocessing Warning]:', error);
       // Giữ nguyên file gốc nếu nén bị gián đoạn
@@ -2995,6 +3014,7 @@ export function HealthDashboard({
       }
 
     } catch (error) {
+      batchFailureCountRef.current += 1;
       const msg = error instanceof Error
         ? error.message
         : 'Không thể hoàn tất lưu tài liệu vào Google Drive hoặc hồ sơ thành viên.';
@@ -3007,7 +3027,7 @@ export function HealthDashboard({
         error: msg,
       }));
       
-      if (uploadQueueRef.current.length > 0 || uploadQueue.length > 0) {
+      if (queueStatusRef.current || uploadQueueRef.current.length > 0 || uploadQueue.length > 0) {
         setTimeout(() => {
           setTrackerState(prev => ({ ...prev, isOpen: false }));
           processNextInQueue();
@@ -3125,6 +3145,12 @@ export function HealthDashboard({
       const reportProgress = (update: ExtractionProgressUpdate) => {
         applyExtractionProgress(update);
         latestProgress = update.progressPercent;
+        notifyBatchProgress(
+          file.name,
+          member.name,
+          EXTRACTION_NOTIFICATION_PHASES[update.stage],
+          update.progressPercent,
+        );
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress, file.name);
       };
       const result = await extractHealthEventWithProgress(file, member, reportProgress);
@@ -3187,6 +3213,7 @@ export function HealthDashboard({
       setTrackerState((previous) => ({ ...previous, memberId: targetMember.id }));
       const saved = await saveExtractedDocumentAutomatically(draft, targetMember);
       if (!saved) {
+        batchFailureCountRef.current += 1;
         setTrackerState((previous) => ({
           ...previous,
           isOpen: true,
@@ -3196,8 +3223,12 @@ export function HealthDashboard({
             ? 'Tài liệu đã lưu trên thiết bị nhưng chưa lưu được kết quả vào hồ sơ.'
             : 'Tài liệu đã được tải lên Drive nhưng chưa lưu được vào hồ sơ.',
         }));
+        notifyBatchProgress(file.name, targetMember.name, 'Lỗi lưu kết quả');
+        processNextInQueue();
+        return;
       }
     } catch (error) {
+      batchFailureCountRef.current += 1;
       const msg = error instanceof Error ? error.message : 'Chưa thể phân tích tài liệu bằng Gemini.';
       if (driveFileId) persistOcrRecoveryJob(driveFileId, 'interrupted', latestProgress, file.name);
       setDigitizationError(msg);
@@ -5113,10 +5144,10 @@ export function HealthDashboard({
                                 )}/view`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-600 shrink-0"
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-800 shrink-0"
                                 title="Xem tệp gốc trên Google Drive"
                               >
-                                <ExternalLink className="w-3.5 h-3.5" />
+                                <FileText className="w-4 h-4" strokeWidth={2.5} />
                                 <span className="hidden sm:inline">Tài liệu gốc</span>
                               </a>
                             )}
@@ -5284,16 +5315,29 @@ export function HealthDashboard({
                                 Chỉ số đo:
                               </span>
                               {event.metrics.map((met, idx) => (
-                                <span
-                                  key={idx}
-                                  className={`px-2.5 py-1 rounded-lg border text-xs font-semibold tabular-nums ${
-                                    met.status === 'critical_high' || met.status === 'critical_low'
-                                      ? 'bg-rose-50 border-rose-200 text-rose-900 font-bold'
-                                      : 'bg-teal-50 border-teal-200 text-teal-900'
-                                  }`}
-                                >
-                                  {met.name}: <strong>{met.value}</strong> {met.unit}
-                                </span>
+                                (() => {
+                                  const rangeStatus = getHealthMetricRangeStatus(met, selectedMember?.gender);
+                                  const isCritical = rangeStatus === 'critical_high' || rangeStatus === 'critical_low';
+                                  const isWarning = rangeStatus === 'warning_high' || rangeStatus === 'warning_low';
+                                  return (
+                                    <span
+                                      key={idx}
+                                      aria-label={`${met.name}: ${met.value} ${met.unit}${isCritical ? ', cảnh báo nghiêm trọng' : isWarning ? ', vượt khoảng tham chiếu' : ''}`}
+                                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs tabular-nums ${
+                                        isCritical
+                                          ? 'bg-rose-100 border-rose-300 text-rose-950 font-bold'
+                                          : isWarning
+                                            ? 'bg-amber-100 border-amber-300 text-amber-950 font-bold'
+                                            : 'bg-teal-50 border-teal-200 text-teal-900 font-semibold'
+                                      }`}
+                                    >
+                                      {(isCritical || isWarning) && (
+                                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                      )}
+                                      {met.name}: <strong>{met.value}</strong> {met.unit}
+                                    </span>
+                                  );
+                                })()
                               ))}
                             </div>
                           )}

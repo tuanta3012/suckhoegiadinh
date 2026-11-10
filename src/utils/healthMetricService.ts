@@ -154,6 +154,110 @@ export interface HealthMetricInfo {
   unit: string;
 }
 
+export type HealthMetricRangeStatus =
+  | 'normal'
+  | 'warning_high'
+  | 'warning_low'
+  | 'critical_high'
+  | 'critical_low'
+  | 'unknown';
+
+function normalizeClinicalMetricValue(
+  standardKey: string,
+  value: number,
+  unit: string,
+  targetUnit: string,
+): number | undefined {
+  const source = normalizedUnit(unit);
+  const target = normalizedUnit(targetUnit);
+
+  if (source === target) return value;
+  if (standardKey === 'ACID_URIC') {
+    if (source === 'mmol/l' && target === 'umol/l') return value * 1000;
+    if (source === 'mg/dl' && target === 'umol/l') return value * 59.48;
+  }
+  if (standardKey === 'CREATININ' && source === 'mg/dl' && target === 'umol/l') {
+    return value * 88.4;
+  }
+  if (standardKey === 'GLUCOSE' && source === 'mg/dl' && target === 'mmol/l') {
+    return value / 18.0182;
+  }
+  if (
+    (standardKey === 'CHOLESTEROL' || standardKey === 'HDL_C' || standardKey === 'LDL_C') &&
+    source === 'mg/dl' &&
+    target === 'mmol/l'
+  ) {
+    return value * 0.02586;
+  }
+  if (standardKey === 'TRIGLYCERID' && source === 'mg/dl' && target === 'mmol/l') {
+    return value * 0.01129;
+  }
+  if (
+    standardKey === 'TSH' &&
+    (source === 'uiu/ml' || source === 'miu/l') &&
+    target === 'miu/l'
+  ) {
+    return value;
+  }
+  if (
+    standardKey === 'WBC' &&
+    (source === '10^9/l' || source === 'g/l') &&
+    target === '10⁹/l'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+export function getHealthMetricRangeStatus(
+  metric: HealthMetric,
+  gender?: 'male' | 'female' | 'other',
+): HealthMetricRangeStatus {
+  const declaredStatus = metric.status?.toLowerCase();
+  if (
+    declaredStatus === 'critical_high' ||
+    declaredStatus === 'critical_low' ||
+    declaredStatus === 'warning_high' ||
+    declaredStatus === 'warning_low'
+  ) {
+    return declaredStatus;
+  }
+
+  const standardKey = getHealthMetricStandardKey(metric);
+  const info = HEALTH_METRIC_INFOS[standardKey];
+  if (!info) return 'unknown';
+
+  const rawValue = parseMetricValue(metric.value);
+  if (rawValue === undefined) return 'unknown';
+  const value = normalizeClinicalMetricValue(standardKey, rawValue, metric.unit, info.unit);
+  if (value === undefined) return 'unknown';
+
+  let minimum = info.minNormal;
+  let maximum = info.maxNormal;
+  if (standardKey === 'CREATININ') {
+    minimum = gender === 'female' ? 44 : gender === 'male' ? 53 : 44;
+    maximum = gender === 'female' ? 97 : gender === 'male' ? 106 : 106;
+  } else if (standardKey === 'ACID_URIC') {
+    minimum = gender === 'female' ? 143 : gender === 'male' ? 202 : 143;
+    maximum = gender === 'female' ? 339 : gender === 'male' ? 416 : 416;
+  } else if (standardKey === 'HGB') {
+    minimum = gender === 'female' ? 110 : gender === 'male' ? 120 : 110;
+    maximum = gender === 'female' ? 145 : gender === 'male' ? 160 : 160;
+  }
+
+  const rangeText = info.normalRangeText.trim().toLowerCase();
+  const hasLowerBound = !rangeText.startsWith('dưới');
+  const hasUpperBound = !rangeText.startsWith('trên');
+  if (standardKey === 'EGFR') {
+    minimum = 90;
+    maximum = Number.POSITIVE_INFINITY;
+  }
+
+  if (hasLowerBound && value < minimum) return 'warning_low';
+  if (hasUpperBound && value > maximum) return 'warning_high';
+  return 'normal';
+}
+
 export const HEALTH_METRIC_INFOS: Record<string, HealthMetricInfo> = {
   CREATININ: {
     name: 'Creatinin',

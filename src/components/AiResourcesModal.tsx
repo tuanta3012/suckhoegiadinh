@@ -1,4 +1,4 @@
-import { Check, Eye, HardDrive, KeyRound, LoaderCircle, Save, Sparkles, X } from 'lucide-react';
+import { Check, Eye, KeyRound, LoaderCircle, Save, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   loadSharedAiResources,
@@ -84,9 +84,9 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
       setKeys(parsedKeys);
       setInput(parsedKeys.join('\n'));
       if (isLocalWorkspace) {
-        setMessage(`Đã kiểm tra và lưu ${parsedKeys.length} key tạm trên máy. Key sẽ tự động đồng bộ khi bạn kết nối kho Google Drive.`);
+        setMessage(`Đã lưu ${parsedKeys.length} key trên máy.`);
       } else {
-        setMessage(`Đã kiểm tra và lưu ${parsedKeys.length} key lên Google Drive dùng chung.`);
+        setMessage(`Đã lưu ${parsedKeys.length} key lên Drive.`);
       }
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Không thể lưu Tài nguyên AI.');
@@ -120,35 +120,23 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
 
         <div className="space-y-4 p-5">
           {isLocalWorkspace ? (
-            <div className="flex gap-2.5 rounded-xl bg-blue-50/80 p-3 text-[11px] leading-relaxed text-blue-900 border border-blue-100">
-              <HardDrive className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
-              <div>
-                <p className="font-semibold mb-0.5">Lưu tạm trên thiết bị</p>
-                <p className="text-blue-800/90">
-                  Key được lưu trên máy của bạn và sẵn sàng sử dụng ngay. Khi bạn tạo hoặc kết nối kho Google Drive, file <span className="font-mono font-semibold">ai-resources.json</span> sẽ tự động được tải lên để các thành viên khác cùng dùng chung.
-                </p>
-              </div>
-            </div>
+            <p className="text-xs text-slate-500">
+              Lưu trên máy; sẽ chia sẻ khi kết nối Drive.
+            </p>
           ) : (
-            <div className="flex gap-2.5 rounded-xl bg-amber-50/80 p-3 text-[11px] leading-relaxed text-amber-900 border border-amber-100">
-              <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-              <div>
-                <p className="font-semibold mb-0.5">Chia sẻ qua Google Drive</p>
-                <p className="text-amber-800/90">
-                  Key được lưu trong folder Google Drive của gia đình. Các thành viên có quyền truy cập folder sẽ tự động dùng chung key để quét tài liệu và hỏi đáp AI.
-                </p>
-              </div>
-            </div>
+            <p className="text-xs text-slate-500">
+              Lưu trên Drive, dùng chung cho thành viên.
+            </p>
           )}
 
           {isLoading ? (
             <div className="flex items-center gap-2 py-4 text-sm text-slate-500">
-              <LoaderCircle className="h-4 w-4 animate-spin text-teal-600" /> Đang tải cấu hình key...
+              <LoaderCircle className="h-4 w-4 animate-spin text-teal-600" /> Đang tải...
             </div>
           ) : canEdit ? (
             <>
               <label htmlFor="ai-resource-keys" className="block text-xs font-semibold text-slate-600">
-                Google Gemini API Key (mỗi key một dòng hoặc cách nhau bằng dấu phẩy)
+                Gemini API key · cách nhau bằng dấu phẩy hoặc xuống dòng
               </label>
               <textarea
                 id="ai-resource-keys"
@@ -157,7 +145,7 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
                 rows={5}
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Dán một hoặc nhiều Gemini API key (AIzaSy...)"
+                placeholder="Dán API key..."
                 className="w-full resize-y rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-xs text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
               />
               <button
@@ -167,7 +155,7 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-teal-700 disabled:opacity-50 transition-colors shadow-sm"
               >
                 {isTesting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                {isTesting ? 'Đang kiểm tra và lưu key...' : isLocalWorkspace ? 'Test key & lưu vào máy' : 'Test key & lưu lên Drive'}
+                {isTesting ? 'Đang kiểm tra...' : 'Kiểm tra & lưu'}
               </button>
             </>
           ) : (
@@ -184,7 +172,7 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
                   ))}
                 </ul>
               ) : (
-                <p className="text-xs text-slate-400">Chưa có key được chia sẻ trong folder.</p>
+                <p className="text-xs text-slate-400">Chưa có key.</p>
               )}
             </div>
           )}
