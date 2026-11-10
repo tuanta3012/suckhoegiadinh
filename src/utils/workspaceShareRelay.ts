@@ -268,26 +268,30 @@ export async function listHealthWorkspaceAssignments(
 ): Promise<HealthWorkspaceAssignment[]> {
   const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
   const workspace = await getDoc(workspaceRef);
-  const adminEmail = authenticatedEmail();
-  if (!workspace.exists() || workspace.data().adminEmail !== adminEmail) {
+  const currentEmail = authenticatedEmail();
+  if (!workspace.exists()) {
+    return [];
+  }
+  const data = workspace.data();
+  if (!data.adminEmail || normalizeEmail(data.adminEmail) !== currentEmail) {
     throw new Error('Chỉ Admin của Workspace mới được xem danh sách chia sẻ.');
   }
 
   const members = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
   return members.docs.map((snapshot) => {
-    const data = snapshot.data();
+    const memberData = snapshot.data();
     if (
-      data.rootFolderId !== rootFolderId ||
-      typeof data.familyFileId !== 'string' ||
-      data.adminEmail !== adminEmail ||
-      data.memberEmail !== snapshot.id ||
-      !isWorkspaceRole(data.role) ||
-      (data.source !== undefined && data.source !== 'family_member') ||
-      typeof data.updatedAt !== 'number'
+      memberData.rootFolderId !== rootFolderId ||
+      typeof memberData.familyFileId !== 'string' ||
+      normalizeEmail(memberData.adminEmail) !== currentEmail ||
+      memberData.memberEmail !== snapshot.id ||
+      !isWorkspaceRole(memberData.role) ||
+      (memberData.source !== undefined && memberData.source !== 'family_member') ||
+      typeof memberData.updatedAt !== 'number'
     ) {
       throw new Error('Danh sách chia sẻ có bản ghi không hợp lệ.');
     }
-    return data as HealthWorkspaceAssignment;
+    return memberData as HealthWorkspaceAssignment;
   });
 }
 
@@ -299,7 +303,7 @@ export async function removeHealthWorkspaceAssignment(
   const currentEmail = authenticatedEmail();
   const workspace = await getDoc(doc(db, RELAY_COLLECTION, rootFolderId));
   if (!workspace.exists()) return;
-  const isAdmin = workspace.data().adminEmail === currentEmail;
+  const isAdmin = normalizeEmail(workspace.data().adminEmail) === currentEmail;
   if (!isAdmin && cleanEmail !== currentEmail) {
     throw new Error('Không có quyền thu hồi lời mời này.');
   }
@@ -318,7 +322,7 @@ export async function unregisterHealthWorkspace(
   if (!snapshot.exists()) return;
   
   const data = snapshot.data();
-  if (data.adminEmail !== currentEmail) {
+  if (normalizeEmail(data.adminEmail) !== currentEmail) {
     throw new Error('Chỉ tài khoản Admin mới có quyền xóa đăng ký Workspace.');
   }
 

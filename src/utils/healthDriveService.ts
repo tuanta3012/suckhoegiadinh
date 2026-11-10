@@ -133,30 +133,48 @@ export async function syncHealthWorkspaceMemberAssignments(
     const familyEmailList = [...familyEmails];
     for (let offset = 0; offset < familyEmailList.length; offset += 10) {
       await Promise.all(
-        familyEmailList.slice(offset, offset + 10).map((email) =>
-          ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR'),
-        ),
+        familyEmailList.slice(offset, offset + 10).map(async (email) => {
+          try {
+            await ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR');
+          } catch (driveErr) {
+            console.warn(`[Drive Sharing] Không thể tự động cấp quyền Drive cho ${email}:`, driveErr);
+          }
+        }),
       );
     }
 
-    await publishHealthWorkspaceAssignments(
-      workspace.rootFolderId,
-      workspace.familyFileId,
-      adminEmail,
-      [...assignments].map(([email, assignment]) => ({
-        email,
-        ...assignment,
-      })),
-    );
+    try {
+      await publishHealthWorkspaceAssignments(
+        workspace.rootFolderId,
+        workspace.familyFileId,
+        adminEmail,
+        [...assignments].map(([email, assignment]) => ({
+          email,
+          ...assignment,
+        })),
+      );
+    } catch (firestoreErr) {
+      console.warn('[Firestore Relay] Không thể đồng bộ lời mời lên Firestore:', firestoreErr);
+      throw firestoreErr;
+    }
 
     for (const email of staleEmails) {
-      await revokeDriveFolderAccess(workspace.rootFolderId, email);
-      await removeHealthWorkspaceAssignment(workspace.rootFolderId, email);
+      try {
+        await revokeDriveFolderAccess(workspace.rootFolderId, email);
+      } catch (revErr) {
+        console.warn(`[Drive Revoke] Không thể thu hồi quyền Drive của ${email}:`, revErr);
+      }
+      try {
+        await removeHealthWorkspaceAssignment(workspace.rootFolderId, email);
+      } catch (remErr) {
+        console.warn(`[Firestore Remove] Không thể xóa phân quyền của ${email}:`, remErr);
+      }
     }
   } catch (error) {
+    if (error instanceof WorkspaceSharingSyncError) throw error;
     const reason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
     throw new WorkspaceSharingSyncError(
-      `family.json đã được cập nhật, nhưng chưa đồng bộ xong quyền Drive/Firestore: ${reason}`,
+      `family.json đã được cập nhật, nhưng chưa đồng bộ xong quyền Firestore: ${reason}`,
       workspace,
     );
   }

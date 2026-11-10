@@ -15,9 +15,14 @@ service cloud.firestore {
 
     function workspaceAdmin(rootId) {
       return signedIn()
-        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail is string
-        && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail.lower()
-          == authenticatedEmail();
+        && (
+          (exists(/databases/$(database)/documents/health_workspace_relays/$(rootId))
+            && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail is string
+            && get(/databases/$(database)/documents/health_workspace_relays/$(rootId)).data.adminEmail.lower() == authenticatedEmail())
+          || (request.resource != null
+            && request.resource.data.adminEmail is string
+            && request.resource.data.adminEmail.lower() == authenticatedEmail())
+        );
     }
 
     function validAssignment(rootId, memberEmail) {
