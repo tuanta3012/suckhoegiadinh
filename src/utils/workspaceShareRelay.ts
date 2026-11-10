@@ -1,25 +1,16 @@
-import { getApps, getApp, initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
 import {
   collection,
   doc,
   getDoc,
   getDocs,
-  getFirestore,
   onSnapshot,
   query,
   setDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 import { getSignedInGoogleEmail } from './googleDriveService';
-
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const config = firebaseConfig as unknown as { firestoreDatabaseId?: string };
-const databaseId = config.firestoreDatabaseId;
-const db = (!databaseId || databaseId === '(default)') ? getFirestore(app) : getFirestore(app, databaseId);
+import { firestoreAuth as auth, firestoreDb as db } from './firebaseFirestore';
 const RELAY_COLLECTION = 'health_workspace_relays';
 const MEMBER_COLLECTION = 'members';
 const INVITE_COLLECTION = 'health_workspace_invites';
@@ -33,6 +24,7 @@ export interface HealthWorkspaceAssignment {
   memberEmail: string;
   role: WorkspaceAccessRole;
   updatedAt: number;
+  source?: 'family_member';
 }
 
 function normalizeEmail(email: string): string {
@@ -147,7 +139,11 @@ export async function publishHealthWorkspaceAssignments(
   rootFolderId: string,
   familyFileId: string,
   adminEmail: string,
-  members: Array<{ email: string; role: WorkspaceAccessRole }>,
+  members: Array<{
+    email: string;
+    role: WorkspaceAccessRole;
+    source?: 'family_member';
+  }>,
 ): Promise<void> {
   const cleanAdminEmail = normalizeEmail(adminEmail);
   if (authenticatedEmail() !== cleanAdminEmail) {
@@ -155,7 +151,7 @@ export async function publishHealthWorkspaceAssignments(
   }
   await registerHealthWorkspaceRelay(rootFolderId, familyFileId, cleanAdminEmail);
 
-  const uniqueMembers = new Map<string, WorkspaceAccessRole>();
+  const uniqueMembers = new Map<string, { role: WorkspaceAccessRole; source?: 'family_member' }>();
   for (const member of members) {
     const email = normalizeEmail(member.email);
     if (!email || email === cleanAdminEmail) {
@@ -164,26 +160,50 @@ export async function publishHealthWorkspaceAssignments(
     if (!isWorkspaceRole(member.role)) {
       throw new Error('Danh sách thành viên chia sẻ có quyền không hợp lệ.');
     }
-    uniqueMembers.set(email, member.role);
+    uniqueMembers.set(email, {
+      role: member.role,
+      source: member.source,
+    });
   }
   if (uniqueMembers.size > 250) {
     throw new Error('Workspace vượt quá giới hạn 250 tài khoản được chia sẻ.');
   }
 
-  const batch = writeBatch(db);
-  for (const [memberEmail, role] of uniqueMembers) {
-    const assignment: HealthWorkspaceAssignment = {
+  const existingAssignments = await listHealthWorkspaceAssignments(rootFolderId);
+  const existingByEmail = new Map(existingAssignments.map((assignment) => [assignment.memberEmail, assignment]));
+  const now = Date.now();
+  const writes: HealthWorkspaceAssignment[] = [];
+  for (const [memberEmail, { role, source }] of uniqueMembers) {
+    const existing = existingByEmail.get(memberEmail);
+    if (
+      existing &&
+      existing.familyFileId === familyFileId &&
+      existing.adminEmail === cleanAdminEmail &&
+      existing.role === role &&
+      existing.source === source
+    ) {
+      continue;
+    }
+    writes.push({
       rootFolderId,
       familyFileId,
       adminEmail: cleanAdminEmail,
       memberEmail,
       role,
-      updatedAt: Date.now(),
-    };
-    batch.set(memberAssignmentRef(rootFolderId, memberEmail), assignment);
-    batch.set(memberInviteRef(rootFolderId, memberEmail), assignment);
+      updatedAt: now,
+      ...(source ? { source } : {}),
+    });
   }
-  await batch.commit();
+
+  for (let offset = 0; offset < writes.length; offset += 200) {
+    const batch = writeBatch(db);
+    for (const assignment of writes.slice(offset, offset + 200)) {
+      batch.set(memberAssignmentRef(rootFolderId, assignment.memberEmail), assignment);
+      batch.set(memberInviteRef(rootFolderId, assignment.memberEmail), assignment);
+    }
+    await batch.commit();
+  }
+
 }
 
 export async function readHealthWorkspaceAssignment(
@@ -262,6 +282,7 @@ export async function listHealthWorkspaceAssignments(
       data.adminEmail !== adminEmail ||
       data.memberEmail !== snapshot.id ||
       !isWorkspaceRole(data.role) ||
+      (data.source !== undefined && data.source !== 'family_member') ||
       typeof data.updatedAt !== 'number'
     ) {
       throw new Error('Danh sách chia sẻ có bản ghi không hợp lệ.');
@@ -301,29 +322,26 @@ export async function unregisterHealthWorkspace(
     throw new Error('Chỉ tài khoản Admin mới có quyền xóa đăng ký Workspace.');
   }
 
-  const batch = writeBatch(db);
-  
-  // 1. Tìm và xóa tất cả lời mời của thành viên (để họ không thấy workspace đã xóa)
-  try {
-    const membersSnapshot = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
-    for (const memberDoc of membersSnapshot.docs) {
-      const memberEmail = memberDoc.id;
+  const membersSnapshot = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
+  const memberEmails = membersSnapshot.docs.map((memberDoc) => memberDoc.id);
+  for (let offset = 0; offset < memberEmails.length; offset += 200) {
+    const batch = writeBatch(db);
+    for (const memberEmail of memberEmails.slice(offset, offset + 200)) {
       batch.delete(memberAssignmentRef(rootFolderId, memberEmail));
       batch.delete(memberInviteRef(rootFolderId, memberEmail));
     }
-  } catch (error) {
-    console.warn('[WorkspaceRelay] Không thể xóa lời mời khi hủy đăng ký:', error);
+    await batch.commit();
   }
 
-  // 2. Xóa tài liệu gốc của Workspace
+  const batch = writeBatch(db);
   batch.delete(workspaceRef);
-  
   await batch.commit();
 }
 
 export function subscribeHealthWorkspaceAssignments(
   memberEmail: string,
   onAssignmentChange: (assignment: HealthWorkspaceAssignment | null) => void,
+  onError?: (error: Error) => void,
 ): () => void {
   const cleanEmail = normalizeEmail(memberEmail);
   if (!cleanEmail) {
@@ -356,10 +374,15 @@ export function subscribeHealthWorkspaceAssignments(
           matching.push(data as HealthWorkspaceAssignment);
         }
       }
+      if (matching.length > 1) {
+        onError?.(new Error('Tài khoản có nhiều lời mời Workspace. Hãy nhờ quản trị viên thu hồi các lời mời trùng.'));
+        return;
+      }
       onAssignmentChange(matching[0] || null);
     },
     (error) => {
       console.warn('[WorkspaceRelay] Lỗi khi lắng nghe thay đổi phân quyền Firestore:', error);
+      onError?.(new Error('Không thể theo dõi lời mời Workspace trên Firestore.'));
     },
   );
 }

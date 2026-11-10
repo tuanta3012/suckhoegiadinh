@@ -22,7 +22,7 @@ service cloud.firestore {
 
     function validAssignment(rootId, memberEmail) {
       return request.resource.data.keys().hasOnly([
-          'rootFolderId', 'familyFileId', 'adminEmail', 'memberEmail', 'role', 'updatedAt'
+          'rootFolderId', 'familyFileId', 'adminEmail', 'memberEmail', 'role', 'updatedAt', 'source'
         ])
         && request.resource.data.rootFolderId == rootId
         && request.resource.data.familyFileId is string
@@ -32,6 +32,8 @@ service cloud.firestore {
         && request.resource.data.memberEmail is string
         && request.resource.data.memberEmail.lower() == memberEmail.lower()
         && (request.resource.data.role == 'EDITOR' || request.resource.data.role == 'VIEWER')
+        && (!request.resource.data.keys().hasAny(['source'])
+          || request.resource.data.source == 'family_member')
         && request.resource.data.updatedAt is number;
     }
 
@@ -72,8 +74,10 @@ service cloud.firestore {
     }
 
     match /health_workspace_relays/{rootId} {
-      allow get: if ownsEmail(resource.data.adminEmail);
-      allow list: if false;
+      allow get: if signedIn()
+        && (!exists(/databases/$(database)/documents/health_workspace_relays/$(rootId))
+          || ownsEmail(resource.data.adminEmail));
+      allow list: if ownsEmail(resource.data.adminEmail);
       allow create: if signedIn()
         && request.resource.data.keys().hasOnly([
           'rootFolderId', 'familyFileId', 'adminEmail', 'updatedAt'
@@ -87,8 +91,13 @@ service cloud.firestore {
       allow update: if ownsEmail(resource.data.adminEmail)
         && request.resource.data.rootFolderId == resource.data.rootFolderId
         && request.resource.data.adminEmail == resource.data.adminEmail
-        && request.resource.data.familyFileId == resource.data.familyFileId;
-      allow delete: if false;
+        && request.resource.data.familyFileId is string
+        && request.resource.data.familyFileId.size() > 0
+        && request.resource.data.updatedAt is number
+        && request.resource.data.keys().hasOnly([
+          'rootFolderId', 'familyFileId', 'adminEmail', 'updatedAt'
+        ]);
+      allow delete: if ownsEmail(resource.data.adminEmail);
 
       match /members/{memberEmail} {
         allow get, list: if workspaceAdmin(rootId);

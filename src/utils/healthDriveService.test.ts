@@ -1,5 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { resolveSingleFamilyManifestFile } from './healthDriveService';
+import {
+  ensureDriveFolderAccess,
+  openAssignedHealthWorkspace,
+  resolveSingleFamilyManifestFile,
+  syncHealthWorkspaceMemberAssignments,
+} from './healthDriveService';
+import {
+  listHealthWorkspaceAssignments,
+  publishHealthWorkspaceAssignments,
+  removeHealthWorkspaceAssignment,
+} from './workspaceShareRelay';
+
+vi.mock('./workspaceShareRelay', () => ({
+  findAdminWorkspaceRelay: vi.fn(),
+  listHealthWorkspaceAssignments: vi.fn(),
+  publishHealthWorkspaceAssignments: vi.fn(),
+  readHealthWorkspaceAssignment: vi.fn(),
+  registerHealthWorkspaceRelay: vi.fn(),
+  removeHealthWorkspaceAssignment: vi.fn(),
+  unregisterHealthWorkspace: vi.fn(),
+}));
 
 vi.mock('./googleDriveService', () => ({
   getValidGoogleAccessToken: vi.fn().mockResolvedValue('test-token'),
@@ -24,6 +44,155 @@ describe('resolveSingleFamilyManifestFile', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('syncHealthWorkspaceMemberAssignments', () => {
+    const originalFetch = globalThis.fetch;
+    const workspace = {
+      rootFolderId: 'workspace-1',
+      familyFileId: 'family-1',
+      family: {
+        schemaVersion: 1 as const,
+        adminEmail: 'user@example.com',
+        rawFilesFolderId: 'raw-1',
+        profilesFolderId: 'profiles-1',
+        members: [{
+          id: 'member-1',
+          name: 'Family member',
+          role: 'other' as const,
+          email: 'member@example.com',
+          driveFolderId: 'raw-member-1',
+          profileFileId: 'profile-1',
+        }],
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('grants family members Editor and preserves separate invitations', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([{
+        rootFolderId: 'workspace-1',
+        familyFileId: 'family-1',
+        adminEmail: 'user@example.com',
+        memberEmail: 'guest@example.com',
+        role: 'VIEWER',
+        updatedAt: 1,
+      }]);
+      vi.mocked(publishHealthWorkspaceAssignments).mockResolvedValue();
+      globalThis.fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+        permissions: [{
+          id: 'member-permission',
+          type: 'user',
+          emailAddress: 'member@example.com',
+          role: 'writer',
+          permissionDetails: [{ inherited: false }],
+        }],
+      }), { status: 200 }));
+
+      await syncHealthWorkspaceMemberAssignments(workspace);
+
+      expect(publishHealthWorkspaceAssignments).toHaveBeenCalledWith(
+        'workspace-1',
+        'family-1',
+        'user@example.com',
+        expect.arrayContaining([
+          { email: 'member@example.com', role: 'EDITOR', source: 'family_member' },
+          { email: 'guest@example.com', role: 'VIEWER', source: undefined },
+        ]),
+      );
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('revokes a removed member and removes the matching Firestore assignment', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([{
+        rootFolderId: 'workspace-1',
+        familyFileId: 'family-1',
+        adminEmail: 'user@example.com',
+        memberEmail: 'old@example.com',
+        role: 'EDITOR',
+        updatedAt: 1,
+        source: 'family_member',
+      }]);
+      vi.mocked(publishHealthWorkspaceAssignments).mockResolvedValue();
+      vi.mocked(removeHealthWorkspaceAssignment).mockResolvedValue();
+      globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+        return new Response(JSON.stringify({
+          permissions: [{
+            id: 'old-permission',
+            type: 'user',
+            emailAddress: 'old@example.com',
+            role: 'writer',
+            permissionDetails: [{ inherited: false }],
+          }],
+        }), { status: 200 });
+      });
+
+      await syncHealthWorkspaceMemberAssignments(
+        { ...workspace, family: { ...workspace.family, members: [] } },
+        ['old@example.com'],
+      );
+
+      expect(publishHealthWorkspaceAssignments).toHaveBeenCalledWith(
+        'workspace-1',
+        'family-1',
+        'user@example.com',
+        [],
+      );
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(removeHealthWorkspaceAssignment).toHaveBeenCalledWith('workspace-1', 'old@example.com');
+    });
+  });
+
+  describe('ensureDriveFolderAccess', () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('updates and verifies a direct permission for the requested role', async () => {
+      const permissions = [{
+        id: 'permission-1',
+        type: 'user',
+        emailAddress: 'member@example.com',
+        role: 'writer',
+        permissionDetails: [{ inherited: false }],
+      }];
+      const methods: string[] = [];
+
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        methods.push(init?.method || 'GET');
+        if (init?.method === 'PATCH') {
+          permissions[0].role = JSON.parse(String(init.body)).role;
+          return new Response(JSON.stringify(permissions[0]), { status: 200 });
+        }
+        if (url.includes('/permissions?')) {
+          return new Response(JSON.stringify({ permissions }), { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      await ensureDriveFolderAccess('folder-1', 'Member@example.com', 'VIEWER');
+
+      expect(methods).toEqual(['GET', 'PATCH', 'GET']);
+      expect(permissions[0].role).toBe('reader');
+    });
+
+    it('rejects a workspace assignment addressed to another signed-in email', async () => {
+      await expect(openAssignedHealthWorkspace({
+        rootFolderId: 'folder-1',
+        familyFileId: 'manifest-1',
+        adminEmail: 'admin@example.com',
+        memberEmail: 'other@example.com',
+        role: 'EDITOR',
+        updatedAt: 1,
+      }, 'member@example.com')).rejects.toThrow('không khớp');
+    });
   });
 
   afterEach(() => {

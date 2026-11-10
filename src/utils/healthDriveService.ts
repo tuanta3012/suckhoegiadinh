@@ -16,10 +16,14 @@ import {
 } from './healthProfile';
 import {
   findAdminWorkspaceRelay,
+  listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
   readHealthWorkspaceAssignment,
+  removeHealthWorkspaceAssignment,
   registerHealthWorkspaceRelay,
   unregisterHealthWorkspace,
+  type HealthWorkspaceAssignment,
+  type WorkspaceAccessRole,
 } from './workspaceShareRelay';
 import { localSyncOutbox, supportsDurableOfflineQueue } from './localSyncOutbox';
 import { getLocalSavedGeminiKeys, saveLocalGeminiKeys } from './geminiSharedResources';
@@ -65,6 +69,8 @@ export interface DriveFile {
   modifiedTime?: string;
   webViewLink?: string;
   size?: string;
+  parents?: string[];
+  trashed?: boolean;
 }
 
 export interface HealthDriveWorkspace {
@@ -72,6 +78,88 @@ export interface HealthDriveWorkspace {
   familyFileId: string;
   family: HealthFamily;
   relayRegistrationError?: string;
+}
+
+export class WorkspaceSharingSyncError extends Error {
+  constructor(message: string, readonly workspace: HealthDriveWorkspace) {
+    super(message);
+    this.name = 'WorkspaceSharingSyncError';
+  }
+}
+
+function normalizedEmail(email?: string | null): string {
+  return email?.trim().toLowerCase() || '';
+}
+
+export async function syncHealthWorkspaceMemberAssignments(
+  workspace: HealthDriveWorkspace,
+  removedEmails: string[] = [],
+): Promise<void> {
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) return;
+  const adminEmail = normalizedEmail(workspace.family.adminEmail);
+  if (!adminEmail || normalizedEmail(getSignedInGoogleEmail()) !== adminEmail) return;
+
+  const familyEmails = new Set(
+    workspace.family.members
+      .map((member) => normalizedEmail(member.email))
+      .filter((email) => email && email !== adminEmail),
+  );
+  const explicitlyRemovedEmails = [...new Set(removedEmails.map(normalizedEmail))]
+    .filter((email) => email && email !== adminEmail && !familyEmails.has(email));
+
+  try {
+    const existing = await listHealthWorkspaceAssignments(workspace.rootFolderId);
+    const staleEmails = [...new Set([
+      ...explicitlyRemovedEmails,
+      ...existing
+        .filter((assignment) =>
+          assignment.source === 'family_member' &&
+          !familyEmails.has(normalizedEmail(assignment.memberEmail)),
+        )
+        .map((assignment) => normalizedEmail(assignment.memberEmail)),
+    ])];
+    const assignments = new Map(
+      existing
+        .filter((assignment) => !staleEmails.includes(normalizedEmail(assignment.memberEmail)))
+        .map((assignment) => [normalizedEmail(assignment.memberEmail), {
+          role: assignment.role,
+          source: assignment.source,
+        }]),
+    );
+    for (const email of familyEmails) {
+      assignments.set(email, { role: 'EDITOR', source: 'family_member' });
+    }
+
+    const familyEmailList = [...familyEmails];
+    for (let offset = 0; offset < familyEmailList.length; offset += 10) {
+      await Promise.all(
+        familyEmailList.slice(offset, offset + 10).map((email) =>
+          ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR'),
+        ),
+      );
+    }
+
+    await publishHealthWorkspaceAssignments(
+      workspace.rootFolderId,
+      workspace.familyFileId,
+      adminEmail,
+      [...assignments].map(([email, assignment]) => ({
+        email,
+        ...assignment,
+      })),
+    );
+
+    for (const email of staleEmails) {
+      await revokeDriveFolderAccess(workspace.rootFolderId, email);
+      await removeHealthWorkspaceAssignment(workspace.rootFolderId, email);
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
+    throw new WorkspaceSharingSyncError(
+      `family.json đã được cập nhật, nhưng chưa đồng bộ xong quyền Drive/Firestore: ${reason}`,
+      workspace,
+    );
+  }
 }
 
 function accessToken(): string {
@@ -384,10 +472,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     const memberAssignment = await readHealthWorkspaceAssignment(userEmail);
     if (memberAssignment) {
       try {
-        const opened = await openHealthWorkspace(
-          memberAssignment.rootFolderId,
-          memberAssignment.familyFileId,
-        );
+        const opened = await openAssignedHealthWorkspace(memberAssignment, userEmail);
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(
             cacheKey,
@@ -692,6 +777,18 @@ export async function openHealthWorkspace(
     throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
   }
 
+  const manifestMetadata = await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?fields=id,name,mimeType,parents,trashed`,
+  );
+  if (
+    manifestMetadata.trashed ||
+    manifestMetadata.name !== 'family.json' ||
+    manifestMetadata.mimeType !== JSON_MIME ||
+    !manifestMetadata.parents?.includes(rootFolderId)
+  ) {
+    throw new Error('Lời mời không trỏ tới family.json nằm trong đúng thư mục Workspace.');
+  }
+
   const familyResponse = await driveRequest<HealthFamily>(
     `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
     {},
@@ -712,26 +809,39 @@ export async function openHealthWorkspace(
   };
   cacheWorkspaceForAdmin(workspace);
 
-  // Tự động đăng ký Firestore Relay và đồng bộ phân quyền thành viên nếu là Admin
+  // Chỉ đăng ký Workspace; danh sách bệnh nhân không phải danh sách người được chia sẻ.
   const currentEmail = getSignedInGoogleEmail();
   if (currentEmail && familyResponse.adminEmail && currentEmail.trim().toLowerCase() === familyResponse.adminEmail.trim().toLowerCase()) {
     const adminEmail = familyResponse.adminEmail.trim().toLowerCase();
-    const membersWithEmail = workspace.family.members
-      .filter((m) => m.email && m.email.trim())
-      .map((m) => ({ email: m.email!.trim(), role: 'EDITOR' as const }));
-
-    void (async () => {
-      try {
-        await registerHealthWorkspaceRelay(rootFolderId, manifestFileId!, adminEmail);
-        if (membersWithEmail.length > 0) {
-          await publishHealthWorkspaceAssignments(rootFolderId, manifestFileId!, adminEmail, membersWithEmail);
-        }
-      } catch (err) {
-        console.warn('[Relay Sync] Lỗi tự động đăng ký Firestore khi mở Workspace:', err);
-      }
-    })();
+    void registerHealthWorkspaceRelay(rootFolderId, manifestFileId, adminEmail).catch((err) => {
+      console.warn('[Relay Sync] Lỗi tự động đăng ký Firestore khi mở Workspace:', err);
+    });
   }
 
+  return workspace;
+}
+
+export async function openAssignedHealthWorkspace(
+  assignment: HealthWorkspaceAssignment,
+  signedInEmail: string,
+): Promise<HealthDriveWorkspace> {
+  const memberEmail = signedInEmail.trim().toLowerCase();
+  if (
+    !memberEmail ||
+    assignment.memberEmail.trim().toLowerCase() !== memberEmail ||
+    !assignment.rootFolderId.trim() ||
+    !assignment.adminEmail.trim() ||
+    !assignment.familyFileId.trim()
+  ) {
+    throw new Error('Lời mời Workspace không khớp với tài khoản đang đăng nhập.');
+  }
+  const workspace = await openHealthWorkspace(assignment.rootFolderId, assignment.familyFileId);
+  if (
+    workspace.family.adminEmail &&
+    workspace.family.adminEmail.trim().toLowerCase() !== assignment.adminEmail.trim().toLowerCase()
+  ) {
+    throw new Error('Email quản trị trong family.json không khớp với lời mời Firestore.');
+  }
   return workspace;
 }
 
@@ -777,24 +887,6 @@ export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: 
         response.headers.get('etag') || undefined,
       );
 
-      // Tự động đồng bộ các thành viên có Email lên Firestore Relay nếu tài khoản hiện tại là Admin
-      const currentEmail = getSignedInGoogleEmail();
-      if (currentEmail && next.adminEmail && currentEmail.trim().toLowerCase() === next.adminEmail.trim().toLowerCase()) {
-        const membersWithEmail = next.members
-          .filter((m) => m.email && m.email.trim())
-          .map((m) => ({ email: m.email!.trim(), role: 'EDITOR' as const }));
-        if (membersWithEmail.length > 0) {
-          void publishHealthWorkspaceAssignments(
-            workspace.rootFolderId,
-            file.id,
-            next.adminEmail,
-            membersWithEmail,
-          ).catch((relayErr) => {
-            console.warn('[Relay Sync] Lỗi tự động đồng bộ email thành viên lên Firestore:', relayErr);
-          });
-        }
-      }
-
       return { ...workspace, familyFileId: file.id, family: next };
     } catch (error) {
       if (!(error instanceof DriveConflictError) || attempt === 2) throw error;
@@ -827,6 +919,13 @@ export async function addDriveFamilyMember(
     });
   }
 
+  const cleanAdminEmail = normalizedEmail(workspace.family.adminEmail);
+  const currentEmail = normalizedEmail(getSignedInGoogleEmail());
+  const memberEmail = normalizedEmail(input.email);
+  if (memberEmail && currentEmail === cleanAdminEmail && memberEmail !== cleanAdminEmail) {
+    await ensureDriveFolderAccess(workspace.rootFolderId, memberEmail, 'EDITOR');
+  }
+
   const rawFolder = await createFolder(input.id, workspace.family.rawFilesFolderId);
   const profile = {
     schemaVersion: 1,
@@ -854,7 +953,9 @@ export async function addDriveFamilyMember(
     new Blob([JSON.stringify({ ...profile, member }, null, 2)]),
   );
   const family = { ...workspace.family, members: [...workspace.family.members, member] };
-  return saveHealthFamily(workspace, family);
+  const updatedWorkspace = await saveHealthFamily(workspace, family);
+  await syncHealthWorkspaceMemberAssignments(updatedWorkspace);
+  return updatedWorkspace;
 }
 
 export async function updateDriveFamilyMember(
@@ -872,12 +973,26 @@ export async function updateDriveFamilyMember(
   if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
     return saveHealthFamily(workspace, { ...workspace.family, members });
   }
+  const cleanAdminEmail = normalizedEmail(workspace.family.adminEmail);
+  const currentEmail = normalizedEmail(getSignedInGoogleEmail());
+  const previousEmail = normalizedEmail(existingMember.email);
+  const updatedEmail = normalizedEmail(updatedMember.email);
+  if (
+    updatedEmail &&
+    updatedEmail !== cleanAdminEmail &&
+    updatedEmail !== previousEmail &&
+    currentEmail === cleanAdminEmail
+  ) {
+    await ensureDriveFolderAccess(workspace.rootFolderId, updatedEmail, 'EDITOR');
+  }
+
   const profileData = await loadHealthProfile(updatedMember.profileFileId);
   const profile = parseHealthProfile(profileData, existingMember);
   const updatedProfile = { ...profile, member: updatedMember };
   await saveHealthProfile(updatedMember.profileFileId, updatedProfile);
+  let updatedWorkspace: HealthDriveWorkspace;
   try {
-    return await saveHealthFamily(workspace, { ...workspace.family, members });
+    updatedWorkspace = await saveHealthFamily(workspace, { ...workspace.family, members });
   } catch (manifestError) {
     try {
       await saveHealthProfile(updatedMember.profileFileId, profile);
@@ -890,6 +1005,11 @@ export async function updateDriveFamilyMember(
     }
     throw manifestError;
   }
+  await syncHealthWorkspaceMemberAssignments(
+    updatedWorkspace,
+    previousEmail && previousEmail !== updatedEmail ? [previousEmail] : [],
+  );
+  return updatedWorkspace;
 }
 
 export async function deleteDriveFamilyMember(
@@ -914,9 +1034,6 @@ export async function deleteDriveFamilyMember(
     throw new Error('Thành viên thiếu ID thư mục hoặc hồ sơ Drive; không thể xóa an toàn.');
   }
 
-  const fileIds = [member.profileFileId, member.driveFolderId].filter(Boolean);
-  await deleteDriveFilesBatch(fileIds);
-
   const familyWithoutMember: HealthFamily = {
     ...workspace.family,
     members: workspace.family.members.filter((item) => item.id !== memberId),
@@ -930,6 +1047,27 @@ export async function deleteDriveFamilyMember(
     ),
   };
   const updatedWorkspace = await removeFamilyMemberFromManifest(workspace, familyWithoutMember, memberId);
+  const memberEmail = normalizedEmail(member.email);
+  let sharingError: unknown;
+  try {
+    await syncHealthWorkspaceMemberAssignments(
+      updatedWorkspace,
+      memberEmail ? [memberEmail] : [],
+    );
+  } catch (error) {
+    sharingError = error;
+  }
+  try {
+    await deleteDriveFilesBatch([member.profileFileId, member.driveFolderId]);
+  } catch (error) {
+    const cleanupReason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
+    const sharingReason = sharingError instanceof Error ? ` Đồng thời: ${sharingError.message}` : '';
+    throw new WorkspaceSharingSyncError(
+      `Thành viên đã bị gỡ khỏi family.json nhưng chưa xóa hết dữ liệu Drive: ${cleanupReason}.${sharingReason}`,
+      updatedWorkspace,
+    );
+  }
+  if (sharingError) throw sharingError;
 
   return { workspace: updatedWorkspace };
 }
@@ -1290,28 +1428,27 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
   throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi xóa tệp.`);
 }
 
-export async function revokeDriveFolderAccess(folderId: string, memberEmail: string): Promise<void> {
-  const normalizedEmail = memberEmail.trim().toLowerCase();
-  if (!folderId.trim() || !normalizedEmail) {
-    throw new Error('Thiếu mã thư mục hoặc email để thu hồi quyền Google Drive.');
-  }
+interface DriveFolderPermission {
+  id?: string;
+  emailAddress?: string;
+  type?: string;
+  role?: string;
+  deleted?: boolean;
+  permissionDetails?: Array<{ inherited?: boolean }>;
+}
 
-  const permissions: Array<{
-    id?: string;
-    emailAddress?: string;
-    type?: string;
-    role?: string;
-    deleted?: boolean;
-  }> = [];
+async function listFolderPermissions(folderId: string): Promise<DriveFolderPermission[]> {
+  const permissions: DriveFolderPermission[] = [];
   let pageToken: string | undefined;
   do {
     const params = new URLSearchParams({
-      fields: 'nextPageToken,permissions(id,emailAddress,type,role,deleted)',
+      fields: 'nextPageToken,permissions(id,emailAddress,type,role,deleted,permissionDetails(inherited))',
       pageSize: '100',
+      supportsAllDrives: 'true',
     });
     if (pageToken) params.set('pageToken', pageToken);
     const result = await driveRequest<{
-      permissions?: typeof permissions;
+      permissions?: DriveFolderPermission[];
       nextPageToken?: string;
     }>(
       `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions?${params.toString()}`,
@@ -1319,6 +1456,104 @@ export async function revokeDriveFolderAccess(folderId: string, memberEmail: str
     permissions.push(...(result.permissions || []));
     pageToken = result.nextPageToken;
   } while (pageToken);
+  return permissions;
+}
+
+function driveRoleRank(role: string | undefined): number {
+  switch (role) {
+    case 'reader':
+    case 'commenter':
+      return 1;
+    case 'writer':
+      return 2;
+    case 'fileOrganizer':
+    case 'organizer':
+      return 3;
+    case 'owner':
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+export async function ensureDriveFolderAccess(
+  folderId: string,
+  memberEmail: string,
+  role: WorkspaceAccessRole,
+): Promise<void> {
+  const normalizedEmail = memberEmail.trim().toLowerCase();
+  if (!folderId.trim() || !normalizedEmail || (role !== 'EDITOR' && role !== 'VIEWER')) {
+    throw new Error('Thiếu mã thư mục, email hoặc vai trò hợp lệ để cấp quyền Google Drive.');
+  }
+  const desiredRole = role === 'EDITOR' ? 'writer' : 'reader';
+  const desiredRank = driveRoleRank(desiredRole);
+  const permissions = await listFolderPermissions(folderId);
+  const matching = permissions.filter((permission) =>
+    permission.type === 'user' &&
+    !permission.deleted &&
+    permission.emailAddress?.trim().toLowerCase() === normalizedEmail,
+  );
+  const inherited = matching.filter((permission) =>
+    permission.permissionDetails?.some((detail) => detail.inherited),
+  );
+  if (inherited.some((permission) => driveRoleRank(permission.role) > desiredRank)) {
+    throw new Error(`Không thể đặt ${normalizedEmail} thành ${role}: quyền cao hơn đang được kế thừa từ folder cha.`);
+  }
+
+  const direct = matching.find((permission) =>
+    !permission.permissionDetails?.some((detail) => detail.inherited),
+  );
+  let response: Response | undefined;
+  if (direct?.role === 'owner') {
+    throw new Error(`Không thể thay đổi quyền của ${normalizedEmail} vì tài khoản này là chủ sở hữu folder.`);
+  }
+  if (direct?.id) {
+    if (direct.role !== desiredRole) {
+      response = await authenticatedDriveFetch(
+        `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions/${encodeURIComponent(direct.id)}?supportsAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: desiredRole }),
+        },
+      );
+    }
+  } else if (inherited.length === 0 || !inherited.some((permission) => permission.role === desiredRole)) {
+    response = await authenticatedDriveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions?supportsAllDrives=true&sendNotificationEmail=true`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'user', role: desiredRole, emailAddress: normalizedEmail }),
+      },
+    );
+  }
+  if (response && !response.ok) {
+    const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    throw new Error(
+      body?.error?.message ||
+      `Không thể cấp quyền ${role} cho ${normalizedEmail} trên Google Drive (HTTP ${response.status}).`,
+    );
+  }
+
+  const verified = (await listFolderPermissions(folderId)).filter((permission) =>
+    permission.type === 'user' &&
+    !permission.deleted &&
+    permission.emailAddress?.trim().toLowerCase() === normalizedEmail,
+  );
+  const effectiveRank = verified.reduce((rank, permission) => Math.max(rank, driveRoleRank(permission.role)), 0);
+  if (effectiveRank !== desiredRank) {
+    throw new Error(`Google Drive chưa xác nhận chính xác quyền ${role} cho ${normalizedEmail}.`);
+  }
+}
+
+export async function revokeDriveFolderAccess(folderId: string, memberEmail: string): Promise<void> {
+  const normalizedEmail = memberEmail.trim().toLowerCase();
+  if (!folderId.trim() || !normalizedEmail) {
+    throw new Error('Thiếu mã thư mục hoặc email để thu hồi quyền Google Drive.');
+  }
+
+  const permissions = await listFolderPermissions(folderId);
 
   const matchingPermissions = permissions.filter((permission) =>
     permission.id &&
@@ -1327,6 +1562,9 @@ export async function revokeDriveFolderAccess(folderId: string, memberEmail: str
     !permission.deleted &&
     permission.emailAddress?.trim().toLowerCase() === normalizedEmail,
   );
+  if (matchingPermissions.some((permission) => permission.permissionDetails?.some((detail) => detail.inherited))) {
+    throw new Error(`Quyền của ${normalizedEmail} được kế thừa từ folder cha; hãy thu hồi quyền ở folder cha trước.`);
+  }
   for (const permission of matchingPermissions) {
     const response = await authenticatedDriveFetch(
       `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions/${encodeURIComponent(permission.id!)}`,

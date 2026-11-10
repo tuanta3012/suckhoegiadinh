@@ -1,7 +1,7 @@
 export interface PendingMemberDeletion {
   memberId: string;
   email?: string;
-  revokeSharedAccess: boolean;
+  revokeSharedAccess?: boolean;
   queuedAt: number;
 }
 
@@ -17,7 +17,7 @@ function isPendingMemberDeletion(value: unknown): value is PendingMemberDeletion
   return typeof item.memberId === 'string' &&
     item.memberId.length > 0 &&
     (item.email === undefined || typeof item.email === 'string') &&
-    typeof item.revokeSharedAccess === 'boolean' &&
+    (item.revokeSharedAccess === undefined || typeof item.revokeSharedAccess === 'boolean') &&
     typeof item.queuedAt === 'number' &&
     Number.isFinite(item.queuedAt);
 }

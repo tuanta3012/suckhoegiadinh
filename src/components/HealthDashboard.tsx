@@ -77,11 +77,15 @@ import {
   deleteDriveFamilyMember,
   deleteHealthWorkspaceFolder,
   downloadDriveFile,
+  ensureDriveFolderAccess,
   flushPendingHealthProfileSaves,
   factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
   loadSharedAiResources,
+  syncHealthWorkspaceMemberAssignments,
+  WorkspaceSharingSyncError,
   type HealthDriveWorkspace,
+  openAssignedHealthWorkspace,
   openHealthWorkspace,
   loadHealthProfile,
   moveDriveFileToMember,
@@ -167,6 +171,7 @@ import {
   publishHealthWorkspaceAssignments,
   readHealthWorkspaceAssignment,
   removeHealthWorkspaceAssignment,
+  subscribeHealthWorkspaceAssignments,
   unregisterHealthWorkspace,
   type HealthWorkspaceAssignment,
   type WorkspaceAccessRole,
@@ -362,11 +367,6 @@ async function applyPendingMemberDeletions(
   const pending = readPendingMemberDeletions(loadedWorkspace.rootFolderId);
   let updatedWorkspace = loadedWorkspace;
   for (const deletion of pending) {
-    if (deletion.revokeSharedAccess && deletion.email) {
-      await revokeDriveFolderAccess(updatedWorkspace.rootFolderId, deletion.email);
-      await removeHealthWorkspaceAssignment(updatedWorkspace.rootFolderId, deletion.email);
-    }
-
     if (updatedWorkspace.family.members.some((member) => member.id === deletion.memberId)) {
       const result = await deleteDriveFamilyMember(updatedWorkspace, deletion.memberId);
       updatedWorkspace = result.workspace;
@@ -1650,6 +1650,8 @@ export function HealthDashboard({
     return nextProfiles;
   }, []);
 
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const openWorkspace = useCallback(
     async (id: string): Promise<boolean> => {
       const authIdentity = authIdentityRef.current;
@@ -1707,9 +1709,85 @@ export function HealthDashboard({
     [reloadProfiles, showToast, userEmail]
   );
 
-  const [isSyncing, setIsSyncing] = useState(false);
+  useEffect(() => {
+    if (!driveAuthorized || !userEmail) return;
+    let disposed = false;
+    let handledAssignmentKey = '';
+    const unsubscribe = subscribeHealthWorkspaceAssignments(
+      userEmail,
+      (assignment) => {
+        if (!assignment || disposed) return;
+        const key = `${assignment.rootFolderId}:${assignment.familyFileId}:${assignment.updatedAt}`;
+        if (handledAssignmentKey === key) return;
+        handledAssignmentKey = key;
 
+        let startedSync = false;
+        void (async () => {
+          const current = workspaceRef.current;
+          if (
+            current &&
+            current.rootFolderId !== 'local_offline_workspace' &&
+            current.rootFolderId !== assignment.rootFolderId
+          ) {
+            const shouldSwitch = await confirm({
+              title: 'Có lời mời Workspace mới',
+              message: `Tài khoản ${userEmail} được mời vào một Workspace khác. Bạn có muốn chuyển sang Workspace đó không?`,
+              confirmLabel: 'Mở Workspace',
+            });
+            if (!shouldSwitch) return;
+          } else if (
+            current?.rootFolderId === assignment.rootFolderId &&
+            current.familyFileId === assignment.familyFileId
+          ) {
+            return;
+          }
 
+          setIsSyncing(true);
+          startedSync = true;
+          const loaded = await openAssignedHealthWorkspace(assignment, userEmail);
+          const opened = await applyPendingMemberDeletions(loaded);
+          if (
+            disposed ||
+            authIdentityRef.current.userEmail !== userEmail ||
+            !authIdentityRef.current.driveAuthorized
+          ) return;
+
+          localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, opened.rootFolderId);
+          localStorage.setItem(PROFILE_ROOT_KEY, opened.rootFolderId);
+          workspaceRef.current = opened;
+          setWorkspace(opened);
+          setSelectedMemberId(
+            findMemberForEmail(opened.family.members, userEmail)?.id ||
+              opened.family.members[0]?.id ||
+              '',
+          );
+          setRootIdInput(opened.rootFolderId);
+          await reloadProfiles(opened);
+          showToast('Workspace được liên kết hoặc cập nhật tự động từ Firestore.', 'success');
+        })()
+          .catch((error: unknown) => {
+            if (disposed) return;
+            const message = error instanceof Error
+              ? error.message
+              : 'Không thể mở Workspace được chia sẻ.';
+            setErrorMessage(message);
+            showToast(message, 'error');
+          })
+          .finally(() => {
+            if (!disposed && startedSync) setIsSyncing(false);
+          });
+      },
+      (error) => {
+        if (disposed) return;
+        setErrorMessage(error.message);
+        showToast(error.message, 'error');
+      },
+    );
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [confirm, driveAuthorized, reloadProfiles, showToast, userEmail]);
 
   const syncStatus = useMemo(() => {
     if (isSyncing) return 'syncing';
@@ -1797,7 +1875,7 @@ export function HealthDashboard({
         if (cancelled) return;
         if (assignment) {
           try {
-            const loaded = await openHealthWorkspace(assignment.rootFolderId);
+            const loaded = await openAssignedHealthWorkspace(assignment, userEmail);
             const opened = await applyPendingMemberDeletions(loaded);
             if (!cancelled) {
               localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, opened.rootFolderId);
@@ -1909,18 +1987,49 @@ export function HealthDashboard({
   }, [driveAuthorized, reloadProfiles, showToast, workspace]);
 
   // Workspace assignments reload
+  const workspaceRootFolderId = workspace?.rootFolderId;
+  const workspaceFamilyFileId = workspace?.familyFileId;
   const reloadWorkspaceAssignments = useCallback(async () => {
-    if (!workspace || !isWorkspaceAdmin) return;
+    if (!workspaceRootFolderId || !workspaceFamilyFileId || !isWorkspaceAdmin) return;
     try {
-      setWorkspaceAssignments(await listHealthWorkspaceAssignments(workspace.rootFolderId));
+      const activeWorkspace = workspaceRef.current;
+      if (!activeWorkspace ||
+          activeWorkspace.rootFolderId !== workspaceRootFolderId ||
+          activeWorkspace.familyFileId !== workspaceFamilyFileId) return;
+      await syncHealthWorkspaceMemberAssignments(activeWorkspace);
+      const assignments = await listHealthWorkspaceAssignments(workspaceRootFolderId);
+      setWorkspaceAssignments(assignments);
     } catch (error) {
       console.warn('Lỗi tải quyền chia sẻ:', error);
+      setErrorMessage(error instanceof Error ? error.message : 'Không thể đồng bộ quyền chia sẻ Workspace.');
     }
-  }, [isWorkspaceAdmin, workspace]);
+  }, [isWorkspaceAdmin, workspaceFamilyFileId, workspaceRootFolderId]);
 
   useEffect(() => {
     void reloadWorkspaceAssignments();
   }, [reloadWorkspaceAssignments]);
+
+  async function recoverCommittedWorkspaceSharingError(error: unknown): Promise<string | null> {
+    if (!(error instanceof WorkspaceSharingSyncError)) return null;
+    const updatedWorkspace = error.workspace;
+    workspaceRef.current = updatedWorkspace;
+    setWorkspace(updatedWorkspace);
+    if (!updatedWorkspace.family.members.some((member) => member.id === selectedMemberId)) {
+      setSelectedMemberId(updatedWorkspace.family.members[0]?.id || '');
+    }
+    if (editingMember && !updatedWorkspace.family.members.some((member) => member.id === editingMember.id)) {
+      setEditingMember(null);
+    }
+    try {
+      const loadedProfiles = await reloadProfiles(updatedWorkspace);
+      profilesRef.current = loadedProfiles;
+      setProfiles(loadedProfiles);
+      return error.message;
+    } catch (refreshError) {
+      const reason = refreshError instanceof Error ? refreshError.message : 'Không thể tải lại hồ sơ.';
+      return `${error.message} Làm mới dữ liệu cũng thất bại: ${reason}`;
+    }
+  }
 
   async function importGuestLocalDataToDrive() {
     const sourceState = loadGuestLocalState();
@@ -2220,7 +2329,11 @@ export function HealthDashboard({
       setActiveTab('timeline');
       showToast(`Đã thêm thành viên ${newMemberName.trim()} vào hồ sơ gia đình.`, 'success');
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Không thể thêm thành viên.');
+      const recoveryMessage = await recoverCommittedWorkspaceSharingError(error);
+      setErrorMessage(
+        recoveryMessage ||
+          (error instanceof Error ? error.message : 'Không thể thêm thành viên.'),
+      );
     } finally {
       setIsAddingMember(false);
     }
@@ -2370,7 +2483,9 @@ export function HealthDashboard({
       showToast(`Đã cập nhật thông tin thành viên ${name}.`, 'success');
       setEditingMember(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Không thể cập nhật thành viên.';
+      const recoveryMessage = await recoverCommittedWorkspaceSharingError(error);
+      const message = recoveryMessage ||
+        (error instanceof Error ? error.message : 'Không thể cập nhật thành viên.');
       setErrorMessage(message);
       showToast(message, 'error');
     } finally {
@@ -2415,7 +2530,6 @@ export function HealthDashboard({
         queueMemberDeletion(workspace.rootFolderId, {
           memberId: member.id,
           email: member.email,
-          revokeSharedAccess: !isSelf,
           queuedAt: Date.now(),
         });
         deletionQueuedForSync = true;
@@ -2439,10 +2553,6 @@ export function HealthDashboard({
         };
       } else if (canSyncRemote) {
         try {
-          if (!isSelf && member.email) {
-            await revokeDriveFolderAccess(workspace.rootFolderId, member.email);
-            await removeHealthWorkspaceAssignment(workspace.rootFolderId, member.email);
-          }
           const result = await deleteDriveFamilyMember(workspace, member.id);
           next = result.workspace;
         } catch (error) {
@@ -2485,7 +2595,11 @@ export function HealthDashboard({
         (canSyncRemote && !deletionQueuedForSync) || isLocalWorkspace || isUnsyncedMember ? 'success' : 'info',
       );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Không thể xóa thành viên.');
+      const recoveryMessage = await recoverCommittedWorkspaceSharingError(error);
+      setErrorMessage(
+        recoveryMessage ||
+          (error instanceof Error ? error.message : 'Không thể xóa thành viên.'),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -3954,6 +4068,7 @@ export function HealthDashboard({
           .map((a) => [a.memberEmail, a.role])
       );
       assignments.set(email, inviteRole);
+      await ensureDriveFolderAccess(workspace.rootFolderId, email, inviteRole);
       await publishHealthWorkspaceAssignments(
         workspace.rootFolderId,
         workspace.familyFileId,
@@ -3963,7 +4078,7 @@ export function HealthDashboard({
       setInviteEmail('');
       await reloadWorkspaceAssignments();
       showToast(
-        'Đã gửi lời mời Workspace. Hãy chia sẻ thư mục Drive với email này để cấp quyền tệp.',
+        `Đã cấp quyền Drive và gửi lời mời Workspace cho ${email}.`,
         'success'
       );
     } catch (error) {
@@ -3980,9 +4095,10 @@ export function HealthDashboard({
     setIsLoading(true);
     setErrorMessage('');
     try {
+      await revokeDriveFolderAccess(workspace.rootFolderId, memberEmail);
       await removeHealthWorkspaceAssignment(workspace.rootFolderId, memberEmail);
       await reloadWorkspaceAssignments();
-      showToast('Đã thu hồi quyền chia sẻ.', 'success');
+      showToast('Đã thu hồi quyền Drive và xóa lời mời Workspace.', 'success');
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Không thể thu hồi quyền chia sẻ.'
