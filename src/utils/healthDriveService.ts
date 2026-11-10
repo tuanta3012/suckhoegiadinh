@@ -23,6 +23,11 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JSON_MIME = 'application/json';
 const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size';
 const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
+const AI_RESOURCES_FILE_NAME = 'ai-resources.json';
+
+export interface SharedAiResources {
+  keys: string[];
+}
 
 async function deleteDriveFilesBatch(fileIds: string[], concurrency = 5): Promise<void> {
   const ids = [...new Set(fileIds)].filter(Boolean);
@@ -996,6 +1001,47 @@ export async function downloadDriveFile(fileId: string): Promise<Blob> {
   });
   if (!response.ok) throw new Error(`Không thể tải tài liệu gốc (HTTP ${response.status}).`);
   return response.blob();
+}
+
+export async function loadSharedAiResources(folderId: string): Promise<SharedAiResources> {
+  const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME, JSON_MIME);
+  if (files.length === 0) return { keys: [] };
+  if (files.length > 1) {
+    throw new Error('Có nhiều file ai-resources.json trong folder. Hãy nhờ quản trị viên giữ lại một file.');
+  }
+  const blob = await downloadDriveFile(files[0].id);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await blob.text());
+  } catch (error) {
+    throw new Error('File Tài nguyên AI trên Drive bị lỗi định dạng JSON.', { cause: error });
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('keys' in parsed) ||
+    !Array.isArray(parsed.keys) ||
+    parsed.keys.some((key) => typeof key !== 'string')
+  ) {
+    throw new Error('File Tài nguyên AI trên Drive không có danh sách key hợp lệ.');
+  }
+  return { keys: Array.from(new Set(parsed.keys.map((key) => key.trim()).filter(Boolean))) };
+}
+
+export async function saveSharedAiResources(folderId: string, keys: string[]): Promise<void> {
+  const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME, JSON_MIME);
+  if (files.length > 1) {
+    throw new Error('Có nhiều file ai-resources.json trong folder. Hãy nhờ quản trị viên giữ lại một file.');
+  }
+  const content = new Blob(
+    [JSON.stringify({ schemaVersion: 1, keys, updatedAt: new Date().toISOString() }, null, 2)],
+    { type: JSON_MIME },
+  );
+  if (files.length === 1) {
+    await replaceContent(files[0].id, AI_RESOURCES_FILE_NAME, JSON_MIME, content);
+    return;
+  }
+  await uploadContent(AI_RESOURCES_FILE_NAME, JSON_MIME, content, folderId);
 }
 
 export async function deleteDriveFile(fileId: string): Promise<void> {

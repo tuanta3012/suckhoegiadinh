@@ -16,6 +16,10 @@ import { ensureGeminiAuthUser } from './googleDriveService';
 import { buildApiUrl } from './apiConfig';
 import { digitizationLogger } from './digitizationLogger';
 import { classifyHealthEventType, isHealthEventType } from './healthEventType';
+import { callNativeGeminiEndpoint } from './nativeGeminiTasks';
+import { generateNativeGeminiContent } from './geminiSharedResources';
+import { splitPdfIntoBatches, PdfPageBatchError } from './pdfPageBatches';
+import { mergeExtractedBatches, type ExtractedPageBatch } from './healthDocumentExtraction';
 
 async function getAuthenticatedUserToken(): Promise<string> {
   const user = await ensureGeminiAuthUser();
@@ -72,9 +76,14 @@ export interface ExtractionProgressUpdate {
 }
 
 /**
- * Server-side Gemini API invocation helper with logging & execution duration tracking
+ * Routes web requests through Express and native requests directly through the shared Gemini keys.
  */
 async function callServerGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+  if (Capacitor.isNativePlatform()) {
+    digitizationLogger.log('info', 'api', `Gọi trực tiếp Gemini trên thiết bị: ${endpoint}`, { endpoint });
+    return callNativeGeminiEndpoint<T>(endpoint, body);
+  }
+
   const getDuration = digitizationLogger.startTimer();
   digitizationLogger.log('info', 'api', `Bắt đầu gọi API server: /api/gemini/${endpoint}`, { endpoint });
   const token = await getAuthenticatedUserToken();
@@ -141,7 +150,7 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 1: SỐ HÓA, OCR, NHẬN DẠNG TÀI LIỆU, HIỆU CHỈNH & SẮP XẾP DỮ LIỆU
-// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.5-flash-lite (Không rớt model)
+// OCR uses gemini-3.5-flash-lite on both the web backend and native clients.
 // ============================================================================
 
 /**
@@ -262,6 +271,128 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
   };
 }
 
+async function extractNativeHealthEvent(
+  file: File,
+  member: FamilyMember,
+  mimeType: string,
+  base64Data: string,
+  onProgress: ((update: ExtractionProgressUpdate) => void) | undefined,
+  getDuration: () => number,
+): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+  if (file.size > 25 * 1024 * 1024) throw new Error('Tệp vượt quá giới hạn 25 MB.');
+  if (mimeType !== 'application/pdf' && !/^image\/(jpeg|png|webp|gif|heic|heif)$/i.test(mimeType)) {
+    throw new Error('Chỉ hỗ trợ tài liệu PDF hoặc ảnh JPEG, PNG, WebP, GIF, HEIC, HEIF.');
+  }
+
+  const batches = mimeType === 'application/pdf'
+    ? await splitPdfIntoBatches(base64Data, 5, 60)
+    : [{ firstPage: 1, lastPage: 1, base64Data }];
+  const memberBirth = member.birthDate ? `sinh ngày ${member.birthDate}` : '';
+  const fileYear = file.name.match(/\b(?:19|20)\d{2}\b/)?.[0];
+  const systemInstruction = `Bạn là chuyên gia OCR tài liệu y khoa Việt Nam. Trích xuất chính xác, súc tích, không suy diễn thông tin từ tài liệu cho ${member.name} ${memberBirth}.
+Ngày khám: ưu tiên ngày thực tế khám/xét nghiệm/ký bác sĩ; không dùng ngày sinh, ngày in phiếu hoặc ngày hẹn tái khám. ${fileYear ? `Tên tệp có năm ${fileYear}; ưu tiên ngày khám cùng năm nếu tài liệu xác nhận.` : ''}
+Phân loại theo chủ đề chính: comprehensive_exam (khám tổng quát), test_result, imaging, prescription, vaccination, discharge hoặc other. Nếu other, ghi customCategory và dữ liệu dạng key-value vào extractedData.
+Trích xuất facility, doctorName, physicalExam (height_cm, weight_kg, bmi, bp_mmHg, pulse_bpm, classification), diagnoses, medications, vaccinations, hospitalization, metrics (name, standardKey, value, unit, refRange, status), imagingResults (modality, findings ngắn gọn, conclusion), advice, nextFollowUp và notes nếu tài liệu có. Giữ nguyên giá trị, đơn vị, liều thuốc; không tự chẩn đoán hoặc bổ sung kết quả. Bỏ qua trang bìa, thủ tục hành chính và ảnh thô không có kết luận. Chỉ trả JSON object hợp lệ với các trường có căn cứ.`;
+  const extractedBatches: ExtractedPageBatch[] = [];
+  const modelNames = new Set<string>();
+
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    const totalPages = batches[batches.length - 1].lastPage;
+    onProgress?.({
+      stage: 'waiting_for_model',
+      progressPercent: 48 + Math.floor((index / batches.length) * 40),
+      message: batches.length > 1
+        ? `Đang xử lý trang ${batch.firstPage}-${batch.lastPage} (${index + 1}/${batches.length})...`
+        : 'Gemini đang đọc tài liệu...',
+      modelUsed: 'gemini-3.5-flash-lite',
+      totalPages,
+      processedPages: batch.firstPage - 1,
+    });
+
+    const prompt = `Đọc tài liệu của ${member.name}. ${batches.length > 1
+      ? `Đây là các trang ${batch.firstPage}-${batch.lastPage}; chỉ trích xuất nội dung trong các trang này.`
+      : 'Trích xuất các thông tin y tế có trong tài liệu.'}
+Trả duy nhất JSON object chuẩn. Với chỉ số xét nghiệm, giữ tên, giá trị, đơn vị, khoảng tham chiếu và trạng thái nếu nhìn thấy. Với thuốc, giữ tên/liều/lần dùng/thời gian.`;
+    const { text, modelUsed } = await generateNativeGeminiContent(
+      'gemini-3.5-flash-lite',
+      [{ inlineData: { mimeType, data: batch.base64Data } }, { text: prompt }],
+      { systemInstruction, responseMimeType: 'application/json' },
+    );
+    modelNames.add(modelUsed);
+    const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start < 0 || end < start) throw new Error('Gemini không trả về JSON OCR hợp lệ.');
+    const parsed: unknown = JSON.parse(cleaned.slice(start, end + 1));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Gemini không trả về dữ liệu OCR hợp lệ.');
+    }
+    extractedBatches.push({
+      firstPage: batch.firstPage,
+      lastPage: batch.lastPage,
+      extracted: parsed as Record<string, unknown>,
+    });
+    onProgress?.({
+      stage: 'extracting_content',
+      progressPercent: 50 + Math.floor(((index + 1) / batches.length) * 40),
+      message: `Đã đọc ${batch.lastPage}/${totalPages} trang.`,
+      modelUsed,
+      partialEvent: normalizeExtractedEvent(
+        mergeExtractedBatches(extractedBatches, undefined, file.name),
+        file.name,
+      ),
+      totalPages,
+      processedPages: batch.lastPage,
+    });
+  }
+
+  const totalPages = batches[batches.length - 1].lastPage;
+  const extracted = normalizeExtractedEvent(
+    mergeExtractedBatches(extractedBatches, undefined, file.name),
+    file.name,
+  );
+  if (
+    !extracted.title &&
+    !extracted.patientName &&
+    !extracted.diagnoses?.length &&
+    !extracted.medications?.length &&
+    !extracted.metrics?.length &&
+    !extracted.advice &&
+    !extracted.notes
+  ) {
+    throw new Error('AI không trích xuất được thông tin có thể xác nhận từ tài liệu. Hãy nhập thủ công hoặc thử lại.');
+  }
+
+  const modelUsed = Array.from(modelNames).join(', ');
+  const durationMs = getDuration();
+  digitizationLogger.log('info', 'ocr_complete', `OCR trực tiếp hoàn tất trong ${durationMs}ms bằng ${modelUsed}.`, {
+    durationMs,
+    modelUsed,
+    totalPages,
+    processedPages: totalPages,
+  }, durationMs);
+  onProgress?.({
+    stage: 'matching_patient',
+    progressPercent: 96,
+    message: 'Đang đối chiếu người bệnh với thành viên gia đình...',
+    modelUsed,
+    partialEvent: extracted,
+    totalPages,
+    processedPages: totalPages,
+  });
+  onProgress?.({
+    stage: 'completed',
+    progressPercent: 100,
+    message: 'Hoàn tất số hóa tài liệu y tế!',
+    modelUsed,
+    partialEvent: extracted,
+    totalPages,
+    processedPages: totalPages,
+  });
+  return { extracted, modelUsed, totalPages, processedPages: totalPages };
+}
+
 /**
  * Trích xuất sự kiện y tế từ tệp tài liệu / ảnh chụp kèm theo luồng cập nhật tiến trình và nội dung trực tiếp
  */
@@ -293,6 +424,21 @@ export async function extractHealthEventWithProgress(
     message: 'Khởi động AI Vision đọc tài liệu...',
     modelUsed: 'gemini-3.5-flash-lite',
   });
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      return await extractNativeHealthEvent(file, member, mimeType, base64Data, onProgress, getDuration);
+    } catch (error) {
+      digitizationLogger.log(
+        'error',
+        'ocr_error',
+        `Lỗi OCR trực tiếp cho "${file.name}": ${error instanceof Error ? error.message : 'Lỗi không xác định'}`,
+        { fileName: file.name },
+        getDuration(),
+      );
+      throw error;
+    }
+  }
 
   const user = await ensureGeminiAuthUser();
   const controller = new AbortController();
@@ -481,7 +627,7 @@ export async function extractHealthEventWithProgress(
         ? 'Không nhận được dữ liệu phản hồi từ AI trong 4 phút. Hãy kiểm tra kết nối mạng hoặc thử lại.'
         : 'Quá thời gian OCR tối đa (10 phút). Tệp vẫn được lưu an toàn trên Google Drive; bạn có thể bấm "Chạy lại OCR" hoặc nhập thủ công.'
       : networkError
-        ? 'Không kết nối được máy chủ OCR (lỗi mạng hoặc CORS). Hãy kiểm tra VITE_BACKEND_URL trỏ tới máy chủ HTTPS đang hoạt động và máy chủ đã cho phép ứng dụng Android; tài liệu vẫn được giữ trên Google Drive.'
+        ? 'Không kết nối được máy chủ OCR (lỗi mạng hoặc CORS). Hãy kiểm tra kết nối và cấu hình máy chủ web; tài liệu vẫn được giữ trên Google Drive.'
       : error instanceof Error
         ? error.message
         : 'Lỗi OCR không xác định';
@@ -518,7 +664,7 @@ export async function extractHealthEvent(
 
 /**
  * Hiệu chỉnh và sắp xếp thông minh toàn bộ dữ liệu thu thập được cho từng thành viên
- * Sử dụng tier digitization (3.5/3.1 flash lite trên server)
+ * Uses the configured refinement model for web and native requests.
  */
 export async function refineAndOrganizeMemberData(
   member: FamilyMember,
@@ -579,7 +725,7 @@ export async function refineAndOrganizeMemberData(
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 2: PHÂN TÍCH, ĐÁNH GIÁ TOÀN DIỆN HỒ SƠ Y TẾ & TƯ VẤN LỜI KHUYÊN (DEEP INSIGHT)
-// Sử dụng CỐ ĐỊNH Server-Side Gemini API: gemini-3.6-flash (Phân tích 4 lớp y khoa)
+// Comprehensive analysis uses gemini-3.6-flash.
 // ============================================================================
 
 /**
@@ -655,6 +801,19 @@ export async function streamHealthAssistant(
   profile: HealthProfile,
   onChunk: (chunk: string) => void
 ): Promise<string> {
+  if (Capacitor.isNativePlatform()) {
+    const data = await callNativeGeminiEndpoint<{ answer: string }>('ask-assistant', {
+      question,
+      member,
+      profile,
+    });
+    if (typeof data.answer !== 'string' || !data.answer.trim()) {
+      throw new Error('Trợ lý AI chưa trả về câu trả lời hợp lệ. Vui lòng thử lại.');
+    }
+    onChunk(data.answer);
+    return data.answer;
+  }
+
   const token = await getAuthenticatedUserToken();
   let response: Response;
   try {
@@ -824,9 +983,12 @@ export async function analyzeComprehensiveHealth(
 }
 
 /**
- * Tải log hệ thống từ server (bao gồm các bước xoay vòng key, retry OCR)
+ * Tải log hệ thống từ server (web only).
  */
 export async function fetchServerLogs(): Promise<any[]> {
+  if (Capacitor.isNativePlatform()) {
+    throw new Error('Log từ máy chủ không khả dụng trong chế độ Gemini trực tiếp trên APK.');
+  }
   const token = await getAuthenticatedUserToken();
   const response = await performServerFetch(buildApiUrl('/api/gemini/digitization-logs'), {
     headers: {

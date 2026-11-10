@@ -1,32 +1,24 @@
-# Gemini server contract
+# Gemini service contract
 
-The client sends requests to the `/api/gemini/*` endpoints. The server verifies the Firebase ID token before calling Gemini. Requests without a valid Firebase identity are rejected. On the native APK only, Firebase Anonymous Auth supplies this AI-service identity; it does not sign the user into Google Drive or grant Drive access. Web clients still need their existing signed-in account.
+## Web and native request paths
 
-Enable the Anonymous sign-in provider in Firebase Authentication for the APK's Firebase project. Without it, local storage remains available but Gemini requests fail with the Firebase authentication error.
+Web builds use same-origin `/api/gemini/*` requests. The Express server verifies the Firebase ID token before calling Gemini; requests without a valid Firebase identity are rejected. Configure the server-only `GEMINI_API_KEYS` environment variable (or legacy `GEMINI_API_KEY`) for the web backend.
 
-## Backend URL and native CORS
+The native APK calls Google Gemini directly. Its API keys are managed from **Settings → Tài nguyên AI** and stored in `ai-resources.json` in the shared Google Drive workspace folder. The app tests every entered key against `gemini-3.5-flash-lite` before saving. OCR, assistant, summary, refinement, and analysis use the shared keys; the APK build no longer requires `VITE_BACKEND_URL`.
 
-Web builds use same-origin `/api/gemini/*` requests. Native builds require `VITE_BACKEND_URL`; Android release builds receive it from the GitHub Actions `VITE_BACKEND_URL` secret. Set that secret to the HTTPS origin of a publicly reachable deployment of this repository's Express server, not an AI Studio preview URL. The APK workflow checks the status endpoint, Gemini key configuration, and expected OCR model before building, and rejects redirects or unconfigured backends.
+## Important key-sharing warning
 
-The Express server permits Capacitor's `https://localhost` origin by default. Add any separately hosted web-app origins to the server's comma-separated `CORS_ALLOWED_ORIGINS` environment variable. The server handles authenticated `Authorization` preflight requests without enabling wildcard origins or credential cookies.
+`ai-resources.json` contains the keys as readable plain text. Anyone who can read the shared Drive folder can retrieve and use those keys outside the app; hiding the values in the viewer UI does not make them secret. Set API restrictions and quota/billing limits in Google AI Studio/Google Cloud, monitor usage, and rotate or revoke a key if a member leaves. Do not reuse these keys for other services.
 
-## Independent project configuration
+Only the workspace admin is offered editing controls in the app. This is a user-interface restriction, not a server-enforced security boundary: Drive permissions and client-side code cannot prevent a folder reader from obtaining the file contents.
 
-Configure Google API keys in the server-only `GEMINI_API_KEYS` environment variable. The legacy `GEMINI_API_KEY` variable is also accepted as a single-key fallback. Use keys from distinct Google projects when sharing quota:
-
-```env
-GEMINI_API_KEYS=key-from-project-1,key-from-project-2
-```
-
-Do not put Gemini keys in `VITE_*` variables, client storage, request bodies, logs, or responses.
-
-The unused client-side Gemini key pool has been removed. On startup, the app also clears its legacy `stk_gemini_api_keys_pool` entry from secure storage, Preferences, and localStorage.
+The old `stk_gemini_api_keys_pool` entry is still cleared from secure storage, Preferences, and localStorage on startup.
 
 ## Quota-aware scheduling
 
-The scheduler tracks quota separately for each key and model and rotates across configured keys. OCR uses `gemini-3.5-flash-lite`; analysis uses `gemini-3.6-flash`; assistant and refinement currently use `gemini-3.5-flash-lite`. There is no configured model fallback. If a key fails, the server tries another configured key for that task. Provider 429 responses cool down the affected key-model, and daily-quota responses exhaust that key-model until the next UTC day. Invalid requests and other provider failures are reported rather than silently treated as success.
+The web backend scheduler tracks quota per key and model. The native app tries the shared keys in order and reports a failure if none succeeds; native requests do not share the server scheduler's quota ledger. OCR uses `gemini-3.5-flash-lite`; analysis uses `gemini-3.6-flash`; assistant, summary, and refinement use `gemini-3.5-flash-lite`.
 
-Configured per-project limits and in-process concurrency:
+The following configured limits apply only to the web backend scheduler:
 
 | Task | Model order | RPM / RPD per project and model | Max active calls |
 |---|---|---:|---:|
@@ -40,11 +32,11 @@ The server also limits each Firebase user to 20 API requests per minute. Documen
 
 ## OCR and multi-page PDFs
 
-The Drive-connected client saves the original document to Drive; the offline-first native APK instead saves it in the app's private filesystem. Both send the PDF to the server for OCR when a network connection is available. PDFs are split server-side into batches of up to five pages and processed sequentially. A PDF may contain up to 60 pages. Each batch is routed independently through the same quota scheduler; successful batch results are merged in page order with page-specific notes and de-duplicated diagnoses, medications, and metrics. The merged result is stored as one timeline event per source file. If OCR identifies a subject, the client matches or creates that member and saves automatically. If no subject name is extracted, the client requires the user to enter a name and create a new member before assigning and saving the extracted data. The original remains marked as unresolved until the save succeeds.
+The Drive-connected client saves the original document to Drive; the offline-first native APK instead saves it in the app's private filesystem. Web requests send PDFs to the backend for OCR. The APK splits PDFs locally into sequential batches of up to five pages and calls Gemini directly. A PDF may contain up to 60 pages. Batch results are merged in page order with de-duplicated diagnoses, medications, and metrics. The merged result is stored as one timeline event per source file. If OCR identifies a subject, the client matches or creates that member and saves automatically. If no subject name is extracted, the client requires the user to enter a name and create a new member before assigning and saving the extracted data. The original remains marked as unresolved until the save succeeds.
 
-Progress SSE reports completed page ranges and quota/model activity. A heartbeat is sent while Gemini is working. If a batch ultimately fails, the overall extraction fails explicitly and the original Drive file remains available for retry/manual entry. Multiple selected files are processed sequentially; the queue pauses for required new-member creation when OCR cannot identify a name. The user can defer that file, allowing the rest of the queue to continue; the original can be retried from the OCR recovery prompt or the raw-files manager.
+Web progress SSE reports completed page ranges and quota/model activity. Native progress is updated after each batch completes. If a batch fails, extraction fails explicitly and the original remains available for retry/manual entry. Multiple selected files are processed sequentially; the queue pauses for required new-member creation when OCR cannot identify a name. The user can defer that file, allowing the rest of the queue to continue; the original can be retried from the OCR recovery prompt or raw-files manager.
 
-The server's in-flight work and quota counters are process-local, not durable or shared across replicas. On web, the client stores only OCR recovery metadata (Drive file ID, progress, and status) in localStorage; it does not persist health profiles, document bytes, extracted medical data, access tokens, or Gemini keys there. The native APK retains local workspace/profile metadata and original document bytes in app-private storage, even without a Google Drive account. Gemini calls still require a network connection. Local-only data is never uploaded or merged automatically; after connecting Drive and opening a destination workspace, the user can explicitly confirm a one-way copy. The local copy is retained on the device. Browser-selected files still waiting in the upload queue are not persisted. Durable server jobs and shared quota accounting require a backend job/quota store, which is not configured in this deployment.
+The server's in-flight work and quota counters are process-local, not durable or shared across replicas. On web, the client stores only OCR recovery metadata in localStorage and sends AI requests to the backend. The native APK retains local workspace/profile metadata and original document bytes in app-private storage, even without a Google Drive account. Gemini calls require a network connection and a linked shared workspace containing `ai-resources.json`. Local-only data is never uploaded or merged automatically; after connecting Drive and opening a destination workspace, the user can explicitly confirm a one-way copy. The local copy is retained on the device. Browser-selected files still waiting in the upload queue are not persisted.
 
 ## Requests
 

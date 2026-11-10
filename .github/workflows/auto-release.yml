@@ -90,33 +90,6 @@ jobs:
           npm run lint
           npm test
 
-      - name: Validate AI backend URL
-        env:
-          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
-        run: |
-          node --input-type=module -e "
-            const value = process.env.VITE_BACKEND_URL?.trim();
-            if (!value) throw new Error('Set the VITE_BACKEND_URL GitHub Actions secret to the deployed HTTPS AI backend before building Android.');
-            const url = new URL(value);
-            if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash) {
-              throw new Error('VITE_BACKEND_URL must be an HTTPS origin without a path, query, or fragment.');
-            }
-            const response = await fetch(new URL('/api/gemini/status', url), {
-              redirect: 'manual',
-              signal: AbortSignal.timeout(15000),
-            });
-            if (response.status !== 200) {
-              throw new Error('The configured AI backend must return HTTP 200 directly from /api/gemini/status (redirects are not supported).');
-            }
-            const status = await response.json();
-            if (!status.hasKeyConfig || status.configuredProjects < 1) {
-              throw new Error('The AI backend is reachable but has no GEMINI_API_KEY(S) configured.');
-            }
-            if (status.ocr?.primaryModel !== 'gemini-3.5-flash-lite') {
-              throw new Error('The AI backend does not report the expected OCR model configuration.');
-            }
-          "
-
       # 5. Khởi tạo lại hoàn toàn thư mục Android nếu bị rỗng / thiếu file build.gradle
       - name: Generate Fresh Android Project
         run: |
@@ -320,7 +293,6 @@ jobs:
           VITE_APP_MODE: apk
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
           VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
-          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
         run: npm run build
 
       - name: Sync APK Assets to Android
@@ -351,7 +323,6 @@ jobs:
         env:
           VITE_APP_MODE: play
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
-          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
         run: npm run build
 
       - name: Sync AAB Assets to Android

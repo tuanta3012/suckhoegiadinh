@@ -25,6 +25,7 @@ import {
   History,
   Info,
   LayoutGrid,
+  KeyRound,
   LoaderCircle,
   LogIn,
   LogOut,
@@ -53,6 +54,7 @@ import { Capacitor } from '@capacitor/core';
 import { Camera as CapacitorCamera } from '@capacitor/camera';
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppUpdateModal } from './AppUpdateModal';
+import { AiResourcesModal } from './AiResourcesModal';
 import { useAppUpdate } from '../hooks/useAppUpdate';
 import { AppLogo } from './AppLogo';
 import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
@@ -78,6 +80,7 @@ import {
   flushPendingHealthProfileSaves,
   factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
+  loadSharedAiResources,
   type HealthDriveWorkspace,
   openHealthWorkspace,
   loadHealthProfile,
@@ -170,6 +173,7 @@ import {
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
 import { digitizationLogger } from '../utils/digitizationLogger';
+import { setSharedGeminiKeys, trackSharedGeminiKeysLoad } from '../utils/geminiSharedResources';
 import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
 import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
@@ -485,6 +489,7 @@ export function HealthDashboard({
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [showRawFilesModal, setShowRawFilesModal] = useState(false);
+  const [showAiResourcesModal, setShowAiResourcesModal] = useState(false);
   const memberMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -1329,6 +1334,38 @@ export function HealthDashboard({
         workspace?.family.adminEmail &&
         userEmail.trim().toLowerCase() === workspace.family.adminEmail.trim().toLowerCase())
   );
+
+  useEffect(() => {
+    if (
+      !driveAuthorized ||
+      !workspace ||
+      workspace.rootFolderId === 'local_offline_workspace'
+    ) {
+      setSharedGeminiKeys([]);
+      return;
+    }
+
+    let active = true;
+    const loading = loadSharedAiResources(workspace.rootFolderId)
+      .then(({ keys }) => {
+        if (active) setSharedGeminiKeys(keys);
+      });
+    trackSharedGeminiKeysLoad(loading);
+    void loading
+      .catch((error: unknown) => {
+        if (!active) return;
+        console.error('[AI resources] Could not load shared Gemini keys.', error);
+        showToast(
+          error instanceof Error ? `Không tải được Tài nguyên AI: ${error.message}` : 'Không tải được Tài nguyên AI từ Drive.',
+          'error',
+        );
+        setSharedGeminiKeys([]);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [driveAuthorized, showToast, workspace?.rootFolderId]);
 
   const selectedMember = members.find((m) => m.id === selectedMemberId) || members[0] || null;
   const selectedProfile = selectedMember ? profiles[selectedMember.id] : null;
@@ -4253,7 +4290,25 @@ export function HealthDashboard({
                     <span>Xuất log file</span>
                   </button>
 
-                  {/* 5. Phiên bản */}
+                  {/* 5. Tài nguyên AI */}
+                  <button
+                    type="button"
+                    disabled={
+                      !driveAuthorized ||
+                      !workspace ||
+                      workspace.rootFolderId === 'local_offline_workspace'
+                    }
+                    onClick={() => {
+                      setShowSettingsDropdown(false);
+                      setShowAiResourcesModal(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold disabled:opacity-40"
+                  >
+                    <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Tài nguyên AI</span>
+                  </button>
+
+                  {/* 6. Phiên bản */}
                   <button
                     type="button"
                     disabled={isCheckingUpdate}
@@ -5953,6 +6008,14 @@ export function HealthDashboard({
         onFactoryReset={handleFactoryReset}
         showToast={showToast}
       />
+      {workspace && (
+        <AiResourcesModal
+          isOpen={showAiResourcesModal}
+          folderId={workspace.rootFolderId}
+          isAdmin={isWorkspaceAdmin}
+          onClose={() => setShowAiResourcesModal(false)}
+        />
+      )}
       <UploadMemberPickerModal
         isOpen={showUploadMemberPicker}
         members={members}
