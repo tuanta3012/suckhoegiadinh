@@ -44,20 +44,22 @@ const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).c
 });
 let anonymousSignInInFlight: Promise<User> | null = null;
 
-export async function ensureGeminiAuthUser(): Promise<User> {
+export async function ensureGeminiAuthUser(): Promise<User | null> {
   await firebasePersistenceReady;
   if (auth.currentUser) return auth.currentUser;
-  if (!isNative) {
-    throw new Error('Vui lòng đăng nhập tài khoản Google để sử dụng tính năng AI Gemini.');
+  try {
+    if (!anonymousSignInInFlight) {
+      anonymousSignInInFlight = signInAnonymously(auth)
+        .then(({ user }) => user)
+        .finally(() => {
+          anonymousSignInInFlight = null;
+        });
+    }
+    return await anonymousSignInInFlight;
+  } catch (error) {
+    console.warn('[Firebase Auth] Anonymous sign in unavailable, continuing with guest access:', error);
+    return null;
   }
-  if (!anonymousSignInInFlight) {
-    anonymousSignInInFlight = signInAnonymously(auth)
-      .then(({ user }) => user)
-      .finally(() => {
-        anonymousSignInInFlight = null;
-      });
-  }
-  return anonymousSignInInFlight;
 }
 
 export function getGoogleAccessToken(): string | null {

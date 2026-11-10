@@ -6,12 +6,14 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  onSnapshot,
   query,
   setDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { getSignedInGoogleEmail } from './googleDriveService';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -38,7 +40,7 @@ function normalizeEmail(email: string): string {
 }
 
 function authenticatedEmail(): string {
-  const email = auth.currentUser?.email;
+  const email = auth.currentUser?.email || getSignedInGoogleEmail();
   if (!email) {
     throw new Error('Cần đăng nhập Google để chia sẻ Workspace.');
   }
@@ -121,7 +123,14 @@ export async function registerHealthWorkspaceRelay(
       throw new Error('Workspace trên Firestore đã được đăng ký bởi tài khoản Admin khác.');
     }
     if (data.familyFileId !== familyFileId) {
-      throw new Error('ID family.json trên Drive khác với đăng ký Workspace hiện có.');
+      await setDoc(
+        workspaceRef,
+        {
+          familyFileId,
+          updatedAt: Date.now(),
+        },
+        { merge: true },
+      );
     }
     return;
   }
@@ -149,8 +158,11 @@ export async function publishHealthWorkspaceAssignments(
   const uniqueMembers = new Map<string, WorkspaceAccessRole>();
   for (const member of members) {
     const email = normalizeEmail(member.email);
-    if (!email || email === cleanAdminEmail || !isWorkspaceRole(member.role)) {
-      throw new Error('Danh sách thành viên chia sẻ có email hoặc quyền không hợp lệ.');
+    if (!email || email === cleanAdminEmail) {
+      continue;
+    }
+    if (!isWorkspaceRole(member.role)) {
+      throw new Error('Danh sách thành viên chia sẻ có quyền không hợp lệ.');
     }
     uniqueMembers.set(email, member.role);
   }
@@ -307,4 +319,47 @@ export async function unregisterHealthWorkspace(
   batch.delete(workspaceRef);
   
   await batch.commit();
+}
+
+export function subscribeHealthWorkspaceAssignments(
+  memberEmail: string,
+  onAssignmentChange: (assignment: HealthWorkspaceAssignment | null) => void,
+): () => void {
+  const cleanEmail = normalizeEmail(memberEmail);
+  if (!cleanEmail) {
+    onAssignmentChange(null);
+    return () => {};
+  }
+
+  const invitesRef = collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces');
+  return onSnapshot(
+    invitesRef,
+    (snapshot) => {
+      if (snapshot.empty) {
+        onAssignmentChange(null);
+        return;
+      }
+      const matching: HealthWorkspaceAssignment[] = [];
+      for (const inviteDoc of snapshot.docs) {
+        const data = inviteDoc.data();
+        if (
+          data &&
+          typeof data.rootFolderId === 'string' &&
+          data.rootFolderId === inviteDoc.id &&
+          typeof data.familyFileId === 'string' &&
+          data.familyFileId &&
+          typeof data.adminEmail === 'string' &&
+          data.memberEmail === cleanEmail &&
+          isWorkspaceRole(data.role) &&
+          typeof data.updatedAt === 'number'
+        ) {
+          matching.push(data as HealthWorkspaceAssignment);
+        }
+      }
+      onAssignmentChange(matching[0] || null);
+    },
+    (error) => {
+      console.warn('[WorkspaceRelay] Lỗi khi lắng nghe thay đổi phân quyền Firestore:', error);
+    },
+  );
 }

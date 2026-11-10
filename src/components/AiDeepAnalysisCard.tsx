@@ -17,6 +17,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import type { AiAnalysisBlock, AiDeepAnalysisResult, MedicalHistory } from '../types';
+import { formatDateVN } from '../utils/formatters';
 
 interface AiDeepAnalysisCardProps {
   analysis: AiDeepAnalysisResult | undefined;
@@ -147,7 +148,7 @@ export function AiDeepAnalysisCard({
     'text-rose-600 bg-rose-50 border-rose-200';
 
   const formattedDate = analysis?.analyzedAt
-    ? new Date(analysis.analyzedAt).toLocaleDateString('vi-VN')
+    ? formatDateVN(analysis.analyzedAt)
     : 'Chưa có';
 
   return (

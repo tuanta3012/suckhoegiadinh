@@ -17,15 +17,17 @@ import { buildApiUrl } from './apiConfig';
 import { digitizationLogger } from './digitizationLogger';
 import { classifyHealthEventType, isHealthEventType } from './healthEventType';
 import { callNativeGeminiEndpoint } from './nativeGeminiTasks';
-import { generateNativeGeminiContent } from './geminiSharedResources';
+import { generateNativeGeminiContent, getSharedGeminiKeys } from './geminiSharedResources';
 import { splitPdfIntoBatches, PdfPageBatchError } from './pdfPageBatches';
 import { mergeExtractedBatches, type ExtractedPageBatch } from './healthDocumentExtraction';
 
-async function getAuthenticatedUserToken(): Promise<string> {
-  const user = await ensureGeminiAuthUser();
-  // Mã ID Token được Firebase cấp cho cả người dùng "Ẩn danh" (Anonymous) 
-  // để máy chủ xác thực và ngăn chặn các cuộc tấn công lạm dụng API.
-  return user.getIdToken();
+async function getAuthenticatedUserToken(): Promise<string | null> {
+  try {
+    const user = await ensureGeminiAuthUser();
+    return user ? await user.getIdToken() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function performServerFetch(url: string, init: RequestInit): Promise<Response> {
@@ -75,15 +77,43 @@ export interface ExtractionProgressUpdate {
   processedPages?: number;
 }
 
-/**
- * Routes web requests through Express and native requests directly through the shared Gemini keys.
- */
-async function callServerGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
-  if (Capacitor.isNativePlatform()) {
-    digitizationLogger.log('info', 'api', `Gọi trực tiếp Gemini trên thiết bị: ${endpoint}`, { endpoint });
-    return callNativeGeminiEndpoint<T>(endpoint, body);
+export function cleanErrorMessage(rawMessage?: string): string {
+  if (!rawMessage) return 'Có lỗi xảy ra khi xử lý dịch vụ AI.';
+  let msg = typeof rawMessage === 'string' ? rawMessage.trim() : String(rawMessage);
+
+  for (let depth = 0; depth < 3; depth++) {
+    if ((msg.startsWith('{') && msg.endsWith('}')) || (msg.startsWith('[') && msg.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.error === 'string') msg = parsed.error;
+          else if (typeof parsed.error?.message === 'string') msg = parsed.error.message;
+          else if (typeof parsed.message === 'string') msg = parsed.message;
+          else break;
+        } else break;
+      } catch {
+        break;
+      }
+    } else break;
   }
 
+  if (/DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(msg)) {
+    return 'Yêu cầu AI xử lý bị quá thời gian chờ từ máy chủ Google (504 Deadline Exceeded). Vui lòng thử lại.';
+  }
+  if (/RESOURCE_EXHAUSTED|429|quota/i.test(msg)) {
+    return 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau ít phút.';
+  }
+  if (/503|UNAVAILABLE|high demand|overloaded/i.test(msg)) {
+    return 'Máy chủ AI Google hiện đang bận hoặc quá tải (503 Service Unavailable). Vui lòng thử lại sau ít giây.';
+  }
+
+  return msg;
+}
+
+/**
+ * Routes requests through the Express server-side Gemini service.
+ */
+async function callServerGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const getDuration = digitizationLogger.startTimer();
   digitizationLogger.log('info', 'api', `Bắt đầu gọi API server: /api/gemini/${endpoint}`, { endpoint });
   const token = await getAuthenticatedUserToken();
@@ -91,14 +121,20 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
   const timeout = window.setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     response = await performServerFetch(buildApiUrl(`/api/gemini/${endpoint}`), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
       signal: controller.signal,
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        ...body,
+        clientGeminiKeys: getSharedGeminiKeys(),
+      }),
     });
   } catch (error) {
     const durationMs = getDuration();
@@ -111,6 +147,10 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
         durationMs,
       );
       throw new Error('Yêu cầu Gemini quá thời gian chờ. Hãy thử lại với tài liệu nhỏ hơn.');
+    }
+    if (Capacitor.isNativePlatform() && getSharedGeminiKeys().length > 0) {
+      digitizationLogger.log('warn', 'api', `Chuyển sang xử lý trực tiếp trên thiết bị cho ${endpoint}`);
+      return callNativeGeminiEndpoint<T>(endpoint, body);
     }
     digitizationLogger.log(
       'error',
@@ -127,7 +167,11 @@ async function callServerGemini<T>(endpoint: string, body: Record<string, unknow
   const durationMs = getDuration();
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.success) {
-    const errorMsg = data?.error || `Máy chủ Gemini trả về mã lỗi ${response.status}.`;
+    if (Capacitor.isNativePlatform() && getSharedGeminiKeys().length > 0) {
+      digitizationLogger.log('warn', 'api', `Server trả về mã lỗi ${response.status}, kích hoạt fallback native`);
+      return callNativeGeminiEndpoint<T>(endpoint, body);
+    }
+    const errorMsg = cleanErrorMessage(data?.error || `Máy chủ Gemini trả về mã lỗi ${response.status}.`);
     digitizationLogger.log(
       'error',
       'api',
@@ -425,22 +469,6 @@ export async function extractHealthEventWithProgress(
     modelUsed: 'gemini-3.5-flash-lite',
   });
 
-  if (Capacitor.isNativePlatform()) {
-    try {
-      return await extractNativeHealthEvent(file, member, mimeType, base64Data, onProgress, getDuration);
-    } catch (error) {
-      digitizationLogger.log(
-        'error',
-        'ocr_error',
-        `Lỗi OCR trực tiếp cho "${file.name}": ${error instanceof Error ? error.message : 'Lỗi không xác định'}`,
-        { fileName: file.name },
-        getDuration(),
-      );
-      throw error;
-    }
-  }
-
-  const user = await ensureGeminiAuthUser();
   const controller = new AbortController();
   let abortReason: 'idle' | 'total' | null = null;
   const totalTimeout = window.setTimeout(() => {
@@ -457,12 +485,16 @@ export async function extractHealthEventWithProgress(
   };
   renewIdleTimeout();
   try {
+    const token = await getAuthenticatedUserToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     const response = await performServerFetch(buildApiUrl('/api/gemini/extract-health-event'), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${await user.getIdToken()}`,
-      },
+      headers,
       signal: controller.signal,
       body: JSON.stringify({
         base64Data,
@@ -470,12 +502,17 @@ export async function extractHealthEventWithProgress(
         member,
         fileName: file.name,
         stream: true,
+        clientGeminiKeys: getSharedGeminiKeys(),
       }),
     });
 
     if (!response.ok) {
+      if (Capacitor.isNativePlatform() && getSharedGeminiKeys().length > 0) {
+        digitizationLogger.log('warn', 'ocr', 'Máy chủ OCR báo lỗi, kích hoạt fallback native trên thiết bị');
+        return await extractNativeHealthEvent(file, member, mimeType, base64Data, onProgress, getDuration);
+      }
       const errorBody = await response.json().catch(() => null) as { error?: string } | null;
-      throw new Error(errorBody?.error || `Máy chủ OCR trả về mã lỗi ${response.status}.`);
+      throw new Error(cleanErrorMessage(errorBody?.error || `Máy chủ OCR trả về mã lỗi ${response.status}.`));
     }
     if (!response.body) throw new Error('Máy chủ OCR không trả về luồng tiến trình.');
 
@@ -523,7 +560,7 @@ export async function extractHealthEventWithProgress(
         if (typeof data.totalPages === 'number') docTotalPages = data.totalPages;
         if (typeof data.processedPages === 'number') docProcessedPages = data.processedPages;
 
-        if (data.type === 'error') throw new Error(data.error || 'Máy chủ OCR không thể xử lý tài liệu.');
+        if (data.type === 'error') throw new Error(cleanErrorMessage(data.error || 'Máy chủ OCR không thể xử lý tài liệu.'));
         if (data.type === 'progress') {
           const isRetry = data.message?.includes('phương án dự phòng') || data.message?.includes('Đang thử mô hình');
           if (isRetry) {
@@ -801,32 +838,39 @@ export async function streamHealthAssistant(
   profile: HealthProfile,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  if (Capacitor.isNativePlatform()) {
-    const data = await callNativeGeminiEndpoint<{ answer: string }>('ask-assistant', {
-      question,
-      member,
-      profile,
-    });
-    if (typeof data.answer !== 'string' || !data.answer.trim()) {
-      throw new Error('Trợ lý AI chưa trả về câu trả lời hợp lệ. Vui lòng thử lại.');
-    }
-    onChunk(data.answer);
-    return data.answer;
-  }
-
   const token = await getAuthenticatedUserToken();
   let response: Response;
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     response = await performServerFetch(buildApiUrl('/api/gemini/ask-assistant'), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
       signal: AbortSignal.timeout(ASSISTANT_REQUEST_TIMEOUT_MS),
-      body: JSON.stringify({ question, member, profile, stream: true }),
+      body: JSON.stringify({
+        question,
+        member,
+        profile,
+        stream: true,
+        clientGeminiKeys: getSharedGeminiKeys(),
+      }),
     });
   } catch (error) {
+    if (Capacitor.isNativePlatform() && getSharedGeminiKeys().length > 0) {
+      const data = await callNativeGeminiEndpoint<{ answer: string }>('ask-assistant', {
+        question,
+        member,
+        profile,
+      });
+      if (typeof data.answer === 'string' && data.answer.trim()) {
+        onChunk(data.answer);
+        return data.answer;
+      }
+    }
     if (error instanceof Error && error.name === 'TimeoutError') {
       throw new Error('Yêu cầu tới trợ lý AI quá hạn (Hết thời gian chờ).');
     }
@@ -835,6 +879,17 @@ export async function streamHealthAssistant(
   }
 
   if (!response.ok) {
+    if (Capacitor.isNativePlatform() && getSharedGeminiKeys().length > 0) {
+      const data = await callNativeGeminiEndpoint<{ answer: string }>('ask-assistant', {
+        question,
+        member,
+        profile,
+      });
+      if (typeof data.answer === 'string' && data.answer.trim()) {
+        onChunk(data.answer);
+        return data.answer;
+      }
+    }
     const errorBody = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(errorBody?.error || `Máy chủ trợ lý AI trả về mã lỗi ${response.status}.`);
   }

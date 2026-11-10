@@ -179,6 +179,7 @@ import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
 import { formatDateVN, formatDateTimeVN, isSamePersonName, normalizeVietnameseProperName } from '../utils/formatters';
+import { DatePickerVN } from './DatePickerVN';
 import { findMemberByOcrPatientName, isRecognizablePatientName } from '../utils/ocrSubjectRouting';
 import {
   updateBatchNotificationProgress,
@@ -537,8 +538,8 @@ export function HealthDashboard({
   const [pendingLocalUploadCount, setPendingLocalUploadCount] = useState(0);
   const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
 
-  // Refs to maintain fresh data in async queue closure
   const workspaceRef = useRef<HealthDriveWorkspace | null>(null);
+  const isCreatingWorkspaceRef = useRef(false);
   const profilesRef = useRef<Record<string, HealthProfile>>({});
   const shouldRefreshCachedWorkspaceRef = useRef(
     Capacitor.isNativePlatform() &&
@@ -1336,31 +1337,28 @@ export function HealthDashboard({
   );
 
   useEffect(() => {
-    if (
-      !driveAuthorized ||
-      !workspace ||
-      workspace.rootFolderId === 'local_offline_workspace'
-    ) {
-      setSharedGeminiKeys([]);
-      return;
-    }
-
     let active = true;
-    const loading = loadSharedAiResources(workspace.rootFolderId)
-      .then(({ keys }) => {
-        if (active) setSharedGeminiKeys(keys);
-      });
+    const folderId =
+      driveAuthorized && workspace && workspace.rootFolderId !== 'local_offline_workspace'
+        ? workspace.rootFolderId
+        : 'local_offline_workspace';
+
+    const loading = loadSharedAiResources(folderId).then(({ keys }) => {
+      if (active) setSharedGeminiKeys(keys);
+    });
     trackSharedGeminiKeysLoad(loading);
-    void loading
-      .catch((error: unknown) => {
-        if (!active) return;
-        console.error('[AI resources] Could not load shared Gemini keys.', error);
+    void loading.catch((error: unknown) => {
+      if (!active) return;
+      console.error('[AI resources] Could not load shared Gemini keys.', error);
+      if (folderId !== 'local_offline_workspace') {
         showToast(
-          error instanceof Error ? `Không tải được Tài nguyên AI: ${error.message}` : 'Không tải được Tài nguyên AI từ Drive.',
+          error instanceof Error
+            ? `Không tải được Tài nguyên AI: ${error.message}`
+            : 'Không tải được Tài nguyên AI từ Drive.',
           'error',
         );
-        setSharedGeminiKeys([]);
-      });
+      }
+    });
 
     return () => {
       active = false;
@@ -2059,6 +2057,10 @@ export function HealthDashboard({
       onConnectDrive();
       return;
     }
+    if (isCreatingWorkspaceRef.current) {
+      return;
+    }
+    isCreatingWorkspaceRef.current = true;
     setIsLoading(true);
     setErrorMessage('');
     try {
@@ -2131,6 +2133,7 @@ export function HealthDashboard({
       );
     } finally {
       setIsLoading(false);
+      isCreatingWorkspaceRef.current = false;
     }
   }
 
@@ -4293,16 +4296,11 @@ export function HealthDashboard({
                   {/* 5. Tài nguyên AI */}
                   <button
                     type="button"
-                    disabled={
-                      !driveAuthorized ||
-                      !workspace ||
-                      workspace.rootFolderId === 'local_offline_workspace'
-                    }
                     onClick={() => {
                       setShowSettingsDropdown(false);
                       setShowAiResourcesModal(true);
                     }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold disabled:opacity-40"
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
                   >
                     <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
                     <span>Tài nguyên AI</span>
@@ -4746,8 +4744,8 @@ export function HealthDashboard({
                                 </span>
                               ) : null}
                             </div>
-                            <p className="text-emerald-900/90 leading-snug font-medium line-clamp-1">
-                              {metricInfo.description.length > 80 ? metricInfo.description.slice(0, 77) + '...' : metricInfo.description}
+                            <p className="text-emerald-900/90 leading-relaxed font-medium">
+                              {metricInfo.description}
                             </p>
                           </div>
 
@@ -4864,7 +4862,7 @@ export function HealthDashboard({
                         <p className="text-[11px] text-slate-500 truncate">
                           {[
                             selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
-                            selectedMember.birthDate ? `Sinh ${selectedMember.birthDate}` : '',
+                            selectedMember.birthDate ? `Sinh ${formatDateVN(selectedMember.birthDate)}` : '',
                           ].filter(Boolean).join(' · ')}
                         </p>
                       )}
@@ -4955,40 +4953,21 @@ export function HealthDashboard({
                           key={event.id}
                           className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:border-emerald-300 transition-all space-y-3"
                         >
-                          {/* Event Header */}
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="flex items-start gap-3">
-                              <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
-                                <IconComp className="w-5 h-5" />
+                          {/* Event Header Top Bar */}
+                          <div className="flex items-center justify-between gap-3 w-full border-b border-slate-100 pb-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs border border-emerald-100/60">
+                                <IconComp className="w-4 h-4" />
                               </div>
-                              <div>
-                                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                  <span className="font-bold text-emerald-800">{opt.label}</span>
-                                  {event.customCategory && (
-                                    <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[11px] border border-slate-200">
-                                      {event.customCategory}
-                                    </span>
-                                  )}
-                                  <span aria-hidden="true">·</span>
-                                  <span className="font-mono tabular-nums">{formatDateVN(event.date) || 'Chưa rõ ngày'}</span>
-                                </div>
-                                <h4 className="text-base font-extrabold text-slate-900 mt-0.5">
-                                  {event.title}
-                                </h4>
-                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5 text-xs text-slate-600">
-                                  {event.facility && (
-                                    <p className="flex items-center gap-1">
-                                      <Stethoscope className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>{event.facility}</span>
-                                    </p>
-                                  )}
-                                  {event.doctorName && (
-                                    <p className="flex items-center gap-1 text-slate-700 font-medium">
-                                      <User className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>BS. {event.doctorName}</span>
-                                    </p>
-                                  )}
-                                </div>
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 min-w-0">
+                                <span className="font-bold text-emerald-800">{opt.label}</span>
+                                {event.customCategory && (
+                                  <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[11px] border border-slate-200">
+                                    {event.customCategory}
+                                  </span>
+                                )}
+                                <span aria-hidden="true" className="text-slate-300">·</span>
+                                <span className="font-mono tabular-nums text-slate-500">{formatDateVN(event.date) || 'Chưa rõ ngày'}</span>
                               </div>
                             </div>
 
@@ -5024,6 +5003,34 @@ export function HealthDashboard({
                                 <ExternalLink className="w-3.5 h-3.5" />
                                 <span className="hidden sm:inline">Tài liệu gốc</span>
                               </a>
+                            )}
+                          </div>
+
+                          {/* Event Title & Metadata Block (Full Width Edge-to-Edge) */}
+                          <div className="w-full space-y-2">
+                            <h4 className="text-base font-extrabold text-slate-900 leading-snug break-words w-full">
+                              {event.title}
+                            </h4>
+
+                            {(event.facility || event.doctorName) && (
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-x-4 gap-y-1.5 pt-1 text-xs text-slate-600 w-full">
+                                {event.facility && (
+                                  <p className="flex items-start gap-1.5 font-medium text-slate-700 min-w-0">
+                                    <Stethoscope className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                    <span className="break-words">{event.facility}</span>
+                                  </p>
+                                )}
+                                {event.doctorName && (
+                                  <p className="flex items-start gap-1.5 font-medium text-slate-700 min-w-0 sm:text-right shrink-0">
+                                    <User className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                    <span className="break-words">
+                                      {event.doctorName.toLowerCase().startsWith('bs') || event.doctorName.toLowerCase().startsWith('bác sĩ')
+                                        ? event.doctorName
+                                        : `BS. ${event.doctorName}`}
+                                    </span>
+                                  </p>
+                                )}
+                              </div>
                             )}
                           </div>
 
@@ -5109,7 +5116,7 @@ export function HealthDashboard({
                                     {vac.nextDoseDate && (
                                       <div className="mt-1 px-2 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-[11px] flex items-center gap-1">
                                         <Calendar className="w-3 h-3 text-amber-600" />
-                                        <span>Hẹn tiêm tiếp: {vac.nextDoseDate}</span>
+                                        <span>Hẹn tiêm tiếp: {formatDateVN(vac.nextDoseDate)}</span>
                                       </div>
                                     )}
                                     {vac.reactionNotes && (
@@ -5135,10 +5142,10 @@ export function HealthDashboard({
                                   <span><strong>Khoa:</strong> {event.hospitalization.department}</span>
                                 )}
                                 {event.hospitalization.admissionDate && (
-                                  <span><strong>Nhập viện:</strong> {event.hospitalization.admissionDate}</span>
+                                  <span><strong>Nhập viện:</strong> {formatDateVN(event.hospitalization.admissionDate)}</span>
                                 )}
                                 {event.hospitalization.dischargeDate && (
-                                  <span><strong>Ra viện:</strong> {event.hospitalization.dischargeDate}</span>
+                                  <span><strong>Ra viện:</strong> {formatDateVN(event.hospitalization.dischargeDate)}</span>
                                 )}
                               </div>
                               {event.hospitalization.treatmentSummary && (
@@ -5486,12 +5493,9 @@ export function HealthDashboard({
                         <label className="block text-[11px] font-bold text-slate-600 mb-1">
                           Ngày tháng năm sinh
                         </label>
-                        <input
-                          type="text"
+                        <DatePickerVN
                           value={newMemberBirthDate}
-                          onChange={(e) => setNewMemberBirthDate(e.target.value)}
-                          placeholder="DD/MM/YYYY (VD: 15/04/1990)"
-                          className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                          onChange={(val) => setNewMemberBirthDate(val)}
                         />
                       </div>
                       {/* 3. Giới tính */}
@@ -6008,14 +6012,12 @@ export function HealthDashboard({
         onFactoryReset={handleFactoryReset}
         showToast={showToast}
       />
-      {workspace && (
-        <AiResourcesModal
-          isOpen={showAiResourcesModal}
-          folderId={workspace.rootFolderId}
-          isAdmin={isWorkspaceAdmin}
-          onClose={() => setShowAiResourcesModal(false)}
-        />
-      )}
+      <AiResourcesModal
+        isOpen={showAiResourcesModal}
+        folderId={workspace?.rootFolderId || 'local_offline_workspace'}
+        isAdmin={isWorkspaceAdmin}
+        onClose={() => setShowAiResourcesModal(false)}
+      />
       <UploadMemberPickerModal
         isOpen={showUploadMemberPicker}
         members={members}
@@ -6254,7 +6256,7 @@ function DigitizationReviewModal({
             <div className="bg-white p-2 rounded-xl border border-slate-200">
               <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Ngày/Năm sinh</span>
               <span className="font-bold text-slate-900 truncate block mt-0.5">
-                {extracted.patientBirthDate || 'Chưa nhận dạng'}
+                {formatDateVN(extracted.patientBirthDate) || 'Chưa nhận dạng'}
               </span>
             </div>
             <div className="bg-white p-2 rounded-xl border border-slate-200">
@@ -6279,7 +6281,7 @@ function DigitizationReviewModal({
                 const gLabel = m.gender === 'male' ? 'Nam' : m.gender === 'female' ? 'Nữ' : 'Khác';
                 return (
                   <option key={m.id} value={m.id}>
-                    {m.name} ({gLabel}{m.birthDate ? ` · Sinh ${m.birthDate}` : ''})
+                    {m.name} ({gLabel}{m.birthDate ? ` · Sinh ${formatDateVN(m.birthDate)}` : ''})
                   </option>
                 );
               })}

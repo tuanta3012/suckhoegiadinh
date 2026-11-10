@@ -1,70 +1,96 @@
-# Tối ưu hóa Tốc độ "Siêu tốc" (Sheets-like Performance)
+# Kế Hoạch Khai Thác & Nâng Cấp Module Sẵn Có Cho Tự Động Liên Kết Kho Dữ Liệu & Đồng Bộ 2 Chiều
 
-Dự án Sổ tiết kiệm nhanh hơn vì nó chỉ quản lý **duy nhất 1 tệp ID** (Google Sheet). Dự án Sức khỏe hiện tại chậm hơn vì đang phải "quét" cả một hệ thống thư mục và nhiều tệp JSON riêng lẻ. 
+Kế hoạch này tập trung **khai thác 100% các module có sẵn trong dự án** (`src/utils/workspaceShareRelay.ts`, `src/utils/healthDriveService.ts`, `src/utils/googleDriveService.ts`), nâng cấp để tự động gắn nhãn nhận diện ứng dụng (`appProperties: { app: 'com.suckhoegiadinh.app' }`) trên Google Drive và thực hiện đồng bộ 2 chiều thời gian thực (real-time 2-way sync) cho thành viên gia đình khi đăng nhập bằng Gmail.
 
-Kế hoạch này sẽ thay đổi cách tiếp cận: Thay vì để app đi "tìm" folder trên Drive, chúng ta sẽ dùng Firestore làm một **"Sổ đăng ký" (Registry)**. Khi đó, việc liên kết kho dữ liệu sẽ diễn ra tức thì giống hệt như cách Google Sheets hoạt động.
+---
 
-### Đánh giá & Quyết định quan trọng
+## Phản Hồi & Khẳng Định Tái Sử Dụng Code Sẵn Có (Codebase Reuse & Enhancement Strategy)
 
 > [!IMPORTANT]
-> **Tại sao Sheets nhanh hơn?** Vì app chỉ cần lưu 1 cái "Pointer" (ID tệp).
-> **Giải pháp cho chúng ta**: Biến hệ thống Folder/JSON phức tạp thành một "Ảo ảnh" đơn giản bằng cách dùng Firestore Registry để lưu ID gốc.
+> **Khẳng định**: Chúng ta **tái sử dụng và nâng cấp mở rộng trực tiếp mã nguồn sẵn có**, hoàn toàn KHÔNG tạo mới các dịch vụ lặp lại hay phá vỡ cấu trúc hiện tại.
 
-- **Cải tiến 1: Firestore Registry (Bộ nhớ chỉ mục)**: Lưu cặp `{ userEmail: rootFolderId }` lên Firestore. Khi login, app lấy ID này và truy cập thẳng Drive, bỏ qua hoàn toàn bước "Quét Drive" (vốn là bước chậm nhất).
-- **Cải tiến 2: Atomic Creation (Khởi tạo gộp)**: Sử dụng kỹ thuật xử lý song song hoàn toàn để tạo thư mục và tệp cấu trúc. Người dùng sẽ thấy kho dữ liệu hiện ra sau 1-2 giây thay vì 10 giây.
-- **Cải tiến 3: Background Deletion (Xóa ảo)**: Khi bấm xóa, app xóa thông tin trong Firestore Registry ngay lập tức (phản hồi 0.1 giây). Việc xóa hàng nghìn tệp trên Drive sẽ được Server/Client dọn dẹp âm thầm, không bắt người dùng đứng chờ.
+### Các Module Sẵn Có Sẽ Được Khai Thác & Mở Rộng:
 
----
-
-### 1. Tổng quan & Mục tiêu
-
-- **Mục tiêu**: Đưa tốc độ kết nối và khởi tạo về mức **dưới 2 giây**, tương đương với trải nghiệm của các dự án dùng Google Sheets.
-- **Giá trị**: Xóa bỏ hoàn toàn cảm giác "lag" khi chuyển đổi giữa các tài khoản hoặc dọn dẹp dữ liệu.
-
----
-
-### 2. Trải nghiệm Người dùng & Giao diện
-
-- **Kết nối kho**: Vừa đăng nhập xong, danh sách thành viên hiện ra ngay (không còn vòng xoay "Đang quét Drive").
-- **Tạo kho mới**: Chỉ một hiệu ứng rung nhẹ (haptic) và thông báo "Kho dữ liệu đã sẵn sàng", trong khi Drive vẫn đang thực hiện các bước tạo folder ở nền.
-- **Xóa kho**: Biến mất ngay lập tức khỏi màn hình. App trở về trạng thái trắng như mới mua máy.
+1. **`src/utils/workspaceShareRelay.ts`** (Đã có sẵn):
+   - Đã có các hàm quản lý Firestore Relay: `registerHealthWorkspaceRelay`, `publishHealthWorkspaceAssignments`, `listHealthWorkspaceAssignments`, `findAdminWorkspaceRelay`.
+   - *Nâng cấp*: Bổ sung cơ chế tự động kích hoạt tra cứu thông tin phân quyền `health_workspace_invites` khi tài khoản thành viên vừa đăng nhập thành công.
+2. **`src/utils/healthDriveService.ts`** (Đã có sẵn):
+   - Đã có các hàm xử lý Drive & Manifest: `findExistingHealthWorkspace`, `openHealthWorkspace`, `resolveSingleFamilyManifestFile`, `saveHealthFamily`.
+   - *Nâng cấp*: Bổ sung thuộc tính `appProperties: { app: 'com.suckhoegiadinh.app' }` khi thao tác trên thư mục kho và tệp `family.json`, giúp việc quét nhận diện kho đạt tốc độ tối đa.
+3. **`src/utils/googleDriveService.ts`** (Đã có sẵn):
+   - Đã có quản lý phiên đăng nhập Google Auth (`ensureGoogleAuthInitialized`, `getValidGoogleAccessToken`).
+   - *Nâng cấp*: Kích hoạt tự động quét ngầm kho gia đình ngay khi khôi phục hoặc thiết lập xong phiên Google Auth.
 
 ---
 
-### 3. Các Quyết định Kỹ thuật & Đánh đổi
+## Quyết Định Đã Xác Nhận Qua Phỏng Vấn (User Review & Confirmed Decisions)
 
-- **Quyết định 1: Firestore là "Thư ký" tin cậy**
-    - *Cách làm*: Thay vì Drive Search API (rất chậm), ta dùng Firestore Query (rất nhanh).
-    - *Lợi ích*: Tốc độ tìm kiếm kho dữ liệu tăng 100 lần.
-- **Quyết định 2: Chấp nhận "Dữ liệu rác" tạm thời trên Drive**
-    - *Đánh đổi*: Nếu người dùng xóa kho rồi tắt app ngay, folder trên Drive có thể vẫn còn đó một lúc.
-    - *Xử lý*: Hệ thống Registry sẽ đánh dấu ID đó là "đã xóa", app sẽ không bao giờ nhìn thấy nó nữa. Việc dọn dẹp vật lý sẽ chạy khi app rảnh rỗi.
+- **Xác Nhận 1 (Folder ID & App Tagging)**: Không cần lưu `folderId` thủ công ở phía client. Hệ thống tự động ghi nhãn định danh ứng dụng (`appProperties: { app: 'com.suckhoegiadinh.app' }`) vào thư mục kho và tệp `family.json`. Khi thành viên đăng nhập, ứng dụng tự động quét thông minh trên Google Drive của người dùng theo nhãn ứng dụng kết hợp tra cứu Firestore.
+- **Xác Nhận 2 (Tự Động Kết Nối Đăng Nhập)**: Khi thành viên đăng nhập bằng Gmail, ứng dụng tự động gọi `listHealthWorkspaceAssignments` và quét Drive ngầm để mở kho dữ liệu ngay lập tức mà không cần nhập mã thủ công.
+- **Xác Nhận 3 (Đồng Bộ 2 Chiều Thời Gian Thực)**: Kết hợp bộ lắng nghe Firestore Snapshot (`workspaceShareRelay.ts`) với cơ chế kiểm tra dữ liệu thay đổi trên Drive để đồng bộ 2 chiều tức thì giữa Admin và các Thành viên.
 
 ---
 
-### 4. Kiến trúc Kỹ thuật & Chiến lược Dữ liệu
+## 1. Tổng Quan Kiến Trúc Tái Sử Dụng (Architecture Overview)
 
-```unicode
-┌─────────────────────────────────────────────────────────┐
-│                    HealthDashboard UI                   │
-│         (Thao tác tức thì với Registry ảo)              │
-└───────────────┬───────────────────────────────▲─────────┘
-                │                               │
-        [Registry Update]               [Registry Lookup]
-                │                               │
-┌───────────────▼───────────────────────────────┴─────────┐
-│                 Firestore Registry Service              │
-│      (Lưu trữ ID gốc: email -> folder_id, file_id)      │
-└───────────────┬───────────────────────────────┬─────────┘
-                │                               │
-    ┌───────────▼───────────┐       ┌───────────▼───────────┐
-    │   Background Worker   │       │   Google Drive API    │
-    │ (Dọn dẹp tệp vật lý)  │       │ (Lưu trữ nội dung y tế)│
-    └───────────────────────┘       └───────────────────────┘
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                     APP CLIENT LAYER (React / Zustand)                 │
+│                                                                        │
+│  ┌───────────────────────┐             ┌────────────────────────────┐  │
+│  │ googleDriveService.ts │             │   Family Workspace Context │  │
+│  │ (Google Auth Session) │             │ (State & UI Auto-re-render)│  │
+│  └───────────┬───────────┘             └─────────────▲──────────────┘  │
+│              │                                       │                 │
+└──────────────┼───────────────────────────────────────┼─────────────────┘
+               │ (1) Gmail Logged In                   │ (4) Bind Workspace
+               ▼                                       │
+┌──────────────────────────────────────────────────────┴─────────────────┐
+│                    AUTO DISCOVERY & SYNC ENGINE                        │
+│                                                                        │
+│  1. workspaceShareRelay.ts -> listHealthWorkspaceAssignments(email)    │
+│  2. healthDriveService.ts  -> findExistingHealthWorkspace()           │
+│     (Filtered by appProperties: app = 'com.suckhoegiadinh.app')        │
+│  3. healthDriveService.ts  -> resolveSingleFamilyManifestFile()       │
+└──────────────┬───────────────────────────────────────▲─────────────────┘
+               │ (2) Query & Tag                       │ (3) Push Live Data
+               ▼                                       │
+┌──────────────────────────────┐        ┌────────────────────────────────┐
+│   GOOGLE DRIVE API (v3)      │        │   FIRESTORE DATABASE (Relay)   │
+│  - healthDriveService.ts     │        │  - workspaceShareRelay.ts      │
+│  - appProperties Tagging     │        │  - health_workspace_relays     │
+│  - family.json Manifest      │        │  - health_workspace_invites    │
+└──────────────────────────────┘        └────────────────────────────────┘
 ```
 
-**Các bước thực hiện cụ thể**:
-1.  **Chỉnh sửa `workspaceShareRelay.ts`**: Thêm hàm `findAdminWorkspace(email)` để lấy ID kho từ Firestore.
-2.  **Cập nhật `findExistingHealthWorkspace`**: Ưu tiên gọi `findAdminWorkspace` trước. Chỉ quét Drive nếu không tìm thấy trên Firestore.
-3.  **Tối ưu `handleCreateWorkspace`**: Gọi các lệnh tạo folder Drive song song (`Promise.all`) và đăng ký ID vào Firestore ngay sau khi có ID thư mục gốc.
-4.  **Tối ưu `handleFactoryReset`**: Xóa bản ghi Firestore trước, sau đó mới gọi lệnh xóa Drive ở chế độ "không chờ đợi" (`non-blocking`).
+---
+
+## 2. Các Bước Nâng Cấp Chi Tiết Cho Codebase
+
+### Bước 1: Nâng Cấp `src/utils/healthDriveService.ts`
+- Bổ sung tham số `appProperties: { app: 'com.suckhoegiadinh.app' }` trong các lệnh tạo / cập nhật thư mục `createHealthWorkspace` và tệp `family.json`.
+- Cập nhật hàm `findExistingHealthWorkspace` để ưu tiên tìm kiếm theo `appProperties has { key='app' and value='com.suckhoegiadinh.app' }`, giúp tốc độ truy vấn Drive cực nhanh và không bị nhầm lẫn với các thư mục trùng tên khác.
+
+### Bước 2: Nâng Cấp `src/utils/workspaceShareRelay.ts`
+- Khai thác hàm `listHealthWorkspaceAssignments(memberEmail)` có sẵn để khi thành viên đăng nhập với `memberEmail`, hệ thống tự động tìm thấy thông tin `rootFolderId` và `familyFileId` do Admin chia sẻ.
+- Lắng nghe sự thay đổi trên tập tài liệu `health_workspace_invites/{memberEmail}` bằng `onSnapshot` để nếu Admin vừa thêm thành viên hoặc phân quyền mới, ứng dụng của thành viên sẽ lập tức nhận được thông báo và đồng bộ dữ liệu.
+
+### Bước 3: Tích Hợp Luồng Tự Động Đăng Nhập Vẫn Giữ Nguyên UI
+- Trong màn hình khởi chạy hoặc khi đăng nhập thành công (`ensureGoogleAuthInitialized`), tự động gọi chuỗi tìm kiếm:
+  1. Thử `workspaceShareRelay.ts` -> tìm phân quyền của email hiện tại.
+  2. Thử `healthDriveService.ts` -> tìm thư mục chứa nhãn `com.suckhoegiadinh.app` trên Drive.
+  3. Mở và tải `family.json` qua `resolveSingleFamilyManifestFile`.
+- Khi kết nối thành công, tự động cập nhật state giao diện người dùng mà không yêu cầu thêm thao tác thủ công.
+
+---
+
+## 3. Kiểm Thử & Bảo Đảm Chất Lượng (Testing & Verification Plan)
+
+- **Unit Tests**: Chạy toàn bộ 19 file test hiện có (`npm test -- --run`) để đảm bảo không làm gián đoạn các test case của `workspaceShareRelay.test.ts` và `healthDriveService.test.ts`.
+- **Biên dịch & Lint**: Chạy `compile_applet` và `lint_applet` đồng thời để xác nhận không phát sinh lỗi TypeScript.
+- **Khử trùng lặp**: Giữ nguyên cơ chế khóa đồng thời `resolveSingleFamilyManifestFile` đã xây dựng trước đó để ngăn ngừa việc tạo nhiều file `family.json`.
+
+---
+
+## Tóm Tắt Tiến Độ (Next Steps)
+Sau khi bạn duyệt kế hoạch điều chỉnh này, tôi sẽ tiến hành cập nhật trực tiếp vào `workspaceShareRelay.ts` và `healthDriveService.ts` để hoàn thiện tính năng.

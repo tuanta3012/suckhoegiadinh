@@ -4,8 +4,8 @@
  */
 export async function compressImageIfNeeded(
   file: File,
-  maxDimension = 1200,
-  quality = 0.75,
+  maxDimension = 1800,
+  quality = 0.88,
 ): Promise<File> {
   if (!file.type.startsWith('image/')) {
     return file;

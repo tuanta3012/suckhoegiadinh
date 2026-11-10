@@ -14,8 +14,15 @@ import {
   mergeHealthProfiles,
   parseHealthProfile,
 } from './healthProfile';
-import { findAdminWorkspaceRelay, registerHealthWorkspaceRelay, unregisterHealthWorkspace } from './workspaceShareRelay';
+import {
+  findAdminWorkspaceRelay,
+  publishHealthWorkspaceAssignments,
+  readHealthWorkspaceAssignment,
+  registerHealthWorkspaceRelay,
+  unregisterHealthWorkspace,
+} from './workspaceShareRelay';
 import { localSyncOutbox, supportsDurableOfflineQueue } from './localSyncOutbox';
+import { getLocalSavedGeminiKeys, saveLocalGeminiKeys } from './geminiSharedResources';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
@@ -245,7 +252,11 @@ function getCachedWorkspaceFileId(rootFolderId: string): string | undefined {
 }
 
 async function createFolder(name: string, parentId?: string): Promise<DriveFile> {
-  const metadata: Record<string, string | string[]> = { name, mimeType: FOLDER_MIME };
+  const metadata: Record<string, unknown> = {
+    name,
+    mimeType: FOLDER_MIME,
+    appProperties: { app: 'com.suckhoegiadinh.app' },
+  };
   if (parentId) metadata.parents = [parentId];
   return driveRequest<DriveFile>(`${DRIVE_API}/files?fields=${encodeURIComponent(FILE_FIELDS)}`, {
     method: 'POST',
@@ -261,7 +272,12 @@ async function uploadContent(
   parentId: string,
 ): Promise<DriveFile> {
   const boundary = `family-health-${crypto.randomUUID()}`;
-  const metadata = JSON.stringify({ name, mimeType, parents: [parentId] });
+  const metadata = JSON.stringify({
+    name,
+    mimeType,
+    parents: [parentId],
+    appProperties: { app: 'com.suckhoegiadinh.app' },
+  });
   const body = new Blob(
     [
       `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
@@ -342,7 +358,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     }
   }
 
-  // 2. Kiểm tra Firestore Shadow Index (Nếu đổi thiết bị)
+  // 2. Kiểm tra Firestore Shadow Index (Nếu Admin đổi thiết bị)
   try {
     const indexed = await findAdminWorkspaceRelay(userEmail);
     if (indexed) {
@@ -360,7 +376,38 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
       }
     }
   } catch (error) {
-    console.warn('[Discovery] Không thể tra cứu Firestore Index:', error);
+    console.warn('[Discovery] Không thể tra cứu Firestore Admin Index:', error);
+  }
+
+  // 2.5. Kiểm tra Lời mời chia sẻ từ Admin dành cho Thành viên qua Firestore
+  try {
+    const memberAssignment = await readHealthWorkspaceAssignment(userEmail);
+    if (memberAssignment) {
+      try {
+        const opened = await openHealthWorkspace(
+          memberAssignment.rootFolderId,
+          memberAssignment.familyFileId,
+        );
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              rootFolderId: memberAssignment.rootFolderId,
+              familyFileId: memberAssignment.familyFileId,
+            }),
+          );
+        }
+        return opened;
+      } catch (e) {
+        console.warn(
+          '[Discovery] Không thể mở kho dữ liệu từ lời mời chia sẻ Firestore:',
+          memberAssignment.rootFolderId,
+          e,
+        );
+      }
+    }
+  } catch (error) {
+    console.warn('[Discovery] Lỗi tra cứu lời mời chia sẻ Firestore cho Thành viên:', error);
   }
 
   // 3. Fallback: Quét Drive (Chậm nhất, chỉ chạy 1 lần duy nhất)
@@ -368,14 +415,12 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
     if (foldersToInspect.length === 0) return null;
 
-    // 3. Fast-path inspection: Look for family.json directly in root candidates
+    // 3. Fast-path inspection: Look for family.json directly in root candidates & auto-deduplicate
     const inspectionResults = await Promise.all(
       foldersToInspect.map(async (folder) => {
         try {
-          const manifestFiles = await listFiles(folder.id, 'family.json', JSON_MIME);
-          return manifestFiles.length > 0
-            ? { folder, manifestId: manifestFiles[0].id }
-            : null;
+          const manifest = await resolveSingleFamilyManifestFile(folder.id);
+          return manifest ? { folder, manifestId: manifest.id } : null;
         } catch {
           return null;
         }
@@ -418,7 +463,111 @@ export async function clearWorkspaceCache(userEmail: string): Promise<void> {
   }
 }
 
-export async function createHealthWorkspace(adminEmail: string, adminName?: string | null): Promise<HealthDriveWorkspace> {
+/**
+ * Tự động tìm kiếm và khử trùng lặp file family.json trong thư mục Workspace.
+ * Nếu phát hiện nhiều file family.json (do các luồng tạo song song hoặc Drive phân mảnh),
+ * hàm sẽ đọc nội dung tất cả các file để chọn file có dữ liệu hợp lệ, số thành viên nhiều nhất
+ * và cập nhật mới nhất, đồng thời tự động xóa bỏ triệt để các file trùng lặp thừa trên Drive.
+ */
+export async function resolveSingleFamilyManifestFile(rootFolderId: string): Promise<DriveFile | null> {
+  // Tìm kiếm không giới hạn MIME type để tránh bỏ sót do Drive gán nhầm MIME hoặc phân mảnh index
+  const files = await listFiles(rootFolderId, 'family.json');
+  if (files.length === 0) return null;
+  if (files.length === 1) return files[0];
+
+  console.warn(
+    `[Google Drive Deduplication] Phát hiện ${files.length} file family.json trong thư mục ${rootFolderId}. Đang tự động kiểm tra và dọn dẹp trùng lặp...`,
+  );
+
+  interface ScoredFile {
+    file: DriveFile;
+    memberCount: number;
+    isValidSchema: boolean;
+    updatedAtMs: number;
+  }
+
+  const scoredFiles = await Promise.all(
+    files.map(async (file): Promise<ScoredFile> => {
+      const fileModifiedMs = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
+      try {
+        const content = await driveRequest<HealthFamily>(
+          `${DRIVE_API}/files/${encodeURIComponent(file.id)}?alt=media`,
+          {},
+          true,
+        );
+        if (content && content.schemaVersion === 1 && Array.isArray(content.members)) {
+          const updatedAtMs = content.updatedAt
+            ? new Date(content.updatedAt).getTime()
+            : fileModifiedMs;
+          return {
+            file,
+            memberCount: content.members.length,
+            isValidSchema: true,
+            updatedAtMs,
+          };
+        }
+      } catch (err) {
+        console.warn(`[Google Drive Deduplication] Không thể đọc nội dung file ${file.id}:`, err);
+      }
+      return {
+        file,
+        memberCount: -1,
+        isValidSchema: false,
+        updatedAtMs: fileModifiedMs,
+      };
+    }),
+  );
+
+  // Sắp xếp: ưu tiên schema hợp lệ, nhiều thành viên nhất, rồi đến thời gian cập nhật mới nhất
+  scoredFiles.sort((a, b) => {
+    if (a.isValidSchema !== b.isValidSchema) return a.isValidSchema ? -1 : 1;
+    if (a.memberCount !== b.memberCount) return b.memberCount - a.memberCount;
+    return b.updatedAtMs - a.updatedAtMs;
+  });
+
+  const canonical = scoredFiles[0].file;
+  const duplicateIdsToDelete = scoredFiles.slice(1).map((s) => s.file.id);
+
+  console.info(
+    `[Google Drive Deduplication] Chọn file ${canonical.id} (chứa ${scoredFiles[0].memberCount} thành viên). Đang xóa ${duplicateIdsToDelete.length} file trùng lặp...`,
+  );
+
+  try {
+    await deleteDriveFilesBatch(duplicateIdsToDelete);
+    console.info(
+      `[Google Drive Deduplication] Đã dọn dẹp thành công ${duplicateIdsToDelete.length} file family.json trùng lặp.`,
+    );
+  } catch (deleteError) {
+    console.warn('[Google Drive Deduplication] Lỗi khi xóa các file trùng lặp thừa:', deleteError);
+  }
+
+  return canonical;
+}
+
+let createWorkspaceInFlight: Promise<HealthDriveWorkspace> | null = null;
+
+export async function createHealthWorkspace(
+  adminEmail: string,
+  adminName?: string | null,
+): Promise<HealthDriveWorkspace> {
+  if (createWorkspaceInFlight) {
+    console.info('[Google Drive] Đang có tiến trình tạo Workspace đang chạy, chờ tái sử dụng...');
+    return createWorkspaceInFlight;
+  }
+  createWorkspaceInFlight = (async () => {
+    try {
+      return await internalCreateHealthWorkspace(adminEmail, adminName);
+    } finally {
+      createWorkspaceInFlight = null;
+    }
+  })();
+  return createWorkspaceInFlight;
+}
+
+async function internalCreateHealthWorkspace(
+  adminEmail: string,
+  _adminName?: string | null,
+): Promise<HealthDriveWorkspace> {
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
   if (!cleanAdminEmail) throw new Error('Cần đăng nhập trước khi tạo Workspace gia đình.');
 
@@ -433,9 +582,10 @@ export async function createHealthWorkspace(adminEmail: string, adminName?: stri
       });
     }
 
-    const manifestFiles = await listFiles(existingRoot.id, 'family.json', JSON_MIME);
-    if (manifestFiles.length > 0) {
-      return openHealthWorkspace(existingRoot.id);
+    // Tự động kiểm tra và xử lý trùng lặp family.json nếu đã có
+    const existingManifest = await resolveSingleFamilyManifestFile(existingRoot.id);
+    if (existingManifest) {
+      return openHealthWorkspace(existingRoot.id, existingManifest.id);
     }
 
     const existingChildren = await listFiles(existingRoot.id);
@@ -519,19 +669,28 @@ export async function openHealthWorkspace(
   rootFolderId: string,
   knownManifestFileId?: string,
 ): Promise<HealthDriveWorkspace> {
-  // Tối ưu: Lấy metadata và nội dung song song nếu đã biết manifest ID
-  const cachedManifestFileId = knownManifestFileId || getCachedWorkspaceFileId(rootFolderId);
-  const manifestIdPromise = cachedManifestFileId
-    ? Promise.resolve(cachedManifestFileId)
-    : listFiles(rootFolderId, 'family.json', JSON_MIME).then(files => files[0]?.id);
+  const root = await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`,
+  );
+  if (root.mimeType !== FOLDER_MIME) {
+    throw new Error('ID được nhập không phải là thư mục Google Drive.');
+  }
 
-  const [root, manifestFileId] = await Promise.all([
-    driveRequest<DriveFile>(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`),
-    manifestIdPromise
-  ]);
+  // Tự động tìm và xử lý trùng lặp family.json nếu có
+  let manifestFileId: string | undefined = knownManifestFileId;
+  if (!manifestFileId) {
+    const canonicalManifest = await resolveSingleFamilyManifestFile(rootFolderId);
+    manifestFileId = canonicalManifest?.id || getCachedWorkspaceFileId(rootFolderId);
+  } else {
+    // Nếu knownManifestFileId được truyền vào, vẫn kích hoạt kiểm tra nền để dọn dẹp các bản trùng lặp thừa
+    void resolveSingleFamilyManifestFile(rootFolderId).catch((err) => {
+      console.warn('[Google Drive] Lỗi nền khi kiểm tra trùng lặp family.json:', err);
+    });
+  }
 
-  if (root.mimeType !== FOLDER_MIME) throw new Error('ID được nhập không phải là thư mục Google Drive.');
-  if (!manifestFileId) throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
+  if (!manifestFileId) {
+    throw new Error('Không tìm thấy family.json trong thư mục. Hãy kiểm tra thư mục hoặc tạo không gian mới.');
+  }
 
   const familyResponse = await driveRequest<HealthFamily>(
     `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
@@ -552,6 +711,27 @@ export async function openHealthWorkspace(
     },
   };
   cacheWorkspaceForAdmin(workspace);
+
+  // Tự động đăng ký Firestore Relay và đồng bộ phân quyền thành viên nếu là Admin
+  const currentEmail = getSignedInGoogleEmail();
+  if (currentEmail && familyResponse.adminEmail && currentEmail.trim().toLowerCase() === familyResponse.adminEmail.trim().toLowerCase()) {
+    const adminEmail = familyResponse.adminEmail.trim().toLowerCase();
+    const membersWithEmail = workspace.family.members
+      .filter((m) => m.email && m.email.trim())
+      .map((m) => ({ email: m.email!.trim(), role: 'EDITOR' as const }));
+
+    void (async () => {
+      try {
+        await registerHealthWorkspaceRelay(rootFolderId, manifestFileId!, adminEmail);
+        if (membersWithEmail.length > 0) {
+          await publishHealthWorkspaceAssignments(rootFolderId, manifestFileId!, adminEmail, membersWithEmail);
+        }
+      } catch (err) {
+        console.warn('[Relay Sync] Lỗi tự động đăng ký Firestore khi mở Workspace:', err);
+      }
+    })();
+  }
+
   return workspace;
 }
 
@@ -596,6 +776,25 @@ export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: 
         new Blob([JSON.stringify(next, null, 2)]),
         response.headers.get('etag') || undefined,
       );
+
+      // Tự động đồng bộ các thành viên có Email lên Firestore Relay nếu tài khoản hiện tại là Admin
+      const currentEmail = getSignedInGoogleEmail();
+      if (currentEmail && next.adminEmail && currentEmail.trim().toLowerCase() === next.adminEmail.trim().toLowerCase()) {
+        const membersWithEmail = next.members
+          .filter((m) => m.email && m.email.trim())
+          .map((m) => ({ email: m.email!.trim(), role: 'EDITOR' as const }));
+        if (membersWithEmail.length > 0) {
+          void publishHealthWorkspaceAssignments(
+            workspace.rootFolderId,
+            file.id,
+            next.adminEmail,
+            membersWithEmail,
+          ).catch((relayErr) => {
+            console.warn('[Relay Sync] Lỗi tự động đồng bộ email thành viên lên Firestore:', relayErr);
+          });
+        }
+      }
+
       return { ...workspace, familyFileId: file.id, family: next };
     } catch (error) {
       if (!(error instanceof DriveConflictError) || attempt === 2) throw error;
@@ -1003,42 +1202,79 @@ export async function downloadDriveFile(fileId: string): Promise<Blob> {
   return response.blob();
 }
 
-export async function loadSharedAiResources(folderId: string): Promise<SharedAiResources> {
-  const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME, JSON_MIME);
-  if (files.length === 0) return { keys: [] };
-  if (files.length > 1) {
-    throw new Error('Có nhiều file ai-resources.json trong folder. Hãy nhờ quản trị viên giữ lại một file.');
+export async function loadSharedAiResources(folderId?: string | null): Promise<SharedAiResources> {
+  if (!folderId || folderId === 'local_offline_workspace') {
+    return { keys: getLocalSavedGeminiKeys() };
   }
-  const blob = await downloadDriveFile(files[0].id);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(await blob.text());
+    const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME, JSON_MIME);
+    if (files.length === 0) {
+      // Nếu chưa có file trên Drive nhưng local đã có key lưu tạm, tự động tải lên Drive
+      const localKeys = getLocalSavedGeminiKeys();
+      if (localKeys.length > 0) {
+        try {
+          await saveSharedAiResources(folderId, localKeys);
+        } catch (syncErr) {
+          console.warn('[AI Resources] Không thể tự động đồng bộ key tạm lên Drive:', syncErr);
+        }
+        return { keys: localKeys };
+      }
+      return { keys: [] };
+    }
+    if (files.length > 1) {
+      throw new Error('Có nhiều file ai-resources.json trong folder. Hãy nhờ quản trị viên giữ lại một file.');
+    }
+    const blob = await downloadDriveFile(files[0].id);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await blob.text());
+    } catch (error) {
+      throw new Error('File Tài nguyên AI trên Drive bị lỗi định dạng JSON.', { cause: error });
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('keys' in parsed) ||
+      !Array.isArray(parsed.keys) ||
+      parsed.keys.some((key) => typeof key !== 'string')
+    ) {
+      throw new Error('File Tài nguyên AI trên Drive không có danh sách key hợp lệ.');
+    }
+    const driveKeys = Array.from(new Set(parsed.keys.map((key) => key.trim()).filter(Boolean)));
+    // Lưu vào local cache để dùng khi offline
+    saveLocalGeminiKeys(driveKeys);
+    return { keys: driveKeys };
   } catch (error) {
-    throw new Error('File Tài nguyên AI trên Drive bị lỗi định dạng JSON.', { cause: error });
+    // Nếu có lỗi mạng hoặc chưa truy cập được Drive, fallback sang key lưu tạm ở local
+    const localKeys = getLocalSavedGeminiKeys();
+    if (localKeys.length > 0) {
+      return { keys: localKeys };
+    }
+    throw error;
   }
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !('keys' in parsed) ||
-    !Array.isArray(parsed.keys) ||
-    parsed.keys.some((key) => typeof key !== 'string')
-  ) {
-    throw new Error('File Tài nguyên AI trên Drive không có danh sách key hợp lệ.');
-  }
-  return { keys: Array.from(new Set(parsed.keys.map((key) => key.trim()).filter(Boolean))) };
 }
 
-export async function saveSharedAiResources(folderId: string, keys: string[]): Promise<void> {
-  const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME, JSON_MIME);
-  if (files.length > 1) {
-    throw new Error('Có nhiều file ai-resources.json trong folder. Hãy nhờ quản trị viên giữ lại một file.');
+export async function saveSharedAiResources(folderId: string | null | undefined, keys: string[]): Promise<void> {
+  const cleanKeys = Array.from(new Set(keys.map((k) => k.trim()).filter(Boolean)));
+  // Luôn luôn lưu vào local cache trước
+  saveLocalGeminiKeys(cleanKeys);
+
+  if (!folderId || folderId === 'local_offline_workspace') {
+    return;
   }
+
+  const files = await listFiles(folderId, AI_RESOURCES_FILE_NAME);
   const content = new Blob(
-    [JSON.stringify({ schemaVersion: 1, keys, updatedAt: new Date().toISOString() }, null, 2)],
+    [JSON.stringify({ schemaVersion: 1, keys: cleanKeys, updatedAt: new Date().toISOString() }, null, 2)],
     { type: JSON_MIME },
   );
-  if (files.length === 1) {
+  if (files.length > 0) {
     await replaceContent(files[0].id, AI_RESOURCES_FILE_NAME, JSON_MIME, content);
+    if (files.length > 1) {
+      void deleteDriveFilesBatch(files.slice(1).map((f) => f.id)).catch((err) => {
+        console.warn('[Google Drive] Lỗi khi dọn dẹp các file ai-resources.json thừa:', err);
+      });
+    }
     return;
   }
   await uploadContent(AI_RESOURCES_FILE_NAME, JSON_MIME, content, folderId);

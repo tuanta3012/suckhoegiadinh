@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import type { FamilyMember } from '../types';
+import { DatePickerVN } from './DatePickerVN';
 
 export type EditableFamilyMember = Pick<
   FamilyMember,
@@ -20,7 +21,7 @@ function toDateInputValue(value?: string): string {
   if (isoDate) return value;
   const vnDate = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (vnDate) return `${vnDate[3]}-${vnDate[2].padStart(2, '0')}-${vnDate[1].padStart(2, '0')}`;
-  return '';
+  return value;
 }
 
 export function MemberEditModal({
@@ -97,15 +98,13 @@ export function MemberEditModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal"
             />
           </label>
-          <label className="text-xs font-semibold text-slate-700">
-            Ngày sinh
-            <input
-              type="date"
+          <div className="text-xs font-semibold text-slate-700">
+            <span className="block mb-1">Ngày sinh</span>
+            <DatePickerVN
               value={birthDate}
-              onChange={(event) => setBirthDate(event.target.value)}
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal"
+              onChange={(val) => setBirthDate(val)}
             />
-          </label>
+          </div>
           <label className="text-xs font-semibold text-slate-700">
             Giới tính
             <select
