@@ -3,8 +3,7 @@ import { Capacitor } from '@capacitor/core';
 /**
  * Returns the base backend API URL.
  * - On Web (browser): returns empty string '' to use same-origin relative requests (/api/gemini/...)
- * - On Native Android (APK) or APK build mode: returns the configured VITE_BACKEND_URL
- *   or falls back to the production Cloud Run host of the applet.
+ * - On Native Android: requires VITE_BACKEND_URL to point to a deployed backend.
  */
 export function getApiBaseUrl(): string {
   const envUrl = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
@@ -12,10 +11,10 @@ export function getApiBaseUrl(): string {
     return envUrl;
   }
 
-  // When running on Capacitor native Android, relative '/api/...' calls hit 'https://localhost/api/...'
-  // which will fail. We route to the deployed backend server.
   if (Capacitor.isNativePlatform() || import.meta.env.VITE_APP_MODE === 'apk') {
-    return 'https://ais-pre-imtbttibm2v2b4iq2k6rff-546075383474.asia-southeast1.run.app';
+    throw new Error(
+      'Chưa cấu hình máy chủ AI cho ứng dụng Android. Hãy đặt BACKEND_API_URL thành URL HTTPS của máy chủ API đã triển khai.',
+    );
   }
 
   return '';

@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { FileText, UserCheck, UserPlus, X, OctagonX, ChevronRight, AlertCircle } from 'lucide-react';
 import type { FamilyMember } from '../types';
+import { getWorkspaceMemberRole } from '../utils/memberOrdering';
 
 interface UnresolvedSubjectModalProps {
   fileName: string;
   isSaving: boolean;
   error?: string;
   members?: FamilyMember[];
+  adminEmail?: string | null;
   batchStatus?: { current: number; total: number } | null;
   existingMemberName?: string;
   onDefer: () => void;
@@ -20,6 +22,7 @@ export function UnresolvedSubjectModal({
   isSaving,
   error,
   members = [],
+  adminEmail,
   batchStatus,
   existingMemberName,
   onDefer,
@@ -86,7 +89,9 @@ export function UnresolvedSubjectModal({
               1. Chọn hồ sơ thành viên có sẵn trong gia đình:
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-1">
-              {members.map((member) => (
+              {members.map((member) => {
+                const memberRole = getWorkspaceMemberRole(member, adminEmail);
+                return (
                 <button
                   key={member.id}
                   type="button"
@@ -102,12 +107,13 @@ export function UnresolvedSubjectModal({
                       {member.name}
                     </div>
                     <div className="text-[10px] text-slate-400 font-medium">
-                      {member.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
+                      {memberRole}
                     </div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-600 shrink-0" />
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

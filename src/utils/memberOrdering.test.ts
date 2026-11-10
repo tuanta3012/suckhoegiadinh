@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { FamilyMember } from '../types';
-import { findMemberForEmail, isMemberForEmail, prioritizeMemberForEmail } from './memberOrdering';
+import {
+  findMemberForEmail,
+  getWorkspaceMemberRole,
+  isMemberForEmail,
+  prioritizeMemberForEmail,
+} from './memberOrdering';
 
 const members = [
   { id: 'm1', name: 'Lan', email: 'lan@example.com' },
@@ -23,5 +28,16 @@ describe('member ordering by signed-in email', () => {
   it('keeps the existing order when there is no matching email', () => {
     expect(prioritizeMemberForEmail(members, 'other@example.com')).toEqual(members);
     expect(prioritizeMemberForEmail(members, null)).toEqual(members);
+  });
+});
+
+describe('workspace member role labels', () => {
+  it('marks the profile matching the folder owner email as Admin', () => {
+    expect(getWorkspaceMemberRole(members[2], ' ha@example.com ')).toBe('Admin');
+  });
+
+  it('marks other profiles as Member, including when owner metadata is missing', () => {
+    expect(getWorkspaceMemberRole(members[0], 'admin@example.com')).toBe('Member');
+    expect(getWorkspaceMemberRole(members[0])).toBe('Member');
   });
 });

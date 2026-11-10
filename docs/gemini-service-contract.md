@@ -4,6 +4,12 @@ The client sends requests to the `/api/gemini/*` endpoints. The server verifies 
 
 Enable the Anonymous sign-in provider in Firebase Authentication for the APK's Firebase project. Without it, local storage remains available but Gemini requests fail with the Firebase authentication error.
 
+## Backend URL and native CORS
+
+Web builds use same-origin `/api/gemini/*` requests. Native builds require `VITE_BACKEND_URL`; Android release builds receive it from the GitHub Actions `BACKEND_API_URL` secret. Set that secret to the HTTPS origin of a publicly reachable deployment of this repository's Express server, not an AI Studio preview URL. The APK workflow rejects a missing or malformed URL instead of publishing an APK with a non-working OCR endpoint.
+
+The Express server permits Capacitor's `https://localhost` origin by default. Add any separately hosted web-app origins to the server's comma-separated `CORS_ALLOWED_ORIGINS` environment variable. The server handles authenticated `Authorization` preflight requests without enabling wildcard origins or credential cookies.
+
 ## Independent project configuration
 
 Configure Google API keys in the server-only `GEMINI_API_KEYS` environment variable. The legacy `GEMINI_API_KEY` variable is also accepted as a single-key fallback. Use keys from distinct Google projects when sharing quota:

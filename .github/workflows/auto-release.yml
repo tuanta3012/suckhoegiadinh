@@ -90,6 +90,26 @@ jobs:
           npm run lint
           npm test
 
+      - name: Validate AI backend URL
+        env:
+          BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+        run: |
+          node --input-type=module -e "
+            const value = process.env.BACKEND_API_URL?.trim();
+            if (!value) throw new Error('Set BACKEND_API_URL to the deployed HTTPS AI backend before building Android.');
+            const url = new URL(value);
+            if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash) {
+              throw new Error('BACKEND_API_URL must be an HTTPS origin without a path, query, or fragment.');
+            }
+            const response = await fetch(new URL('/api/gemini/status', url), {
+              redirect: 'manual',
+              signal: AbortSignal.timeout(15000),
+            });
+            if (response.status !== 200) {
+              throw new Error('The configured AI backend did not return HTTP 200 from /api/gemini/status.');
+            }
+          "
+
       # 5. Khởi tạo lại hoàn toàn thư mục Android nếu bị rỗng / thiếu file build.gradle
       - name: Generate Fresh Android Project
         run: |

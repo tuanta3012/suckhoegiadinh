@@ -102,6 +102,7 @@ import {
   readPendingMemberDeletions,
 } from '../utils/pendingMemberDeletions';
 import {
+  getWorkspaceMemberRole,
   findMemberForEmail,
   isMemberForEmail,
   prioritizeMemberForEmail,
@@ -218,11 +219,8 @@ function isLocalProfileFileId(fileId: string): boolean {
 }
 
 function createDefaultLocalWorkspace(
-  adminEmail: string | null, 
-  _adminName?: string | null,
-  emptyMembers = false
+  adminEmail: string | null,
 ): HealthDriveWorkspace {
-  const localMemberId = 'member_local_owner';
   return {
     rootFolderId: 'local_offline_workspace',
     familyFileId: 'local_family_file',
@@ -233,16 +231,7 @@ function createDefaultLocalWorkspace(
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       adminEmail: adminEmail || 'offline@user',
-      members: (Capacitor.isNativePlatform() && !emptyMembers)
-        ? [{
-            id: localMemberId,
-            name: _adminName?.trim() || 'Tôi',
-            email: adminEmail || undefined,
-            role: 'other',
-            driveFolderId: `local_folder_${localMemberId}`,
-            profileFileId: `local_profile_${localMemberId}`,
-          }]
-        : [],
+      members: [],
     },
   };
 }
@@ -251,12 +240,12 @@ function offlineCacheKey(baseKey: string, userEmail: string | null): string {
   return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
 }
 
-function loadNativeOfflineState(userEmail: string | null, userName?: string | null): {
+function loadNativeOfflineState(userEmail: string | null): {
   workspace: HealthDriveWorkspace;
   profiles: Record<string, HealthProfile>;
 } {
   const fallback = {
-    workspace: createDefaultLocalWorkspace(userEmail, userName),
+    workspace: createDefaultLocalWorkspace(userEmail),
     profiles: {} as Record<string, HealthProfile>,
   };
   if (fallback.workspace.rootFolderId === 'local_offline_workspace') {
@@ -421,7 +410,7 @@ export function HealthDashboard({
   onLogout,
   showToast,
 }: HealthDashboardProps) {
-  const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail, userName));
+  const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [rootIdInput, setRootIdInput] = useState('');
 
@@ -1174,7 +1163,7 @@ export function HealthDashboard({
     const canDeleteRemote = canDeleteDrive;
 
     // 2. Tạo trạng thái mới sạch sẽ ngay lập tức
-    const freshWs = createDefaultLocalWorkspace(userEmail, userName, true);
+    const freshWs = createDefaultLocalWorkspace(userEmail);
     const freshProf = {};
 
     // 3. Xóa cache "Sổ đăng ký" (Registry) ngay lập tức để Sync/Discovery không tìm lại folder cũ
@@ -2355,12 +2344,12 @@ export function HealthDashboard({
       showToast('Chỉ Quản trị viên mới có quyền xóa thành viên.', 'error');
       return;
     }
-    const normalizeEmail = (email?: string) => email?.trim().toLowerCase();
-    const isAdminProfile =
-      member.role === 'admin' &&
-      (workspace.rootFolderId === 'local_offline_workspace' ||
-        normalizeEmail(member.email) === normalizeEmail(workspace.family.adminEmail));
-    const isSelf = isAdminProfile || normalizeEmail(member.email) === normalizeEmail(userEmail);
+    const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || '';
+    const adminEmail = normalizeEmail(workspace.family.adminEmail);
+    const memberEmail = normalizeEmail(member.email);
+    const isAdminProfile = Boolean(adminEmail && memberEmail === adminEmail);
+    const signedInEmail = normalizeEmail(userEmail);
+    const isSelf = isAdminProfile || Boolean(signedInEmail && memberEmail === signedInEmail);
     const isLocalWorkspace = workspace.rootFolderId === 'local_offline_workspace';
     const isUnsyncedMember =
       member.driveFolderId.startsWith('local_folder_') &&
@@ -4045,7 +4034,7 @@ export function HealthDashboard({
                     <div className="max-h-60 overflow-y-auto space-y-0.5">
                       {members.map((m) => {
                         const isCurrent = m.id === selectedMember?.id;
-                        const isSignedInMember = isMemberForEmail(m, userEmail);
+                        const memberRole = getWorkspaceMemberRole(m, workspace?.family.adminEmail);
                         const count = profiles[m.id]?.timeline?.length || 0;
                         return (
                           <button
@@ -4066,11 +4055,13 @@ export function HealthDashboard({
                                 {m.name.charAt(0)}
                               </span>
                               <span className="truncate">{m.name}</span>
-                              {isSignedInMember && (
-                                <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">
-                                  Bạn
-                                </span>
-                              )}
+                              <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
+                                memberRole === 'Admin'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'bg-slate-100 text-slate-600'
+                              }`}>
+                                {memberRole}
+                              </span>
                             </div>
                             <span className="text-[10px] text-slate-400 font-mono tabular-nums shrink-0">
                               {count} mục
@@ -4753,6 +4744,7 @@ export function HealthDashboard({
                         const prof = profiles[m.id];
                         const eventCount = prof?.timeline?.length || 0;
                         const isChosen = m.id === selectedMember?.id;
+                        const memberRole = getWorkspaceMemberRole(m, workspace?.family.adminEmail);
                         return (
                           <div
                             key={m.id}
@@ -4775,11 +4767,13 @@ export function HealthDashboard({
                                   <h4 className="font-bold text-slate-900 text-xs truncate">
                                     {m.name}
                                   </h4>
-                                  {isMemberForEmail(m, userEmail) && (
-                                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 shrink-0">
-                                        Bạn
-                                      </span>
-                                    )}
+                                  <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold shrink-0 ${
+                                    memberRole === 'Admin'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}>
+                                    {memberRole}
+                                  </span>
                                 </div>
                                 <p className="text-[10px] text-slate-500 truncate">
                                   {eventCount} sự kiện y tế
@@ -5344,15 +5338,14 @@ export function HealthDashboard({
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <p className="font-bold text-slate-900 text-sm">{m.name}</p>
-                                {isMemberForEmail(m, userEmail) && (
-                                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
-                                      Bạn
-                                    </span>
-                                  )}
-                                {m.role === 'admin' && (
+                                {getWorkspaceMemberRole(m, workspace?.family.adminEmail) === 'Admin' ? (
                                   <span className="inline-flex items-center gap-1 text-[10px] font-black text-white bg-emerald-600 px-1.5 py-0.5 rounded shadow-sm uppercase tracking-tighter">
                                     <ShieldCheck className="w-2.5 h-2.5" />
                                     <span>Admin</span>
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded">
+                                    Member
                                   </span>
                                 )}
                                 {m.email && (
@@ -5863,6 +5856,7 @@ export function HealthDashboard({
           isSaving={isCreatingSubjectMember}
           error={digitizationError}
           members={members}
+          adminEmail={workspace?.family.adminEmail}
           batchStatus={queueStatus}
           existingMemberName={pendingSubjectMember?.name}
           onDefer={deferUnresolvedSubject}
@@ -5962,7 +5956,7 @@ export function HealthDashboard({
       <UploadMemberPickerModal
         isOpen={showUploadMemberPicker}
         members={members}
-        userEmail={userEmail}
+        adminEmail={workspace?.family.adminEmail}
         onClose={() => {
           setShowUploadMemberPicker(false);
           setPendingUploadFiles([]);
@@ -6530,14 +6524,14 @@ function stableSerialize(value: unknown): string {
 function UploadMemberPickerModal({
   isOpen,
   members,
-  userEmail,
+  adminEmail,
   onClose,
   onSelect,
   onAddNew,
 }: {
   isOpen: boolean;
   members: FamilyMember[];
-  userEmail: string | null;
+  adminEmail?: string | null;
   onClose: () => void;
   onSelect: (memberId?: string) => void;
   onAddNew: (name: string) => void;
@@ -6567,8 +6561,7 @@ function UploadMemberPickerModal({
           {/* Members List */}
           <div className="grid grid-cols-1 gap-2">
             {members.map((member) => {
-              const isSignedInMember =
-                isMemberForEmail(member, userEmail);
+              const memberRole = getWorkspaceMemberRole(member, adminEmail);
               return (
               <button
                 key={member.id}
@@ -6581,14 +6574,16 @@ function UploadMemberPickerModal({
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
                     <span className="font-bold text-slate-800 text-sm">{member.name}</span>
-                    {isSignedInMember && (
-                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">
-                        Bạn
-                      </span>
-                    )}
+                    <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
+                      memberRole === 'Admin'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {memberRole}
+                    </span>
                   </div>
                   <div className="text-[10px] text-slate-400 font-medium">
-                    {member.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
+                    {memberRole}
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all" />

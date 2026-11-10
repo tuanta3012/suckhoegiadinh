@@ -511,6 +511,32 @@ async function executeDigitizationWithFailover(
 async function startServer() {
   quotaScheduler = new GeminiQuotaScheduler(getConfiguredProjects());
   const app = express();
+  const allowedOrigins = new Set([
+    'https://localhost',
+    'http://localhost',
+    'capacitor://localhost',
+    ...(process.env.CORS_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  ]);
+
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const origin = req.header('Origin');
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.vary('Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(origin && allowedOrigins.has(origin) ? 204 : 403);
+      return;
+    }
+    next();
+  });
 
   // Status check endpoint
   app.get('/api/gemini/status', (_req: Request, res: Response) => {

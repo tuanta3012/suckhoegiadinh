@@ -12,6 +12,16 @@ export function isMemberForEmail(
   return Boolean(normalizedEmail && normalizeEmail(member.email) === normalizedEmail);
 }
 
+export function getWorkspaceMemberRole(
+  member: Pick<FamilyMember, 'email'>,
+  adminEmail?: string | null,
+): 'Admin' | 'Member' {
+  const normalizedAdminEmail = normalizeEmail(adminEmail);
+  return normalizedAdminEmail && normalizeEmail(member.email) === normalizedAdminEmail
+    ? 'Admin'
+    : 'Member';
+}
+
 export function findMemberForEmail(
   members: FamilyMember[],
   email?: string | null,

@@ -475,10 +475,13 @@ export async function extractHealthEventWithProgress(
     };
   } catch (error) {
     const durationMs = getDuration();
+    const networkError = error instanceof TypeError && /fetch/i.test(error.message);
     const errorMsg = controller.signal.aborted
       ? abortReason === 'idle'
         ? 'Không nhận được dữ liệu phản hồi từ AI trong 4 phút. Hãy kiểm tra kết nối mạng hoặc thử lại.'
         : 'Quá thời gian OCR tối đa (10 phút). Tệp vẫn được lưu an toàn trên Google Drive; bạn có thể bấm "Chạy lại OCR" hoặc nhập thủ công.'
+      : networkError
+        ? 'Không kết nối được máy chủ OCR (lỗi mạng hoặc CORS). Hãy kiểm tra BACKEND_API_URL trỏ tới máy chủ HTTPS đang hoạt động và máy chủ đã cho phép ứng dụng Android; tài liệu vẫn được giữ trên Google Drive.'
       : error instanceof Error
         ? error.message
         : 'Lỗi OCR không xác định';
@@ -486,11 +489,14 @@ export async function extractHealthEventWithProgress(
       'error',
       'ocr_error',
       `Lỗi xử lý OCR tài liệu "${file.name}": ${errorMsg}`,
-      { error: errorMsg, abortReason },
+      { error: errorMsg, abortReason, networkError },
       durationMs,
     );
     if (controller.signal.aborted) {
       throw new Error(errorMsg);
+    }
+    if (networkError) {
+      throw new Error(errorMsg, { cause: error });
     }
     throw error;
   } finally {
