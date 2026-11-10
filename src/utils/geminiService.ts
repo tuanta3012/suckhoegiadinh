@@ -311,7 +311,7 @@ export async function extractHealthEventWithProgress(
   };
   renewIdleTimeout();
   try {
-    const response = await fetch(buildApiUrl('/api/gemini/extract-health-event'), {
+    const response = await performServerFetch(buildApiUrl('/api/gemini/extract-health-event'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -658,7 +658,7 @@ export async function streamHealthAssistant(
   const token = await getAuthenticatedUserToken();
   let response: Response;
   try {
-    response = await fetch(buildApiUrl('/api/gemini/ask-assistant'), {
+    response = await performServerFetch(buildApiUrl('/api/gemini/ask-assistant'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -828,7 +828,7 @@ export async function analyzeComprehensiveHealth(
  */
 export async function fetchServerLogs(): Promise<any[]> {
   const token = await getAuthenticatedUserToken();
-  const response = await fetch(buildApiUrl('/api/gemini/digitization-logs'), {
+  const response = await performServerFetch(buildApiUrl('/api/gemini/digitization-logs'), {
     headers: {
       Authorization: `Bearer ${token}`,
     },
