@@ -155,7 +155,6 @@ export async function syncHealthWorkspaceMemberAssignments(
       );
     } catch (firestoreErr) {
       console.warn('[Firestore Relay] Không thể đồng bộ lời mời lên Firestore:', firestoreErr);
-      throw firestoreErr;
     }
 
     for (const email of staleEmails) {

@@ -206,14 +206,22 @@ export async function getValidGoogleAccessToken(): Promise<string> {
 }
 
 export async function signOutGoogle(): Promise<void> {
-  await clearAccessToken();
-  await signOut(auth);
+  try {
+    await clearAccessToken();
+  } catch (error) {
+    console.warn('[Google Auth] Error clearing access token:', error);
+  }
   if (isNative) {
     try {
       await GoogleAuth.signOut();
-    } catch {
-      // ignore native sign out errors
+    } catch (error) {
+      console.warn('[Google Auth] Error in GoogleAuth.signOut:', error);
     }
+  }
+  try {
+    await signOut(auth);
+  } catch (error) {
+    console.warn('[Google Auth] Error signing out Firebase Auth:', error);
   }
 }
 

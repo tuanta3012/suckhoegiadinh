@@ -266,33 +266,41 @@ export async function readHealthWorkspaceAssignment(
 export async function listHealthWorkspaceAssignments(
   rootFolderId: string,
 ): Promise<HealthWorkspaceAssignment[]> {
-  const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
-  const workspace = await getDoc(workspaceRef);
-  const currentEmail = authenticatedEmail();
-  if (!workspace.exists()) {
+  try {
+    const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
+    const workspace = await getDoc(workspaceRef);
+    const currentEmail = authenticatedEmail();
+    if (!workspace.exists()) {
+      return [];
+    }
+    const data = workspace.data();
+    if (!data.adminEmail || normalizeEmail(data.adminEmail) !== currentEmail) {
+      return [];
+    }
+
+    const members = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
+    return members.docs.map((snapshot) => {
+      const memberData = snapshot.data();
+      if (
+        memberData.rootFolderId !== rootFolderId ||
+        typeof memberData.familyFileId !== 'string' ||
+        normalizeEmail(memberData.adminEmail) !== currentEmail ||
+        memberData.memberEmail !== snapshot.id ||
+        !isWorkspaceRole(memberData.role) ||
+        (memberData.source !== undefined && memberData.source !== 'family_member') ||
+        typeof memberData.updatedAt !== 'number'
+      ) {
+        return null;
+      }
+      return memberData as HealthWorkspaceAssignment;
+    }).filter(Boolean) as HealthWorkspaceAssignment[];
+  } catch (error) {
+    if (isFirestorePermissionDenied(error)) {
+      return [];
+    }
+    console.warn('[WorkspaceRelay] Lỗi khi liệt kê phân quyền Workspace:', error);
     return [];
   }
-  const data = workspace.data();
-  if (!data.adminEmail || normalizeEmail(data.adminEmail) !== currentEmail) {
-    throw new Error('Chỉ Admin của Workspace mới được xem danh sách chia sẻ.');
-  }
-
-  const members = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
-  return members.docs.map((snapshot) => {
-    const memberData = snapshot.data();
-    if (
-      memberData.rootFolderId !== rootFolderId ||
-      typeof memberData.familyFileId !== 'string' ||
-      normalizeEmail(memberData.adminEmail) !== currentEmail ||
-      memberData.memberEmail !== snapshot.id ||
-      !isWorkspaceRole(memberData.role) ||
-      (memberData.source !== undefined && memberData.source !== 'family_member') ||
-      typeof memberData.updatedAt !== 'number'
-    ) {
-      throw new Error('Danh sách chia sẻ có bản ghi không hợp lệ.');
-    }
-    return memberData as HealthWorkspaceAssignment;
-  });
 }
 
 export async function removeHealthWorkspaceAssignment(
