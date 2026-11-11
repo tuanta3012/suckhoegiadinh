@@ -1,4 +1,4 @@
-import { generateNativeGeminiContent } from './geminiSharedResources';
+import { generateGeminiContent } from './geminiSharedResources';
 import { prepareDataForDeepDive } from './healthRecordService';
 
 type JsonRecord = Record<string, unknown>;
@@ -19,7 +19,7 @@ function stringify(value: unknown): string {
   return JSON.stringify(value ?? null, null, 2);
 }
 
-export async function callNativeGeminiEndpoint<T>(
+export async function callGeminiEndpoint<T>(
   endpoint: string,
   body: JsonRecord,
 ): Promise<T> {
@@ -72,10 +72,10 @@ HỒ SƠ ĐÃ TỐI ƯU: ${stringify(analysisProfile)}`;
       jsonResponse = true;
       break;
     default:
-      throw new Error(`Tác vụ Gemini "${endpoint}" chưa được hỗ trợ trực tiếp trên APK.`);
+      throw new Error(`Tác vụ Gemini "${endpoint}" chưa được hỗ trợ trực tiếp trong ứng dụng.`);
   }
 
-  const { text, modelUsed } = await generateNativeGeminiContent(
+  const { text, modelUsed } = await generateGeminiContent(
     model,
     [{ text: prompt }],
     { responseMimeType: jsonResponse ? 'application/json' : undefined },

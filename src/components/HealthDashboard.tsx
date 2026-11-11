@@ -138,7 +138,6 @@ import {
   extractHealthEventWithProgress,
   refineAndOrganizeMemberData,
   summarizeHealthProfile,
-  fetchServerLogs,
   type ExtractionProgressUpdate,
 } from '../utils/geminiService';
 import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
@@ -838,28 +837,38 @@ export function HealthDashboard({
       });
     } else {
       const finalTotal = currentStatus?.total || 1;
+      const failedCount = batchFailureCountRef.current;
+      const completedCount = Math.max(0, finalTotal - failedCount);
       uploadQueueRef.current = [];
       pendingUploadIdsRef.current = [];
       digitizationLogger.log(
-        'info',
+        failedCount > 0 ? 'warn' : 'info',
         'queue_finish',
-        `Đã số hóa thành công toàn bộ ${finalTotal} tệp trong hàng đợi! Bắt đầu kích hoạt chuỗi phân tích chuyên sâu tự động...`,
-        { totalFiles: finalTotal }
+        failedCount > 0
+          ? `Hoàn tất hàng đợi: ${completedCount}/${finalTotal} tệp xử lý xong, ${failedCount} tệp lỗi cần chạy lại.`
+          : `Đã số hóa thành công toàn bộ ${finalTotal} tệp trong hàng đợi! Bắt đầu kích hoạt chuỗi phân tích chuyên sâu tự động...`,
+        { totalFiles: finalTotal, completedFiles: completedCount, failedFiles: failedCount }
       );
       if (currentStatus) {
-        showToast(`Đã nhập dữ liệu xong toàn bộ ${finalTotal} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`, 'success');
+        showToast(
+          failedCount > 0
+            ? `Đã xử lý ${completedCount}/${finalTotal} tệp. ${failedCount} tệp lỗi vẫn được giữ lại để chạy lại OCR.`
+            : `Đã nhập dữ liệu xong toàn bộ ${finalTotal} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`,
+          failedCount > 0 ? 'info' : 'success',
+        );
         void updateBatchNotificationComplete({
           total: finalTotal,
           memberName: selectedMember?.name,
-          failedCount: batchFailureCountRef.current,
+          failedCount,
         });
         batchFailureCountRef.current = 0;
       }
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
       batchStagingMemberIdRef.current = undefined;
-      // Tự động kích hoạt toàn bộ luồng chuẩn hóa & phân tích 4 lớp sau khi tất cả các tệp hoàn tất
-      void runFamilyDoctorSummaryAfterQueue();
+      if (completedCount > 0) {
+        void runFamilyDoctorSummaryAfterQueue();
+      }
     }
   }
 
@@ -4443,26 +4452,13 @@ export function HealthDashboard({
                     onClick={async () => {
                       setShowSettingsDropdown(false);
                       try {
-                        let serverLogs: Awaited<ReturnType<typeof fetchServerLogs>> | undefined;
-                        let serverLogError: unknown;
-                        try {
-                          serverLogs = await fetchServerLogs();
-                        } catch (error) {
-                          serverLogError = error;
-                          console.warn('[Log export] Server logs unavailable; exporting local logs.', error);
-                        }
-                        const success = await digitizationLogger.exportLogsAsFile(serverLogs, {
+                        const success = await digitizationLogger.exportLogsAsFile(undefined, {
                           userEmail,
                           memberCount: members.length,
                           workspaceRoot: workspace?.rootFolderId,
                         });
                         if (success) {
-                          showToast(
-                            serverLogError
-                              ? 'Đã xuất file log trên thiết bị (không kết nối máy chủ).'
-                              : 'Đã xuất file log hệ thống thành công.',
-                            serverLogError ? 'info' : 'success',
-                          );
+                          showToast('Đã xuất file log trên thiết bị thành công.', 'success');
                         } else {
                           showToast('Không thể tạo file log.', 'error');
                         }

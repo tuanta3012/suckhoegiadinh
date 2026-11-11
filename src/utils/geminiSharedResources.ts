@@ -119,30 +119,7 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
     throw new Error('API key không được để trống.');
   }
 
-  // 1. Kiểm tra qua server API endpoint
-  try {
-    const serverRes = await fetch('/api/gemini/test-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: cleanKey }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (serverRes.ok) {
-      const data = await serverRes.json() as { modelUsed?: string };
-      return { valid: true, workingModel: data.modelUsed || 'gemini-3.1-flash-lite' };
-    }
-    if (serverRes.status === 400 || serverRes.status === 401 || serverRes.status === 403) {
-      const errData = await serverRes.json().catch(() => null) as { error?: string } | null;
-      throw new Error(errData?.error || 'API key không hợp lệ.');
-    }
-  } catch (serverErr) {
-    if (serverErr instanceof Error && /không hợp lệ/i.test(serverErr.message)) {
-      throw serverErr;
-    }
-    // Nếu server không phản hồi (offline/native), tiếp tục với fallback
-  }
-
-  // 2. Fallback kiểm tra trực tiếp (cho thiết bị native khi không kết nối server)
+  // Verify the key directly with Google so Web and APK use the same path.
   let modelsMetadataVerified = false;
   let discoveredModels: string[] = [];
   try {
@@ -233,23 +210,7 @@ export interface GeminiGenerateOptions {
   maxOutputTokens?: number;
 }
 
-function getModelFallbacks(model: string): string[] {
-  return Array.from(
-    new Set([
-      model,
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-2.0-flash-lite',
-      'gemini-1.5-pro',
-      'gemini-2.5-flash',
-      'gemini-flash-latest',
-      'gemini-3.5-flash-lite',
-      'gemini-3.1-flash-lite',
-    ]),
-  );
-}
-
-export async function generateNativeGeminiContent(
+export async function generateGeminiContent(
   model: string,
   contents: Array<Record<string, unknown>>,
   options: GeminiGenerateOptions = {},
@@ -259,42 +220,50 @@ export async function generateNativeGeminiContent(
     throw new Error('Chưa có Gemini API key. Hãy vào menu "Tài nguyên AI" để nhập key.');
   }
 
-  const response = await fetch('/api/gemini/generate-content', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      contents: contents.map((content) => {
-        if ('text' in content) return { role: 'user', parts: [{ text: content.text }] };
-        return {
-          role: 'user',
-          parts: [
-            ...(content.inlineData ? [{ inlineData: content.inlineData }] : []),
-            ...(content.text ? [{ text: content.text }] : []),
-          ],
-        };
-      }),
-      config: {
-        ...(options.systemInstruction
-          ? { systemInstruction: { parts: [{ text: options.systemInstruction }] } }
-          : {}),
-        generationConfig: {
-          ...(options.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
-          ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
-          ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-          ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
-        },
-      },
-      clientGeminiKeys: activeKeys,
-    }),
-    signal: AbortSignal.timeout(60000),
-  });
+  const requestBody = {
+    contents: contents.map((content) => ({
+      role: 'user',
+      parts: [
+        ...(content.inlineData ? [{ inlineData: content.inlineData }] : []),
+        ...(content.text ? [{ text: content.text }] : []),
+      ],
+    })),
+    ...(options.systemInstruction
+      ? { systemInstruction: { parts: [{ text: options.systemInstruction }] } }
+      : {}),
+    generationConfig: {
+      ...(options.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
+      ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
+      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
+    },
+  };
+  let lastError: Error | undefined;
 
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => null) as { error?: string } | null;
-    throw new Error(errorBody?.error || `Máy chủ Gemini trả về mã lỗi ${response.status}.`);
+  for (const key of activeKeys) {
+    try {
+      const response = await requestGemini<{
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      }>(
+        `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+        key,
+        requestBody,
+      );
+      const text = response.candidates?.[0]?.content?.parts
+        ?.flatMap((part) => typeof part.text === 'string' ? [part.text] : [])
+        .join('')
+        .trim();
+      if (!text) {
+        throw new Error(`Gemini không trả về nội dung cho model ${model}.`);
+      }
+      return { text, modelUsed: model };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
-  const data = await response.json() as { text: string; modelUsed: string };
-  return { text: data.text, modelUsed: data.modelUsed };
+  throw new Error(
+    `Không thể xử lý bằng Gemini với model ${model} qua các API key đã cấu hình. ${lastError?.message || ''}`.trim(),
+    { cause: lastError },
+  );
 }
