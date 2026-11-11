@@ -8,13 +8,34 @@ export interface PdfPageBatch {
 
 export class PdfPageBatchError extends Error {}
 
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  // Use a more memory-efficient way to convert large arrays to base64
+  let binary = '';
+  const len = bytes.byteLength;
+  const chunk = 8192;
+  for (let i = 0; i < len; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk) as unknown as number[]);
+  }
+  return btoa(binary);
+}
+
 /**
  * Accurately detects the exact number of pages in a PDF file from base64 or ArrayBuffer
  */
 export async function getPdfPageCount(base64OrArrayBuffer: string | ArrayBuffer): Promise<number> {
   try {
     const buffer = typeof base64OrArrayBuffer === 'string'
-      ? Buffer.from(base64OrArrayBuffer, 'base64')
+      ? base64ToUint8Array(base64OrArrayBuffer)
       : new Uint8Array(base64OrArrayBuffer);
     const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
     return pdfDoc.getPageCount();
@@ -34,9 +55,11 @@ export async function splitPdfIntoBatches(
   }
   let source: PDFDocument;
   try {
-    source = await PDFDocument.load(Buffer.from(base64Data, 'base64'));
+    // Luôn sử dụng ignoreEncryption: true để đọc được cả các file PDF có bảo vệ cơ bản
+    source = await PDFDocument.load(base64ToUint8Array(base64Data), { ignoreEncryption: true });
   } catch (error) {
-    throw new PdfPageBatchError('Không đọc được PDF. Tệp có thể bị hỏng hoặc được bảo vệ bằng mật khẩu.', { cause: error });
+    console.error('[PDF Split Error]:', error);
+    throw new PdfPageBatchError('Không đọc được PDF. Tệp có thể bị hỏng hoặc được bảo vệ mật khẩu nâng cao.', { cause: error });
   }
   const pageCount = source.getPageCount();
   console.info(`[OCR] PDF ${pageCount} pages detected.`);
@@ -50,7 +73,7 @@ export async function splitPdfIntoBatches(
     return [{
       firstPage: 1,
       lastPage: pageCount,
-      base64Data: Buffer.from(compressedBytes).toString('base64'),
+      base64Data: uint8ArrayToBase64(compressedBytes),
     }];
   }
 
@@ -67,7 +90,7 @@ export async function splitPdfIntoBatches(
     batches.push({
       firstPage: firstIndex + 1,
       lastPage: firstIndex + indices.length,
-      base64Data: Buffer.from(bytes).toString('base64'),
+      base64Data: uint8ArrayToBase64(bytes),
     });
   }
   return batches;
