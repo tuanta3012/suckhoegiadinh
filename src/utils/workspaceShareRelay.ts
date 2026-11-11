@@ -242,14 +242,23 @@ export async function readHealthAssignedFolder(
   memberEmail: string,
 ): Promise<HealthAssignedFolder | null> {
   const cleanEmail = normalizeEmail(memberEmail);
-  if (!cleanEmail || authenticatedEmail() !== cleanEmail) return null;
+  if (!cleanEmail) return null;
+  
+  try {
+    const currentEmail = authenticatedEmail();
+    if (currentEmail !== cleanEmail) return null;
+  } catch (error) {
+    // Không có phiên đăng nhập hợp lệ
+    return null;
+  }
 
   let snapshot;
   try {
     snapshot = await getDoc(assignedFolderRef(cleanEmail));
   } catch (error) {
     if (isFirestorePermissionDenied(error)) {
-      throw new Error('Firestore từ chối đọc health_assigned_folders. Hãy cập nhật Firestore Rules và kiểm tra email đăng nhập.');
+      console.warn('[WorkspaceRelay] Firestore từ chối đọc health_assigned_folders:', cleanEmail);
+      return null;
     }
     throw new Error('Không thể tải thông tin liên kết thư mục từ Firestore.');
   }
@@ -268,7 +277,8 @@ export async function readHealthAssignedFolder(
     !data.familyFileId.trim() ||
     typeof data.updatedAt !== 'number'
   ) {
-    throw new Error('Bản ghi health_assigned_folders không hợp lệ.');
+    console.warn('[WorkspaceRelay] Bản ghi health_assigned_folders không hợp lệ:', cleanEmail);
+    return null;
   }
   return data as HealthAssignedFolder;
 }

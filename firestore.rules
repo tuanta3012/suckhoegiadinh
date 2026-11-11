@@ -136,10 +136,10 @@ service cloud.firestore {
           && request.resource.data.updatedAt is number;
       }
 
-      allow get: if ownsEmail(memberEmail);
+      allow get: if signedIn() && authenticatedEmail() == memberEmail.lower();
       allow list: if false;
       allow create, update: if signedIn() && validAssignedFolder();
-      allow delete: if ownsEmail(memberEmail)
+      allow delete: if (signedIn() && authenticatedEmail() == memberEmail.lower())
         || (signedIn()
           && resource.data.adminEmail is string
           && resource.data.adminEmail.lower() == authenticatedEmail());
