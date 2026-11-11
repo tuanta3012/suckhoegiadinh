@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { FileText, UserCheck, UserPlus, X, OctagonX, ChevronRight, AlertCircle } from 'lucide-react';
 import type { FamilyMember } from '../types';
 import { getWorkspaceMemberRole } from '../utils/memberOrdering';
+import { isRecognizablePatientName } from '../utils/ocrSubjectRouting';
 
 interface UnresolvedSubjectModalProps {
   fileName: string;
@@ -11,6 +12,7 @@ interface UnresolvedSubjectModalProps {
   adminEmail?: string | null;
   batchStatus?: { current: number; total: number } | null;
   existingMemberName?: string;
+  suggestedSubjectName?: string;
   onDefer: () => void;
   onSelectExistingMember?: (member: FamilyMember) => void;
   onCreateMember: (name: string) => void;
@@ -25,14 +27,17 @@ export function UnresolvedSubjectModal({
   adminEmail,
   batchStatus,
   existingMemberName,
+  suggestedSubjectName,
   onDefer,
   onSelectExistingMember,
   onCreateMember,
   onCancelQueue,
 }: UnresolvedSubjectModalProps) {
-  const [name, setName] = useState('');
+  const [name, setName] = useState(suggestedSubjectName || '');
   const [showAddForm, setShowAddForm] = useState(members.length === 0);
-  const memberName = existingMemberName || name.trim();
+  const memberName = name.trim();
+  const canResolveSubject = isRecognizablePatientName(suggestedSubjectName);
+  const canCreateMember = isRecognizablePatientName(memberName);
 
   return (
     <div
@@ -70,6 +75,20 @@ export function UnresolvedSubjectModal({
               <span>Tệp:</span>
               <strong className="text-slate-900 truncate font-extrabold">{fileName}</strong>
             </p>
+            {suggestedSubjectName && (
+              <p className="mt-1 text-xs text-amber-800">
+                AI nhận diện: <strong>{suggestedSubjectName}</strong>. Hãy xác nhận hồ sơ trước khi lưu.
+              </p>
+            )}
+            {!canResolveSubject ? (
+              <p role="alert" className="mt-2 rounded-xl bg-rose-50 border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-800">
+                OCR chưa đọc được họ tên. Chọn hồ sơ có sẵn hoặc tạo hồ sơ mới để xác nhận gán thủ công.
+              </p>
+            ) : (
+              <p className="mt-2 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs font-semibold text-amber-900">
+                Chọn đúng người bệnh để xác nhận gán thủ công; tên OCR được giữ nguyên trong dữ liệu trích xuất.
+              </p>
+            )}
           </div>
           <button
             type="button"
@@ -83,7 +102,7 @@ export function UnresolvedSubjectModal({
         </div>
 
         {/* Existing Member Selection */}
-        {members.length > 0 && !existingMemberName && (
+        {members.length > 0 && (
           <div className="space-y-2">
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
               1. Chọn hồ sơ thành viên có sẵn trong gia đình:
@@ -119,61 +138,61 @@ export function UnresolvedSubjectModal({
         )}
 
         {/* Create New Member Form */}
-        {existingMemberName ? (
+        {existingMemberName && (
           <p className="rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900">
-            Đã tạo thành viên <strong className="font-extrabold text-emerald-950">{existingMemberName}</strong>. Bấm bên dưới để lưu tài liệu vào hồ sơ này.
+            Hồ sơ vừa tạo: <strong className="font-extrabold text-emerald-950">{existingMemberName}</strong>. Chọn hồ sơ này bên trên để tiếp tục gán.
           </p>
-        ) : (
-          <div className="space-y-2 pt-1 border-t border-slate-100">
-            {members.length > 0 && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  2. Hoặc tạo hồ sơ cho thành viên mới:
-                </span>
+        )}
+
+        <div className="space-y-2 pt-1 border-t border-slate-100">
+          {members.length > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Hoặc tạo hồ sơ thành viên mới:
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowAddForm(!showAddForm)}
+                className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>{showAddForm ? 'Thu gọn' : 'Tạo thành viên mới'}</span>
+              </button>
+            </div>
+          )}
+
+          {(showAddForm || members.length === 0) && (
+            <div className="space-y-2 bg-slate-50/80 p-3 rounded-2xl border border-slate-200">
+              <label className="block text-xs font-bold text-slate-700">
+                Họ và tên thành viên mới
+              </label>
+              <div className="flex gap-2">
+                <input
+                  autoFocus
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && canCreateMember && !isSaving) {
+                      onCreateMember(memberName);
+                    }
+                  }}
+                  placeholder="Nhập họ tên thành viên"
+                  disabled={isSaving}
+                  className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 placeholder:font-normal focus:border-emerald-500 focus:outline-none disabled:bg-slate-100"
+                />
                 <button
                   type="button"
-                  onClick={() => setShowAddForm(!showAddForm)}
-                  className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+                  disabled={isSaving || !canCreateMember}
+                  onClick={() => onCreateMember(memberName)}
+                  className="rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 text-xs font-bold text-white shrink-0 disabled:opacity-50 flex items-center gap-1 transition-colors"
                 >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>{showAddForm ? 'Thu gọn' : 'Tạo thành viên mới'}</span>
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>Tạo & Gán</span>
                 </button>
               </div>
-            )}
-
-            {(showAddForm || members.length === 0) && (
-              <div className="space-y-2 bg-slate-50/80 p-3 rounded-2xl border border-slate-200">
-                <label className="block text-xs font-bold text-slate-700">
-                  Họ và tên thành viên mới
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    autoFocus
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && memberName && !isSaving) {
-                        onCreateMember(memberName);
-                      }
-                    }}
-                    placeholder="Ví dụ: Nguyễn Văn A, Mẹ, Con gái..."
-                    disabled={isSaving}
-                    className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 placeholder:font-normal focus:border-emerald-500 focus:outline-none disabled:bg-slate-100"
-                  />
-                  <button
-                    type="button"
-                    disabled={isSaving || !memberName}
-                    onClick={() => onCreateMember(memberName)}
-                    className="rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 text-xs font-bold text-white shrink-0 disabled:opacity-50 flex items-center gap-1 transition-colors"
-                  >
-                    <UserCheck className="w-3.5 h-3.5" />
-                    <span>Tạo & Gán</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
 
         {error && (
           <p role="alert" className="rounded-2xl bg-rose-50 border border-rose-200 px-3.5 py-2.5 text-xs font-semibold text-rose-700">

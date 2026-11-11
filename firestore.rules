@@ -119,6 +119,32 @@ service cloud.firestore {
       allow delete: if ownsEmail(memberEmail) || workspaceAdmin(rootId);
     }
 
+    match /health_assigned_folders/{memberEmail} {
+      function validAssignedFolder() {
+        return request.resource.data.keys().hasOnly([
+            'folderId', 'status', 'adminEmail', 'memberEmail', 'familyFileId', 'updatedAt'
+          ])
+          && request.resource.data.folderId is string
+          && request.resource.data.folderId.size() > 0
+          && request.resource.data.status == 'active'
+          && request.resource.data.adminEmail is string
+          && request.resource.data.adminEmail.lower() == authenticatedEmail()
+          && request.resource.data.memberEmail is string
+          && request.resource.data.memberEmail.lower() == memberEmail.lower()
+          && request.resource.data.familyFileId is string
+          && request.resource.data.familyFileId.size() > 0
+          && request.resource.data.updatedAt is number;
+      }
+
+      allow get: if ownsEmail(memberEmail);
+      allow list: if false;
+      allow create, update: if signedIn() && validAssignedFolder();
+      allow delete: if ownsEmail(memberEmail)
+        || (signedIn()
+          && resource.data.adminEmail is string
+          && resource.data.adminEmail.lower() == authenticatedEmail());
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

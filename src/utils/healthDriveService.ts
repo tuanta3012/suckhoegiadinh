@@ -18,6 +18,7 @@ import {
   findAdminWorkspaceRelay,
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
+  readHealthAssignedFolder,
   readHealthWorkspaceAssignment,
   removeHealthWorkspaceAssignment,
   registerHealthWorkspaceRelay,
@@ -35,6 +36,8 @@ const JSON_MIME = 'application/json';
 const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size';
 const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
 const AI_RESOURCES_FILE_NAME = 'ai-resources.json';
+const HEALTH_APP_ID = 'com.suckhoegiadinh.app';
+const workspaceAssignmentSyncQueues = new Map<string, Promise<void>>();
 
 export interface SharedAiResources {
   keys: string[];
@@ -71,6 +74,7 @@ export interface DriveFile {
   size?: string;
   parents?: string[];
   trashed?: boolean;
+  appProperties?: Record<string, string>;
 }
 
 export interface HealthDriveWorkspace {
@@ -91,13 +95,44 @@ function normalizedEmail(email?: string | null): string {
   return email?.trim().toLowerCase() || '';
 }
 
+function assertWorkspaceAdmin(workspace: HealthDriveWorkspace, action: string): void {
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) return;
+  const adminEmail = normalizedEmail(workspace.family.adminEmail);
+  if (!adminEmail || normalizedEmail(getSignedInGoogleEmail()) !== adminEmail) {
+    throw new Error(`Chỉ Admin của Workspace mới được ${action}.`);
+  }
+}
+
 export async function syncHealthWorkspaceMemberAssignments(
   workspace: HealthDriveWorkspace,
   removedEmails: string[] = [],
 ): Promise<void> {
   if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) return;
+  const previous = workspaceAssignmentSyncQueues.get(workspace.rootFolderId);
+  const current = (previous || Promise.resolve())
+    .catch(() => {})
+    .then(() => syncHealthWorkspaceMemberAssignmentsNow(workspace, removedEmails));
+  workspaceAssignmentSyncQueues.set(workspace.rootFolderId, current);
+  try {
+    await current;
+  } finally {
+    if (workspaceAssignmentSyncQueues.get(workspace.rootFolderId) === current) {
+      workspaceAssignmentSyncQueues.delete(workspace.rootFolderId);
+    }
+  }
+}
+
+async function syncHealthWorkspaceMemberAssignmentsNow(
+  workspace: HealthDriveWorkspace,
+  removedEmails: string[],
+): Promise<void> {
   const adminEmail = normalizedEmail(workspace.family.adminEmail);
-  if (!adminEmail || normalizedEmail(getSignedInGoogleEmail()) !== adminEmail) return;
+  if (!adminEmail) {
+    throw new Error('Workspace chưa có email Admin để đồng bộ quyền chia sẻ.');
+  }
+  if (normalizedEmail(getSignedInGoogleEmail()) !== adminEmail) {
+    throw new Error('Chỉ Admin của Workspace mới được đồng bộ quyền Drive và Firestore.');
+  }
 
   const familyEmails = new Set(
     workspace.family.members
@@ -132,15 +167,35 @@ export async function syncHealthWorkspaceMemberAssignments(
 
     const familyEmailList = [...familyEmails];
     for (let offset = 0; offset < familyEmailList.length; offset += 10) {
-      await Promise.all(
+      const permissionResults = await Promise.allSettled(
         familyEmailList.slice(offset, offset + 10).map(async (email) => {
-          try {
-            await ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR');
-          } catch (driveErr) {
-            console.warn(`[Drive Sharing] Không thể tự động cấp quyền Drive cho ${email}:`, driveErr);
-          }
+          await ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR');
         }),
       );
+      const permissionFailures = permissionResults.flatMap((result, index) =>
+        result.status === 'rejected'
+          ? [`${familyEmailList[offset + index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+          : [],
+      );
+      if (permissionFailures.length > 0) {
+        throw new Error(`Chưa thể xác nhận quyền Drive cho: ${permissionFailures.join('; ')}`);
+      }
+    }
+
+    const cleanupFailures: string[] = [];
+    for (const email of staleEmails) {
+      try {
+        await revokeDriveFolderAccess(workspace.rootFolderId, email);
+      } catch (revErr) {
+        console.warn(`[Drive Revoke] Không thể thu hồi quyền Drive của ${email}:`, revErr);
+        cleanupFailures.push(`${email}: ${revErr instanceof Error ? revErr.message : String(revErr)}`);
+      }
+      try {
+        await removeHealthWorkspaceAssignment(workspace.rootFolderId, email);
+      } catch (remErr) {
+        console.warn(`[Firestore Remove] Không thể xóa phân quyền của ${email}:`, remErr);
+        cleanupFailures.push(`${email}: ${remErr instanceof Error ? remErr.message : String(remErr)}`);
+      }
     }
 
     try {
@@ -157,23 +212,14 @@ export async function syncHealthWorkspaceMemberAssignments(
       console.warn('[Firestore Relay] Không thể đồng bộ lời mời lên Firestore:', firestoreErr);
     }
 
-    for (const email of staleEmails) {
-      try {
-        await revokeDriveFolderAccess(workspace.rootFolderId, email);
-      } catch (revErr) {
-        console.warn(`[Drive Revoke] Không thể thu hồi quyền Drive của ${email}:`, revErr);
-      }
-      try {
-        await removeHealthWorkspaceAssignment(workspace.rootFolderId, email);
-      } catch (remErr) {
-        console.warn(`[Firestore Remove] Không thể xóa phân quyền của ${email}:`, remErr);
-      }
+    if (cleanupFailures.length > 0) {
+      throw new Error(`Chưa thu hồi hoàn tất quyền của thành viên đã gỡ: ${cleanupFailures.join('; ')}`);
     }
   } catch (error) {
     if (error instanceof WorkspaceSharingSyncError) throw error;
     const reason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
     throw new WorkspaceSharingSyncError(
-      `family.json đã được cập nhật, nhưng chưa đồng bộ xong quyền Firestore: ${reason}`,
+      `family.json đã được cập nhật, nhưng chưa hoàn tất đồng bộ quyền Drive/Firestore: ${reason}`,
       workspace,
     );
   }
@@ -187,8 +233,13 @@ function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
-function reportDriveHttpError(response: Response): void {
-  if (response.ok || response.status === 401 || typeof window === 'undefined') return;
+function reportDriveHttpError(response: Response, ignoredErrorStatuses: number[] = []): void {
+  if (typeof window === 'undefined') return;
+  if (response.ok) {
+    window.dispatchEvent(new CustomEvent('google-drive-request-succeeded'));
+    return;
+  }
+  if (response.status === 401 || ignoredErrorStatuses.includes(response.status)) return;
   window.dispatchEvent(
     new CustomEvent('google-drive-request-error', {
       detail: { status: response.status },
@@ -201,13 +252,14 @@ async function performDriveFetch(
   init: RequestInit,
   headers: Headers,
   nativeJsonResponse: boolean,
+  ignoredErrorStatuses: number[] = [],
 ): Promise<Response> {
   const canUseNativeHttp = Capacitor.isNativePlatform() &&
     (nativeJsonResponse || !url.includes('alt=media')) &&
     (init.body === undefined || typeof init.body === 'string');
   if (!canUseNativeHttp) {
     const response = await fetch(url, { ...init, headers });
-    reportDriveHttpError(response);
+    reportDriveHttpError(response, ignoredErrorStatuses);
     return response;
   }
 
@@ -228,7 +280,7 @@ async function performDriveFetch(
     status: nativeResponse.status,
     headers: nativeResponse.headers,
   });
-  reportDriveHttpError(response);
+  reportDriveHttpError(response, ignoredErrorStatuses);
   return response;
 }
 
@@ -236,11 +288,20 @@ async function authenticatedDriveFetch(
   url: string,
   init: RequestInit = {},
   nativeJsonResponse = false,
+  ignoredErrorStatuses: number[] = [],
 ): Promise<Response> {
-  const token = await getValidGoogleAccessToken();
+  let token: string;
+  try {
+    token = await getValidGoogleAccessToken();
+  } catch (error) {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('google-drive-auth-expired'));
+    }
+    throw error;
+  }
   const headers = new Headers(init.headers);
   headers.set('Authorization', `Bearer ${token}`);
-  const response = await performDriveFetch(url, init, headers, nativeJsonResponse);
+  const response = await performDriveFetch(url, init, headers, nativeJsonResponse, ignoredErrorStatuses);
   if (response.status !== 401) return response;
 
   const refreshedToken = await trySilentRefresh(true);
@@ -251,7 +312,7 @@ async function authenticatedDriveFetch(
     throw new Error('Google Drive từ chối phiên hiện tại. Hãy đăng nhập lại để cấp quyền Drive.');
   }
   headers.set('Authorization', `Bearer ${refreshedToken}`);
-  return performDriveFetch(url, init, headers, nativeJsonResponse);
+  return performDriveFetch(url, init, headers, nativeJsonResponse, ignoredErrorStatuses);
 }
 
 async function driveRequest<T>(
@@ -315,6 +376,8 @@ async function listFiles(
       q: driveQuery(parentId, name, mimeType),
       fields: `nextPageToken,files(${FILE_FIELDS})`,
       pageSize: '1000',
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
     });
     if (!name) {
       params.set('orderBy', 'name');
@@ -465,6 +528,61 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
   );
 }
 
+export async function stampHealthWorkspaceFolder(folderId: string): Promise<void> {
+  const file = await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed,appProperties`,
+  );
+  if (file.trashed || file.mimeType !== FOLDER_MIME) {
+    throw new Error('ID được Firestore cấp không phải thư mục Drive đang hoạt động.');
+  }
+  if (file.appProperties?.app_id === HEALTH_APP_ID) return;
+
+  const appProperties = {
+    ...file.appProperties,
+    app_id: HEALTH_APP_ID,
+  };
+  await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,appProperties`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appProperties }),
+    },
+  );
+  const verified = await driveRequest<DriveFile>(
+    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,appProperties`,
+  );
+  if (verified.appProperties?.app_id !== HEALTH_APP_ID) {
+    throw new Error('Không xác nhận được nhãn ứng dụng trên thư mục Drive.');
+  }
+}
+
+async function openSharedHealthWorkspace(
+  rootFolderId: string,
+  familyFileId: string | undefined,
+  signedInEmail: string,
+  expectedAdminEmail?: string,
+): Promise<HealthDriveWorkspace> {
+  await stampHealthWorkspaceFolder(rootFolderId);
+  const workspace = await openHealthWorkspace(rootFolderId, familyFileId);
+  const normalizedMemberEmail = normalizedEmail(signedInEmail);
+  const normalizedAdminEmail = normalizedEmail(workspace.family.adminEmail);
+  if (
+    expectedAdminEmail &&
+    normalizedEmail(expectedAdminEmail) !== normalizedAdminEmail
+  ) {
+    throw new Error('Email quản trị trong family.json không khớp với lời mời Firestore.');
+  }
+  const isAdmin = normalizedMemberEmail && normalizedMemberEmail === normalizedAdminEmail;
+  const isFamilyMember = workspace.family.members.some(
+    (member) => normalizedEmail(member.email) === normalizedMemberEmail,
+  );
+  if (!isAdmin && !isFamilyMember) {
+    throw new Error('Email đang đăng nhập không có trong danh sách thành viên family.json.');
+  }
+  return workspace;
+}
+
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
   const userEmail = getSignedInGoogleEmail();
   if (!userEmail) return null;
@@ -478,11 +596,33 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     try {
       const { rootFolderId, familyFileId } = JSON.parse(cached);
       if (rootFolderId && familyFileId) {
-        return await openHealthWorkspace(rootFolderId, familyFileId);
+        return await openSharedHealthWorkspace(rootFolderId, familyFileId, userEmail);
       }
     } catch (e) {
       localStorage.removeItem(cacheKey);
     }
+  }
+
+  // 2. Firestore Handshake is preferred before scanning Drive.
+  try {
+    const assignedFolder = await readHealthAssignedFolder(userEmail);
+    if (assignedFolder) {
+      const opened = await openSharedHealthWorkspace(
+        assignedFolder.folderId,
+        assignedFolder.familyFileId,
+        userEmail,
+        assignedFolder.adminEmail,
+      );
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(cacheKey, JSON.stringify({
+          rootFolderId: opened.rootFolderId,
+          familyFileId: opened.familyFileId,
+        }));
+      }
+      return opened;
+    }
+  } catch (error) {
+    console.warn('[Discovery] Firestore folder handshake chưa hoàn tất; giữ lời mời để thử lại:', error);
   }
 
   // 2. Kiểm tra Firestore Shadow Index (Nếu Admin đổi thiết bị)
@@ -534,7 +674,51 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     console.warn('[Discovery] Lỗi tra cứu lời mời chia sẻ Firestore cho Thành viên:', error);
   }
 
-  // 3. Fallback: Quét Drive (Chậm nhất, chỉ chạy 1 lần duy nhất)
+  // 3. Auto-discover folders previously stamped by this app.
+  try {
+    const folders: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        q: `mimeType = '${FOLDER_MIME}' and trashed = false and sharedWithMe = true and appProperties has { key='app_id' and value='${HEALTH_APP_ID}' }`,
+        fields: `nextPageToken,files(${FILE_FIELDS},appProperties)`,
+        pageSize: '1000',
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const page = await driveRequest<{ files?: DriveFile[]; nextPageToken?: string }>(
+        `${DRIVE_API}/files?${params.toString()}`,
+      );
+      folders.push(...(page.files || []));
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+    const matched: HealthDriveWorkspace[] = [];
+    for (const folder of folders) {
+      try {
+        matched.push(await openSharedHealthWorkspace(folder.id, undefined, userEmail));
+      } catch (error) {
+        console.warn(`[Discovery] Không thể mở thư mục đã đóng dấu ${folder.id}:`, error);
+      }
+    }
+    if (matched.length > 1) {
+      throw new Error('Tìm thấy nhiều thư mục Sức khỏe Gia đình đã đóng dấu. Hãy nhờ Admin kiểm tra các kho trùng.');
+    }
+    const discovered = matched[0];
+    if (discovered) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(cacheKey, JSON.stringify({
+          rootFolderId: discovered.rootFolderId,
+          familyFileId: discovered.familyFileId,
+        }));
+      }
+      return discovered;
+    }
+  } catch (error) {
+    console.warn('[Discovery] Không thể quét thư mục đã đóng dấu:', error);
+  }
+
+  // 4. Fallback: Quét Drive (Chậm nhất, chỉ chạy 1 lần duy nhất)
   try {
     const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
     if (foldersToInspect.length === 0) return null;
@@ -559,7 +743,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
           console.warn('[Google Drive] Could not normalize legacy folder name.', error);
         });
       }
-      const opened = await openHealthWorkspace(folder.id, manifestId);
+      const opened = await openSharedHealthWorkspace(folder.id, manifestId, userEmail);
       
       // Đăng ký lại vào Firestore & localStorage để lần sau tìm nhanh hơn
       if (userEmail && opened.family.adminEmail === userEmail.trim().toLowerCase()) {
@@ -836,6 +1020,16 @@ export async function openHealthWorkspace(
   if (familyResponse.schemaVersion !== 1 || !Array.isArray(familyResponse.members)) {
     throw new Error('Tệp family.json không hợp lệ hoặc không được hỗ trợ.');
   }
+  const signedInEmail = normalizedEmail(getSignedInGoogleEmail());
+  const adminEmail = normalizedEmail(familyResponse.adminEmail);
+  if (
+    adminEmail &&
+    signedInEmail &&
+    signedInEmail !== adminEmail &&
+    !familyResponse.members.some((member) => normalizedEmail(member.email) === signedInEmail)
+  ) {
+    throw new Error('Email đang đăng nhập không còn trong danh sách thành viên Workspace.');
+  }
   const deletedMembers = mergeFamilyMemberTombstones(familyResponse.deletedMembers);
   const workspace = {
     rootFolderId,
@@ -874,13 +1068,12 @@ export async function openAssignedHealthWorkspace(
   ) {
     throw new Error('Lời mời Workspace không khớp với tài khoản đang đăng nhập.');
   }
-  const workspace = await openHealthWorkspace(assignment.rootFolderId, assignment.familyFileId);
-  if (
-    workspace.family.adminEmail &&
-    workspace.family.adminEmail.trim().toLowerCase() !== assignment.adminEmail.trim().toLowerCase()
-  ) {
-    throw new Error('Email quản trị trong family.json không khớp với lời mời Firestore.');
-  }
+  const workspace = await openSharedHealthWorkspace(
+    assignment.rootFolderId,
+    assignment.familyFileId,
+    memberEmail,
+    assignment.adminEmail,
+  );
   return workspace;
 }
 
@@ -961,7 +1154,8 @@ export async function addDriveFamilyMember(
   const cleanAdminEmail = normalizedEmail(workspace.family.adminEmail);
   const currentEmail = normalizedEmail(getSignedInGoogleEmail());
   const memberEmail = normalizedEmail(input.email);
-  if (memberEmail && currentEmail === cleanAdminEmail && memberEmail !== cleanAdminEmail) {
+  const isWorkspaceAdmin = Boolean(cleanAdminEmail && currentEmail === cleanAdminEmail);
+  if (memberEmail && isWorkspaceAdmin && memberEmail !== cleanAdminEmail) {
     await ensureDriveFolderAccess(workspace.rootFolderId, memberEmail, 'EDITOR');
   }
 
@@ -993,7 +1187,9 @@ export async function addDriveFamilyMember(
   );
   const family = { ...workspace.family, members: [...workspace.family.members, member] };
   const updatedWorkspace = await saveHealthFamily(workspace, family);
-  await syncHealthWorkspaceMemberAssignments(updatedWorkspace);
+  if (isWorkspaceAdmin) {
+    await syncHealthWorkspaceMemberAssignments(updatedWorkspace);
+  }
   return updatedWorkspace;
 }
 
@@ -1002,6 +1198,7 @@ export async function updateDriveFamilyMember(
   memberId: string,
   updates: Partial<FamilyMember>,
 ): Promise<HealthDriveWorkspace> {
+  assertWorkspaceAdmin(workspace, 'chỉnh sửa thông tin thành viên');
   const existingMember = workspace.family.members.find((member) => member.id === memberId);
   if (!existingMember) throw new Error('Không tìm thấy thành viên cần cập nhật.');
   const members = workspace.family.members.map((m) =>
@@ -1055,8 +1252,13 @@ export async function deleteDriveFamilyMember(
   workspace: HealthDriveWorkspace,
   memberId: string,
 ): Promise<{ workspace: HealthDriveWorkspace }> {
+  assertWorkspaceAdmin(workspace, 'xóa thành viên');
   const member = workspace.family.members.find((item) => item.id === memberId);
   if (!member) throw new Error('Không tìm thấy thành viên cần xóa trong Workspace hiện tại.');
+  const adminEmail = normalizedEmail(workspace.family.adminEmail);
+  if (adminEmail && normalizedEmail(member.email) === adminEmail) {
+    throw new Error('Không thể xóa hồ sơ của Admin Workspace.');
+  }
   if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
     return {
       workspace: {
@@ -1461,6 +1663,8 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
   const response = await authenticatedDriveFetch(
     `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
     { method: 'DELETE' },
+    false,
+    [404],
   );
   if (response.ok || response.status === 404) return;
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
@@ -1559,7 +1763,7 @@ export async function ensureDriveFolderAccess(
     }
   } else if (inherited.length === 0 || !inherited.some((permission) => permission.role === desiredRole)) {
     response = await authenticatedDriveFetch(
-      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions?supportsAllDrives=true&sendNotificationEmail=true`,
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions?supportsAllDrives=true&sendNotificationEmail=false`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

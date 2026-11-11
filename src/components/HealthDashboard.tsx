@@ -184,9 +184,13 @@ import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
 import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
-import { formatDateVN, formatDateTimeVN, isSamePersonName, normalizeVietnameseProperName } from '../utils/formatters';
+import { formatDateVN, formatDateTimeVN, normalizeVietnameseProperName } from '../utils/formatters';
 import { DatePickerVN } from './DatePickerVN';
-import { findMemberByOcrPatientName, isRecognizablePatientName } from '../utils/ocrSubjectRouting';
+import {
+  findMemberByOcrPatientName,
+  isOcrSubjectMatchedToMember,
+  isRecognizablePatientName,
+} from '../utils/ocrSubjectRouting';
 import {
   updateBatchNotificationProgress,
   updateBatchNotificationComplete,
@@ -576,6 +580,7 @@ export function HealthDashboard({
   const pendingUploadDrainInFlightRef = useRef(false);
   const syncOnResumeInFlightRef = useRef(false);
   const pickedMemberIdForBatchRef = useRef<string | undefined>(undefined);
+  const batchStagingMemberIdRef = useRef<string | undefined>(undefined);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
   authIdentityRef.current = { userEmail, driveAuthorized };
   const previousSelectedMemberIdRef = useRef(selectedMemberId);
@@ -828,7 +833,7 @@ export function HealthDashboard({
       notifyBatchProgress(nextFile.name, selectedMember?.name, 'Chuẩn bị');
 
       void beginDigitization(nextFile, {
-        memberId: pickedMemberIdForBatchRef.current,
+        memberId: batchStagingMemberIdRef.current,
         pendingUploadId,
       });
     } else {
@@ -852,6 +857,7 @@ export function HealthDashboard({
       }
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
+      batchStagingMemberIdRef.current = undefined;
       // Tự động kích hoạt toàn bộ luồng chuẩn hóa & phân tích 4 lớp sau khi tất cả các tệp hoàn tất
       void runFamilyDoctorSummaryAfterQueue();
     }
@@ -970,6 +976,7 @@ export function HealthDashboard({
       showToast('Không thể chuẩn bị hồ sơ nhận diện tài liệu. Hãy kết nối Drive hoặc thêm hồ sơ thành viên rồi thử lại.', 'error');
       return;
     }
+    batchStagingMemberIdRef.current = targetMember.id;
 
     activeWorkspace = workspaceRef.current || activeWorkspace;
 
@@ -1041,7 +1048,7 @@ export function HealthDashboard({
       phase: 'Chuẩn bị',
     });
     void beginDigitization(files[0], {
-      memberId,
+      memberId: memberId || targetMember.id,
       pendingUploadId: firstPendingId,
     });
   }
@@ -1914,8 +1921,14 @@ export function HealthDashboard({
               showToast('Đã mở không gian gia đình được chia sẻ từ Google Drive.', 'success');
               return;
             }
-          } catch {
-            // Fallthrough to discovery
+          } catch (error) {
+            const message = error instanceof Error
+              ? error.message
+              : 'Không thể xác minh hoặc mở thư mục được chia sẻ.';
+            setErrorMessage(`Chưa liên kết được thư mục của Admin. Lời mời vẫn được giữ để thử lại. ${message}`);
+            showToast(message, 'error');
+            setIsSyncing(false);
+            return;
           }
         }
 
@@ -2425,6 +2438,11 @@ export function HealthDashboard({
 
   async function handleSaveMember(updates: EditableFamilyMember) {
     if (!workspace || !editingMember) return;
+    if (!isWorkspaceAdmin) {
+      showToast('Chỉ Quản trị viên mới có quyền sửa thông tin thành viên.', 'error');
+      setEditingMember(null);
+      return;
+    }
     const name = updates.name.trim();
     if (!name) {
       showToast('Họ tên thành viên không được để trống.', 'error');
@@ -2526,8 +2544,10 @@ export function HealthDashboard({
     const adminEmail = normalizeEmail(workspace.family.adminEmail);
     const memberEmail = normalizeEmail(member.email);
     const isAdminProfile = Boolean(adminEmail && memberEmail === adminEmail);
-    const signedInEmail = normalizeEmail(userEmail);
-    const isSelf = isAdminProfile || Boolean(signedInEmail && memberEmail === signedInEmail);
+    if (isAdminProfile) {
+      showToast('Không thể xóa hồ sơ Admin khỏi Workspace.', 'error');
+      return;
+    }
     const isLocalWorkspace = workspace.rootFolderId === 'local_offline_workspace';
     const isUnsyncedMember =
       member.driveFolderId.startsWith('local_folder_') &&
@@ -2536,10 +2556,8 @@ export function HealthDashboard({
       typeof navigator === 'undefined' || navigator.onLine
     );
     const confirmed = await confirm({
-      title: isSelf ? 'Xóa vĩnh viễn hồ sơ của chính bạn?' : `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
-      message: isSelf
-        ? 'Hồ sơ cá nhân và toàn bộ dữ liệu của bạn sẽ bị xóa. Thư mục Workspace và quyền truy cập Drive của bạn được giữ nguyên.'
-        : `Thành viên sẽ bị gỡ khỏi Workspace, xóa hồ sơ JSON và toàn bộ tài liệu Drive, đồng thời thu hồi quyền truy cập thư mục được chia sẻ. Không thể hoàn tác.${!canSyncRemote && !isLocalWorkspace ? ' Yêu cầu sẽ được lưu trên thiết bị và thực hiện khi có mạng.' : ''}`,
+      title: `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
+      message: `Thành viên sẽ bị gỡ khỏi Workspace, xóa lời mời và quyền Drive, đồng thời xóa hồ sơ JSON và toàn bộ tài liệu Drive. Thành viên sẽ không thể liên kết lại Workspace này. Không thể hoàn tác.${!canSyncRemote && !isLocalWorkspace ? ' Yêu cầu sẽ được lưu trên thiết bị và thực hiện khi có mạng.' : ''}`,
       confirmLabel: 'Xóa vĩnh viễn',
     });
     if (!confirmed) return;
@@ -2687,6 +2705,7 @@ export function HealthDashboard({
           processingPendingUploadIdsRef.current.delete(pendingUploadId);
           showToast('Tài liệu đã được lưu trên thiết bị và sẽ được thử tải lên khi Drive có thể truy cập.', 'info');
           setQueueStatus(null);
+          batchStagingMemberIdRef.current = undefined;
           setUploadQueue([]);
           uploadQueueRef.current = [];
           pendingUploadIdsRef.current = [];
@@ -2696,6 +2715,7 @@ export function HealthDashboard({
         showToast('Phiên Google Drive đã hết hạn hoặc chưa được cấp quyền. Vui lòng kết nối lại Drive.', 'error');
         setIsUploading(false);
         setQueueStatus(null);
+        batchStagingMemberIdRef.current = undefined;
         return;
       }
     }
@@ -3209,7 +3229,6 @@ export function HealthDashboard({
         }
         setIdentityResolutionDraft({
           ...draft,
-          extracted: { ...draft.extracted, patientName: undefined },
         });
         showToast(
           `OCR chưa xác định được chủ thể của "${draft.source.name}". Hãy tạo hoặc chọn thành viên để gán dữ liệu.`,
@@ -3218,7 +3237,31 @@ export function HealthDashboard({
         return;
       }
 
-      const targetMember = await findOrCreateOcrMember(patientName, result.extracted, member);
+      const targetMember = await findOrCreateOcrMember(patientName, result.extracted);
+      if (!targetMember) {
+        if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100, file.name);
+        const latestProfile = profilesRef.current[member.id] || profiles[member.id];
+        if (latestProfile) {
+          const unresolvedProfile: HealthProfile = {
+            ...latestProfile,
+            sources: latestProfile.sources.map((source) =>
+              source.driveFileId === driveFileId
+                ? { ...source, subjectStatus: 'unresolved' }
+                : source,
+            ),
+            updatedAt: new Date().toISOString(),
+          };
+          const saved = await saveHealthProfile(member.profileFileId, unresolvedProfile);
+          profilesRef.current = { ...profilesRef.current, [member.id]: saved };
+          setProfiles((previous) => ({ ...previous, [member.id]: saved }));
+        }
+        setIdentityResolutionDraft(draft);
+        showToast(
+          `OCR nhận diện "${patientName}" nhưng không thể khớp an toàn với một hồ sơ duy nhất. Hãy xác nhận chủ thể trước khi lưu.`,
+          'info',
+        );
+        return;
+      }
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
       setTrackerState((previous) => ({ ...previous, memberId: targetMember.id }));
@@ -3262,12 +3305,16 @@ export function HealthDashboard({
   async function findOrCreateOcrMember(
     patientName: string,
     extracted: Partial<HealthEvent>,
-    initialMember: FamilyMember,
-  ): Promise<FamilyMember> {
+  ): Promise<FamilyMember | undefined> {
     const currentWorkspace = workspaceRef.current;
     if (!currentWorkspace) throw new Error('Không tìm thấy Workspace để gán tài liệu OCR.');
     const currentMembers = currentWorkspace.family.members;
-    const matchingMember = findMemberByOcrPatientName(patientName, currentMembers);
+    const matchingMember = findMemberByOcrPatientName(
+      patientName,
+      currentMembers,
+      extracted.patientBirthDate,
+      extracted.patientGender,
+    );
     if (matchingMember) {
       digitizationLogger.log(
         'info',
@@ -3283,62 +3330,18 @@ export function HealthDashboard({
       return matchingMember;
     }
 
-    const initialProfile =
-      profilesRef.current[initialMember.id] || profiles[initialMember.id];
-    const isPlaceholder =
-      initialMember.name === 'Thành viên mới' ||
-      initialMember.name === 'Gia đình' ||
-      initialMember.name.toLowerCase().includes('thanh vien');
-    if (
-      isPlaceholder &&
-      currentMembers.length === 1 &&
-      initialProfile &&
-      initialProfile.timeline.length === 0
-    ) {
-      digitizationLogger.log(
-        'info',
-        'subject_rename_placeholder',
-        `Cập nhật hồ sơ thành viên mặc định "${initialMember.name}" thành tên bệnh nhân nhận diện được: "${patientName}"`,
-        { oldName: initialMember.name, newName: patientName, memberId: initialMember.id }
-      );
-      const updatedWorkspace = await updateDriveFamilyMember(currentWorkspace, initialMember.id, {
-        name: patientName,
-        birthDate: extracted.patientBirthDate || undefined,
-        gender: genderFromOcr(extracted.patientGender, initialMember.gender),
-      });
-      workspaceRef.current = updatedWorkspace;
-      setWorkspace(updatedWorkspace);
-      const reloaded = await reloadProfiles(updatedWorkspace);
-      profilesRef.current = reloaded;
-      setProfiles(reloaded);
-      return updatedWorkspace.family.members.find((candidate) => candidate.id === initialMember.id) || {
-        ...initialMember,
-        name: patientName,
-      };
-    }
-
-    const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
     digitizationLogger.log(
-      'info',
-      'subject_new_member',
-      `Tạo hồ sơ thành viên mới cho bệnh nhân: "${patientName}" (ID: ${memberId}, Giới tính: ${extracted.patientGender || 'Chưa rõ'}, Ngày sinh: ${extracted.patientBirthDate || 'Chưa rõ'})`,
-      { patientName, memberId, birthDate: extracted.patientBirthDate, gender: extracted.patientGender }
+      'warn',
+      'subject_match_requires_confirmation',
+      `Không thể khớp chủ thể OCR "${patientName}" với duy nhất một hồ sơ; yêu cầu xác nhận thủ công.`,
+      {
+        patientName,
+        memberNames: currentMembers.map((candidate) => candidate.name),
+        patientBirthDate: extracted.patientBirthDate,
+        patientGender: extracted.patientGender,
+      }
     );
-    const updatedWorkspace = await addDriveFamilyMember(currentWorkspace, {
-      id: memberId,
-      name: patientName,
-      birthDate: extracted.patientBirthDate || undefined,
-      gender: genderFromOcr(extracted.patientGender),
-      role: 'other',
-    });
-    workspaceRef.current = updatedWorkspace;
-    setWorkspace(updatedWorkspace);
-    const reloaded = await reloadProfiles(updatedWorkspace);
-    profilesRef.current = reloaded;
-    setProfiles(reloaded);
-    const createdMember = updatedWorkspace.family.members.find((candidate) => candidate.id === memberId);
-    if (!createdMember) throw new Error('Không thể tải hồ sơ của thành viên vừa tạo.');
-    return createdMember;
+    return undefined;
   }
 
   function genderFromOcr(
@@ -3354,7 +3357,20 @@ export function HealthDashboard({
   async function saveExtractedDocumentAutomatically(
     draft: DigitizationDraft,
     member: FamilyMember,
+    subjectManuallyConfirmed = false,
   ): Promise<boolean> {
+    if (!subjectManuallyConfirmed && !isOcrSubjectMatchedToMember(
+      draft.extracted.patientName,
+      member,
+      workspaceRef.current?.family.members || members,
+      draft.extracted.patientBirthDate,
+      draft.extracted.patientGender,
+    )) {
+      const message = `Chưa lưu tài liệu: chủ thể OCR "${draft.extracted.patientName || 'chưa nhận dạng'}" không khớp hồ sơ ${member.name}.`;
+      setDigitizationError(message);
+      showToast(message, 'error');
+      return false;
+    }
     const profile = profilesRef.current[member.id] || profiles[member.id];
     if (!profile) {
       showToast(`Không tải được hồ sơ của ${member.name}; tài liệu chưa được gán.`, 'error');
@@ -3381,7 +3397,7 @@ export function HealthDashboard({
       advice: extracted.advice,
       nextFollowUp: extracted.nextFollowUp,
       notes: extracted.notes,
-      patientName: extracted.patientName?.trim() || member.name,
+      patientName: extracted.patientName?.trim() || undefined,
       patientBirthDate: extracted.patientBirthDate,
       patientGender: extracted.patientGender,
       extractedData: isRecord(extracted.extractedData)
@@ -3410,6 +3426,7 @@ export function HealthDashboard({
       event,
       duplicateResolution: duplicate ? 'merge' : 'create_new',
       matchedEventId: duplicate?.matchedEvent.id,
+      subjectManuallyConfirmed,
     });
     if (saved) {
       forgetOcrRecoveryJob(draft.source.id);
@@ -3428,20 +3445,38 @@ export function HealthDashboard({
     try {
       const currentWorkspace = workspaceRef.current;
       if (!currentWorkspace) throw new Error('Không tìm thấy Workspace hiện tại.');
+      const cleanName = name.trim();
+      if (!isRecognizablePatientName(cleanName)) {
+        throw new Error('Vui lòng nhập họ tên hợp lệ cho hồ sơ thành viên mới.');
+      }
 
       let targetMember = pendingSubjectMember &&
+        pendingSubjectMember.name === cleanName &&
         currentWorkspace.family.members.some((member) => member.id === pendingSubjectMember.id)
         ? pendingSubjectMember
         : undefined;
       if (!targetMember) {
-        const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
-        const updatedWorkspace = await addDriveFamilyMember(currentWorkspace, {
-          id: memberId,
-          name,
-          birthDate: draft.extracted.patientBirthDate || undefined,
-          gender: genderFromOcr(draft.extracted.patientGender),
-          role: 'other',
+        const placeholderMember = currentWorkspace.family.members.find((candidate) => {
+          const profile = profilesRef.current[candidate.id] || profiles[candidate.id];
+          const isPlaceholder = candidate.name === 'Thành viên mới' ||
+            candidate.name === 'Gia đình' ||
+            candidate.name.toLowerCase().includes('thanh vien');
+          return isPlaceholder && Boolean(profile && profile.timeline.length === 0);
         });
+        const memberId = placeholderMember?.id || `member_${crypto.randomUUID().slice(0, 12)}`;
+        const updatedWorkspace = placeholderMember && isWorkspaceAdmin
+          ? await updateDriveFamilyMember(currentWorkspace, memberId, {
+              name: cleanName,
+              birthDate: draft.extracted.patientBirthDate || undefined,
+              gender: genderFromOcr(draft.extracted.patientGender, placeholderMember.gender),
+            })
+          : await addDriveFamilyMember(currentWorkspace, {
+              id: memberId,
+              name: cleanName,
+              birthDate: draft.extracted.patientBirthDate || undefined,
+              gender: genderFromOcr(draft.extracted.patientGender),
+              role: 'other',
+            });
         workspaceRef.current = updatedWorkspace;
         setWorkspace(updatedWorkspace);
         profilesRef.current = await reloadProfiles(updatedWorkspace);
@@ -3452,11 +3487,7 @@ export function HealthDashboard({
 
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
-      const resolvedDraft: DigitizationDraft = {
-        ...draft,
-        extracted: { ...draft.extracted, patientName: targetMember.name },
-      };
-      const saved = await saveExtractedDocumentAutomatically(resolvedDraft, targetMember);
+      const saved = await saveExtractedDocumentAutomatically(draft, targetMember, true);
       if (!saved) throw new Error('Đã tạo thành viên nhưng chưa lưu được dữ liệu OCR. Hãy thử lại.');
       setIdentityResolutionDraft(null);
       setPendingSubjectMember(null);
@@ -3479,11 +3510,7 @@ export function HealthDashboard({
     try {
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
-      const resolvedDraft: DigitizationDraft = {
-        ...draft,
-        extracted: { ...draft.extracted, patientName: targetMember.name },
-      };
-      const saved = await saveExtractedDocumentAutomatically(resolvedDraft, targetMember);
+      const saved = await saveExtractedDocumentAutomatically(draft, targetMember, true);
       if (!saved) throw new Error(`Chưa lưu được dữ liệu OCR vào hồ sơ của ${targetMember.name}. Hãy thử lại.`);
       setIdentityResolutionDraft(null);
       setPendingSubjectMember(null);
@@ -3504,6 +3531,7 @@ export function HealthDashboard({
     setUploadQueue([]);
     updateQueueStatus(null);
     pickedMemberIdForBatchRef.current = undefined;
+    batchStagingMemberIdRef.current = undefined;
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
     showToast('Đã dừng toàn bộ hàng đợi xử lý.', 'info');
@@ -3719,6 +3747,7 @@ export function HealthDashboard({
       event?: HealthEvent;
       duplicateResolution?: 'merge' | 'replace' | 'create_new';
       matchedEventId?: string;
+      subjectManuallyConfirmed?: boolean;
     } = {},
   ): Promise<boolean> {
     if (!(submitEvent instanceof FormData)) submitEvent.preventDefault();
@@ -3731,6 +3760,18 @@ export function HealthDashboard({
       : selectedProfile;
     const draft = options.draft || digitizationDraft;
     if (!draft || !effectiveMember || !effectiveProfile) return false;
+    if (!options.subjectManuallyConfirmed && !isOcrSubjectMatchedToMember(
+      draft.extracted.patientName,
+      effectiveMember,
+      workspaceRef.current?.family.members || members,
+      draft.extracted.patientBirthDate,
+      draft.extracted.patientGender,
+    )) {
+      const message = `Chưa lưu tài liệu: chủ thể OCR "${draft.extracted.patientName || 'chưa nhận dạng'}" không khớp hồ sơ ${effectiveMember.name}.`;
+      setDigitizationError(message);
+      showToast(message, 'error');
+      return false;
+    }
     const form = submitEvent instanceof FormData ? submitEvent : new FormData(submitEvent.currentTarget);
     const date = String(form.get('date') || '');
     const title = String(form.get('title') || '').trim();
@@ -5596,7 +5637,7 @@ export function HealthDashboard({
                             >
                               Mở hồ sơ
                             </button>
-                            {driveAuthorized && (
+                            {isWorkspaceAdmin && driveAuthorized && (
                               <button
                                 type="button"
                                 disabled={isLoading || isSavingMember}
@@ -5608,7 +5649,8 @@ export function HealthDashboard({
                                 <Pencil className="w-4 h-4" />
                               </button>
                             )}
-                            {isWorkspaceAdmin && (
+                            {isWorkspaceAdmin &&
+                              m.email?.trim().toLowerCase() !== workspace?.family.adminEmail?.trim().toLowerCase() && (
                               <button
                                 type="button"
                                 disabled={isLoading}
@@ -6081,6 +6123,7 @@ export function HealthDashboard({
           adminEmail={workspace?.family.adminEmail}
           batchStatus={queueStatus}
           existingMemberName={pendingSubjectMember?.name}
+          suggestedSubjectName={identityResolutionDraft.extracted.patientName}
           onDefer={deferUnresolvedSubject}
           onSelectExistingMember={(member) => void assignUnresolvedSubjectToMember(member)}
           onCreateMember={(name) => void createMemberForUnresolvedSubject(name)}
@@ -6255,7 +6298,7 @@ export function HealthDashboard({
           }
         }}
       />
-      {editingMember && (
+      {editingMember && isWorkspaceAdmin && (
         <MemberEditModal
           member={editingMember}
           isSaving={isSavingMember}
@@ -6286,26 +6329,15 @@ function findBestMemberMatch(
   currentSelectedId: string
 ): string {
   if (!members.length) return '';
-  const patientName = extracted.patientName?.trim();
-  const patientGender = extracted.patientGender?.trim().toLowerCase();
-  const patientBirth = extracted.patientBirthDate?.trim();
-
-  if (patientName) {
-    const matched = members.find((m) => isSamePersonName(patientName, m.name));
-    if (matched) return matched.id;
-  }
-
-  if (patientBirth) {
-    const isMale = patientGender ? (patientGender.includes('nam') || patientGender === 'male') : false;
-    const isFemale = patientGender ? (patientGender.includes('nữ') || patientGender === 'female') : false;
-    const matched = members.find((m) => {
-      const birthMatch = m.birthDate && (m.birthDate === patientBirth || patientBirth.startsWith(m.birthDate.slice(0, 4)));
-      const genderMatch = isMale ? m.gender === 'male' : isFemale ? m.gender === 'female' : true;
-      return Boolean(birthMatch && genderMatch);
-    });
-    if (matched) return matched.id;
-  }
-
+  const matched = extracted.patientName
+    ? findMemberByOcrPatientName(
+        extracted.patientName,
+        members,
+        extracted.patientBirthDate,
+        extracted.patientGender,
+      )
+    : undefined;
+  if (matched) return matched.id;
   return currentSelectedId || members[0]?.id || '';
 }
 
@@ -6332,6 +6364,14 @@ function DigitizationReviewModal({
       sourceFileId: draft.source.id,
     });
   }, [targetTimeline, extracted, draft.source.id]);
+  const targetMember = members.find((member) => member.id === targetMemberId);
+  const subjectMatched = Boolean(targetMember && isOcrSubjectMatchedToMember(
+    extracted.patientName,
+    targetMember,
+    members,
+    extracted.patientBirthDate,
+    extracted.patientGender,
+  ));
 
   const [metricsText, setMetricsText] = useState(
     (extracted.metrics || [])
@@ -6401,13 +6441,24 @@ function DigitizationReviewModal({
             <span className="text-xs font-bold text-slate-800">
               Đối chiếu thông tin nhận dạng trên tài liệu:
             </span>
-            {targetMemberId && (
-              <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-bold flex items-center gap-1">
-                <Check className="w-3 h-3 text-emerald-600" />
-                <span>Khớp với: {members.find((m) => m.id === targetMemberId)?.name}</span>
+            {targetMember && (
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold flex items-center gap-1 ${
+                subjectMatched
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-amber-100 text-amber-900'
+              }`}>
+                {subjectMatched && <Check className="w-3 h-3 text-emerald-600" />}
+                <span>{subjectMatched ? `Đã khớp: ${targetMember.name}` : `Chưa khớp hồ sơ ${targetMember.name}`}</span>
               </span>
             )}
           </div>
+          {!subjectMatched && (
+            <p className="text-[11px] font-semibold text-amber-800" role="alert">
+              {!isRecognizablePatientName(extracted.patientName)
+                ? 'OCR chưa đọc được họ tên hợp lệ. Không thể lưu vào hồ sơ thành viên.'
+                : 'Tên hoặc thông tin nhận dạng OCR không khớp hồ sơ đã chọn. Không thể lưu tài liệu.'}
+            </p>
+          )}
 
           <div className="grid grid-cols-3 gap-2 text-xs">
             <div className="bg-white p-2 rounded-xl border border-slate-200">
@@ -6675,7 +6726,8 @@ function DigitizationReviewModal({
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-extrabold shadow-sm transition-all"
+              disabled={!subjectMatched}
+              className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-extrabold shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-50"
             >
               Lưu vào hồ sơ
             </button>

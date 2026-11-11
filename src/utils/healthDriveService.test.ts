@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ensureDriveFolderAccess,
+  deleteDriveFile,
+  deleteDriveFamilyMember,
+  openHealthWorkspace,
   openAssignedHealthWorkspace,
   resolveSingleFamilyManifestFile,
+  stampHealthWorkspaceFolder,
   syncHealthWorkspaceMemberAssignments,
+  updateDriveFamilyMember,
 } from './healthDriveService';
 import {
   listHealthWorkspaceAssignments,
@@ -44,6 +49,45 @@ describe('resolveSingleFamilyManifestFile', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('deleteDriveFile', () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
+    });
+
+    it('treats a missing Drive file as already deleted without requesting reauthorization', async () => {
+      const eventTypes: string[] = [];
+      vi.stubGlobal('window', {
+        dispatchEvent: (event: Event) => {
+          eventTypes.push(event.type);
+          return true;
+        },
+      });
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+
+      await expect(deleteDriveFile('missing-folder')).resolves.toBeUndefined();
+      expect(eventTypes).not.toContain('google-drive-request-error');
+    });
+
+    it('continues to report actual Drive deletion errors', async () => {
+      const eventTypes: string[] = [];
+      vi.stubGlobal('window', {
+        dispatchEvent: (event: Event) => {
+          eventTypes.push(event.type);
+          return true;
+        },
+      });
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: 'Permission denied' } }), { status: 403 }),
+      );
+
+      await expect(deleteDriveFile('protected-folder')).rejects.toThrow('Permission denied');
+      expect(eventTypes).toContain('google-drive-request-error');
+    });
   });
 
   describe('syncHealthWorkspaceMemberAssignments', () => {
@@ -146,6 +190,178 @@ describe('resolveSingleFamilyManifestFile', () => {
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
       expect(removeHealthWorkspaceAssignment).toHaveBeenCalledWith('workspace-1', 'old@example.com');
     });
+
+    it('reports incomplete revocation while removing the member assignment', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([{
+        rootFolderId: 'workspace-1',
+        familyFileId: 'family-1',
+        adminEmail: 'user@example.com',
+        memberEmail: 'old@example.com',
+        role: 'EDITOR',
+        updatedAt: 1,
+        source: 'family_member',
+      }]);
+      vi.mocked(publishHealthWorkspaceAssignments).mockResolvedValue();
+      vi.mocked(removeHealthWorkspaceAssignment).mockResolvedValue();
+      globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'DELETE') {
+          return new Response(JSON.stringify({ error: { message: 'Inherited permission' } }), { status: 403 });
+        }
+        return new Response(JSON.stringify({
+          permissions: [{
+            id: 'old-permission',
+            type: 'user',
+            emailAddress: 'old@example.com',
+            role: 'writer',
+            permissionDetails: [{ inherited: false }],
+          }],
+        }), { status: 200 });
+      });
+
+      await expect(syncHealthWorkspaceMemberAssignments(
+        { ...workspace, family: { ...workspace.family, members: [] } },
+        ['old@example.com'],
+      )).rejects.toThrow('Chưa thu hồi hoàn tất quyền của thành viên đã gỡ');
+      expect(removeHealthWorkspaceAssignment).toHaveBeenCalledWith('workspace-1', 'old@example.com');
+    });
+
+    it('blocks non-admins from editing or deleting existing members', async () => {
+      const sharedWorkspace = {
+        rootFolderId: 'workspace-1',
+        familyFileId: 'family-1',
+        family: {
+          ...workspace.family,
+          adminEmail: 'admin@example.com',
+          members: [{
+            id: 'member-1',
+            name: 'Family member',
+            email: 'member@example.com',
+            role: 'other' as const,
+            driveFolderId: 'member-folder',
+            profileFileId: 'member-profile',
+          }],
+        },
+      };
+
+      await expect(updateDriveFamilyMember(sharedWorkspace, 'member-1', { name: 'Changed' }))
+        .rejects.toThrow('Chỉ Admin của Workspace mới được chỉnh sửa thông tin thành viên.');
+      await expect(deleteDriveFamilyMember(sharedWorkspace, 'member-1'))
+        .rejects.toThrow('Chỉ Admin của Workspace mới được xóa thành viên.');
+    });
+
+    it('does not open a cached workspace for an email removed from family.json', async () => {
+      const family = {
+        schemaVersion: 1,
+        adminEmail: 'admin@example.com',
+        rawFilesFolderId: 'raw-folder',
+        profilesFolderId: 'profiles-folder',
+        members: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      };
+      globalThis.fetch = vi.fn().mockImplementation(async (rawUrl: string) => {
+        const url = new URL(rawUrl);
+        if (url.pathname.endsWith('/family-1') && url.searchParams.get('alt') === 'media') {
+          return new Response(JSON.stringify(family), { status: 200 });
+        }
+        if (url.pathname.endsWith('/family-1')) {
+          return new Response(JSON.stringify({
+            id: 'family-1',
+            name: 'family.json',
+            mimeType: 'application/json',
+            parents: ['folder-1'],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          id: 'folder-1',
+          name: 'Suc khoe gia dinh',
+          mimeType: 'application/vnd.google-apps.folder',
+        }), { status: 200 });
+      });
+
+      await expect(openHealthWorkspace('folder-1', 'family-1'))
+        .rejects.toThrow('Email đang đăng nhập không còn trong danh sách thành viên Workspace.');
+    });
+
+    it('does not publish the Firestore assignment when Drive permission verification fails', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([]);
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        error: { message: 'permission denied' },
+      }), { status: 403 }));
+
+      await expect(syncHealthWorkspaceMemberAssignments(workspace)).rejects.toThrow(
+        'Chưa thể xác nhận quyền Drive',
+      );
+      expect(publishHealthWorkspaceAssignments).not.toHaveBeenCalled();
+    });
+
+    it('serializes overlapping assignment syncs so the latest family email is published last', async () => {
+      let resolveInitialRead!: (assignments: []) => void;
+      const initialRead = new Promise<[]>(resolve => {
+        resolveInitialRead = resolve;
+      });
+      vi.mocked(listHealthWorkspaceAssignments)
+        .mockReturnValueOnce(initialRead)
+        .mockResolvedValue([]);
+      const publishedEmails: string[][] = [];
+      vi.mocked(publishHealthWorkspaceAssignments).mockImplementation(
+        async (_rootId, _familyFileId, _adminEmail, assignments) => {
+          publishedEmails.push(assignments.map(({ email }) => email));
+        },
+      );
+      let granted = false;
+      globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          granted = true;
+          return new Response(JSON.stringify({
+            id: 'permission-new',
+            type: 'user',
+            emailAddress: 'member@example.com',
+            role: 'writer',
+            permissionDetails: [{ inherited: false }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          permissions: granted
+            ? [{
+                id: 'permission-new',
+                type: 'user',
+                emailAddress: 'member@example.com',
+                role: 'writer',
+                permissionDetails: [{ inherited: false }],
+              }]
+            : [],
+        }), { status: 200 });
+      });
+
+      const initialWorkspace = {
+        ...workspace,
+        family: { ...workspace.family, members: [] },
+      };
+      const updatedWorkspace = {
+        ...workspace,
+        family: {
+          ...workspace.family,
+          members: [
+            ...workspace.family.members,
+            {
+              id: 'member-2',
+              name: 'New family member',
+              email: 'member@example.com',
+              role: 'other' as const,
+              driveFolderId: 'raw-2',
+              profileFileId: 'profile-2',
+            },
+          ],
+        },
+      };
+      const initialSync = syncHealthWorkspaceMemberAssignments(initialWorkspace);
+      const updatedSync = syncHealthWorkspaceMemberAssignments(updatedWorkspace);
+      resolveInitialRead([]);
+      await Promise.all([initialSync, updatedSync]);
+
+      expect(publishedEmails).toEqual([[], ['member@example.com']]);
+    });
   });
 
   describe('ensureDriveFolderAccess', () => {
@@ -153,6 +369,101 @@ describe('resolveSingleFamilyManifestFile', () => {
 
     afterEach(() => {
       globalThis.fetch = originalFetch;
+    });
+
+    describe('shared workspace connection', () => {
+      const originalFetch = globalThis.fetch;
+
+      afterEach(() => {
+        globalThis.fetch = originalFetch;
+      });
+
+      it('stamps and verifies the Drive folder app property', async () => {
+        let properties: Record<string, string> = {};
+        globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+          if (init?.method === 'PATCH') {
+            properties = JSON.parse(String(init.body)).appProperties;
+          }
+          return new Response(JSON.stringify({
+            id: 'folder-1',
+            name: 'Suc khoe gia dinh',
+            mimeType: 'application/vnd.google-apps.folder',
+            appProperties: properties,
+          }), { status: 200 });
+        });
+
+        await stampHealthWorkspaceFolder('folder-1');
+
+        const patch = vi.mocked(globalThis.fetch).mock.calls.find(([, init]) => init?.method === 'PATCH');
+        expect(JSON.parse(String(patch?.[1]?.body)).appProperties).toEqual({
+          app_id: 'com.suckhoegiadinh.app',
+        });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+      });
+
+      it('opens the assigned folder only after family.json confirms the member identity', async () => {
+        let properties: Record<string, string> = {};
+        const family = {
+          schemaVersion: 1,
+          adminEmail: 'admin@example.com',
+          rawFilesFolderId: 'raw-folder',
+          profilesFolderId: 'profiles-folder',
+          members: [{
+            id: 'member-1',
+            name: 'Family member',
+            email: 'user@example.com',
+            role: 'other',
+            driveFolderId: 'member-folder',
+            profileFileId: 'profile-file',
+          }],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        };
+        globalThis.fetch = vi.fn().mockImplementation(async (rawUrl: string, init?: RequestInit) => {
+          const url = new URL(rawUrl);
+          if (url.pathname.endsWith('/family-1') && url.searchParams.get('alt') === 'media') {
+            return new Response(JSON.stringify(family), { status: 200 });
+          }
+          if (url.pathname.endsWith('/family-1')) {
+            return new Response(JSON.stringify({
+              id: 'family-1',
+              name: 'family.json',
+              mimeType: 'application/json',
+              parents: ['folder-1'],
+            }), { status: 200 });
+          }
+          if (url.pathname.endsWith('/files') && url.searchParams.has('q')) {
+            return new Response(JSON.stringify({
+              files: [{
+                id: 'family-1',
+                name: 'family.json',
+                mimeType: 'application/json',
+                createdTime: '2026-01-01T00:00:00.000Z',
+              }],
+            }), { status: 200 });
+          }
+          if (init?.method === 'PATCH') {
+            properties = JSON.parse(String(init.body)).appProperties;
+          }
+          return new Response(JSON.stringify({
+            id: 'folder-1',
+            name: 'Suc khoe gia dinh',
+            mimeType: 'application/vnd.google-apps.folder',
+            appProperties: properties,
+          }), { status: 200 });
+        });
+
+        const workspace = await openAssignedHealthWorkspace({
+          rootFolderId: 'folder-1',
+          familyFileId: 'family-1',
+          adminEmail: 'admin@example.com',
+          memberEmail: 'user@example.com',
+          role: 'EDITOR',
+          updatedAt: 1,
+        }, 'user@example.com');
+
+        expect(workspace.family.members[0].email).toBe('user@example.com');
+      });
     });
 
     it('updates and verifies a direct permission for the requested role', async () => {
@@ -181,6 +492,33 @@ describe('resolveSingleFamilyManifestFile', () => {
 
       expect(methods).toEqual(['GET', 'PATCH', 'GET']);
       expect(permissions[0].role).toBe('reader');
+    });
+
+    it('creates Drive permission without sending a notification email', async () => {
+      let granted = false;
+      const permission = {
+        id: 'permission-new',
+        type: 'user',
+        emailAddress: 'member@example.com',
+        role: 'writer',
+        permissionDetails: [{ inherited: false }],
+      };
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          granted = true;
+          return new Response(JSON.stringify(permission), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          permissions: granted ? [permission] : [],
+        }), { status: 200 });
+      });
+
+      await ensureDriveFolderAccess('folder-1', 'member@example.com', 'EDITOR');
+
+      const createRequest = vi.mocked(globalThis.fetch).mock.calls.find(
+        ([, init]) => init?.method === 'POST',
+      );
+      expect(createRequest?.[0]).toContain('sendNotificationEmail=false');
     });
 
     it('rejects a workspace assignment addressed to another signed-in email', async () => {

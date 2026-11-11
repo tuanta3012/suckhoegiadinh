@@ -82,8 +82,10 @@ export default function App() {
       showToast('Phiên Google Drive đã hết hạn. Hãy bấm "Cấp quyền Drive" để tiếp tục.', 'error');
     };
     const handleDriveRequestError = () => setDriveRequestFailed(true);
+    const handleDriveRequestSucceeded = () => setDriveRequestFailed(false);
     window.addEventListener('google-drive-auth-expired', handleDriveExpired);
     window.addEventListener('google-drive-request-error', handleDriveRequestError);
+    window.addEventListener('google-drive-request-succeeded', handleDriveRequestSucceeded);
 
     // Auto-refresh token on app resume (useful for long-lived background sessions)
     const handleVisibilityChange = () => {
@@ -100,6 +102,7 @@ export default function App() {
       unsubscribe?.();
       window.removeEventListener('google-drive-auth-expired', handleDriveExpired);
       window.removeEventListener('google-drive-request-error', handleDriveRequestError);
+      window.removeEventListener('google-drive-request-succeeded', handleDriveRequestSucceeded);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [showToast]);
