@@ -145,6 +145,7 @@ export default function App() {
       appVersion={RELEASE_APP_VERSION}
       driveAuthorized={driveAuthorized}
       driveRequestFailed={driveRequestFailed}
+      onDriveWorkspaceReset={() => setDriveRequestFailed(false)}
       onConnectDrive={async () => {
         try {
           await connectGoogle();

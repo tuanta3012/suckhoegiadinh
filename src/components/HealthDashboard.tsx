@@ -207,6 +207,7 @@ interface HealthDashboardProps {
   appVersion: string;
   driveAuthorized: boolean;
   driveRequestFailed: boolean;
+  onDriveWorkspaceReset: () => void;
   onConnectDrive: () => void;
   onLogout: () => void;
   showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
@@ -428,6 +429,7 @@ export function HealthDashboard({
   appVersion,
   driveAuthorized,
   driveRequestFailed,
+  onDriveWorkspaceReset,
   onConnectDrive,
   onLogout,
   showToast,
@@ -1215,6 +1217,10 @@ export function HealthDashboard({
     });
 
     if (!confirmed) return;
+
+    if (canDeleteDrive) {
+      onDriveWorkspaceReset();
+    }
     
     // --- TỐI ƯU HÓA: CẬP NHẬT TỨC THỜI (OPTIMISTIC RESET) ---
     setIsLoading(true);
