@@ -22,6 +22,7 @@ export default function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [driveAuthorized, setDriveAuthorized] = useState(isGoogleTokenValid());
+  const [driveRequestFailed, setDriveRequestFailed] = useState(false);
 
   useEffect(() => {
     const initializeStatusBar = async () => {
@@ -53,6 +54,7 @@ export default function App() {
             if (!firebaseUser.email) {
               setCurrentUser(null);
               setDriveAuthorized(false);
+              setDriveRequestFailed(false);
               return;
             }
             setCurrentUser({
@@ -67,6 +69,7 @@ export default function App() {
           () => {
             setCurrentUser(null);
             setDriveAuthorized(false);
+            setDriveRequestFailed(false);
           }
         );
       })
@@ -75,9 +78,12 @@ export default function App() {
       });
     const handleDriveExpired = () => {
       setDriveAuthorized(false);
+      setDriveRequestFailed(true);
       showToast('Phiên Google Drive đã hết hạn. Hãy bấm "Cấp quyền Drive" để tiếp tục.', 'error');
     };
+    const handleDriveRequestError = () => setDriveRequestFailed(true);
     window.addEventListener('google-drive-auth-expired', handleDriveExpired);
+    window.addEventListener('google-drive-request-error', handleDriveRequestError);
 
     // Auto-refresh token on app resume (useful for long-lived background sessions)
     const handleVisibilityChange = () => {
@@ -93,6 +99,7 @@ export default function App() {
       cancelled = true;
       unsubscribe?.();
       window.removeEventListener('google-drive-auth-expired', handleDriveExpired);
+      window.removeEventListener('google-drive-request-error', handleDriveRequestError);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [showToast]);
@@ -104,6 +111,7 @@ export default function App() {
       if (!accessToken) {
         showToast('Đăng nhập thành công nhưng chưa có quyền Drive.', 'error');
       } else {
+        setDriveRequestFailed(false);
         showToast('Đã kết nối tài khoản Google Drive thành công!', 'success');
       }
     } catch (error) {
@@ -116,6 +124,7 @@ export default function App() {
       await signOutGoogle();
       setCurrentUser(null);
       setDriveAuthorized(false);
+      setDriveRequestFailed(false);
       showToast('Đã đăng xuất tài khoản.', 'info');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể đăng xuất.', 'error');
@@ -132,6 +141,7 @@ export default function App() {
       userName={currentUser?.name || auth.currentUser?.displayName || null}
       appVersion={RELEASE_APP_VERSION}
       driveAuthorized={driveAuthorized}
+      driveRequestFailed={driveRequestFailed}
       onConnectDrive={async () => {
         try {
           await connectGoogle();

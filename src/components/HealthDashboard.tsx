@@ -203,6 +203,7 @@ interface HealthDashboardProps {
   userName?: string | null;
   appVersion: string;
   driveAuthorized: boolean;
+  driveRequestFailed: boolean;
   onConnectDrive: () => void;
   onLogout: () => void;
   showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
@@ -423,6 +424,7 @@ export function HealthDashboard({
   userName,
   appVersion,
   driveAuthorized,
+  driveRequestFailed,
   onConnectDrive,
   onLogout,
   showToast,
@@ -432,6 +434,15 @@ export function HealthDashboard({
   const [rootIdInput, setRootIdInput] = useState('');
 
   const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(offlineStartup.workspace);
+  const hasRemoteWorkspace = workspace.rootFolderId !== 'local_offline_workspace';
+  const needsDriveAuthorization = !driveAuthorized || driveRequestFailed;
+  const driveActionLabel = !userEmail
+    ? 'Đăng nhập Google'
+    : needsDriveAuthorization
+      ? 'Cấp lại quyền Drive'
+      : hasRemoteWorkspace
+        ? 'Đồng bộ dữ liệu'
+        : 'Tạo kho dữ liệu';
   const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(offlineStartup.profiles);
   const [localImportAvailable, setLocalImportAvailable] = useState(false);
   const [isImportingLocalData, setIsImportingLocalData] = useState(false);
@@ -4301,25 +4312,28 @@ export function HealthDashboard({
                   {/* 1. Đồng bộ dữ liệu */}
                   <button
                     type="button"
+                    disabled={isSyncing || isLoading}
                     onClick={() => {
                       setShowSettingsDropdown(false);
-                      if (workspace.rootFolderId === 'local_offline_workspace') {
-                        void handleCreateWorkspace();
-                      } else {
+                      if (!userEmail || needsDriveAuthorization) {
+                        onConnectDrive();
+                      } else if (hasRemoteWorkspace) {
                         void handleManualSync();
+                      } else {
+                        void handleCreateWorkspace();
                       }
                     }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors text-left text-xs font-semibold"
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors text-left text-xs font-semibold disabled:opacity-50 disabled:pointer-events-none"
                   >
                     <FolderSync className="w-4 h-4 text-emerald-600 shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="font-bold text-slate-800">
-                        {workspace.rootFolderId === 'local_offline_workspace' ? 'Tạo kho dữ liệu' : 'Đồng bộ dữ liệu'}
-                      </div>
+                      <div className="font-bold text-slate-800">{driveActionLabel}</div>
                       <div className="text-[10px] text-slate-400 font-normal truncate">
-                        {driveAuthorized 
-                          ? (workspace.rootFolderId === 'local_offline_workspace' ? 'Khởi tạo thư mục trên Drive' : 'Đồng bộ 2 chiều với Drive')
-                          : 'Chưa kết nối Drive (Bấm để đăng nhập)'}
+                        {needsDriveAuthorization
+                          ? 'Kết nối lại để tiếp tục với Google Drive'
+                          : hasRemoteWorkspace
+                            ? 'Đồng bộ 2 chiều với Drive'
+                            : 'Khởi tạo thư mục trên Drive'}
                       </div>
                     </div>
                   </button>
@@ -4355,20 +4369,6 @@ export function HealthDashboard({
 
                   {/* 3. Đăng nhập / Đăng xuất & Kết nối lại Drive */}
                   <div className="pt-0.5 pb-0.5 space-y-1">
-                    {userEmail && !driveAuthorized && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowSettingsDropdown(false);
-                          onConnectDrive();
-                        }}
-                        className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-amber-500 text-white hover:bg-amber-600 transition-colors text-left text-xs font-bold shadow-sm"
-                      >
-                        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
-                        <span>Kết nối lại Google Drive</span>
-                      </button>
-                    )}
-                    
                     {userEmail ? (
                       <button
                         type="button"
@@ -4597,17 +4597,17 @@ export function HealthDashboard({
               </p>
             </div>
 
-            {!driveAuthorized ? (
+            {needsDriveAuthorization ? (
               <div className="space-y-4">
                 {userEmail ? (
                   <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex items-start gap-2.5">
                     <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
                       <p className="font-bold text-amber-900">
-                        Phiên Google Drive đã hết hạn
+                        Google Drive cần được cấp quyền
                       </p>
                       <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
-                        Tài khoản <span className="font-semibold">{userEmail}</span> đang đăng nhập nhưng cần cấp lại quyền truy cập Drive để xem và đồng bộ dữ liệu.
+                        Tài khoản <span className="font-semibold">{userEmail}</span> đã đăng nhập nhưng Drive chưa sẵn sàng. Hãy cấp quyền để tạo kho hoặc đồng bộ dữ liệu.
                       </p>
                     </div>
                   </div>
@@ -4629,7 +4629,7 @@ export function HealthDashboard({
                   className="w-full flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold text-sm shadow-md shadow-emerald-600/20 transition-all"
                 >
                   <LogIn className="w-4 h-4" />
-                  <span>{userEmail ? 'Cấp lại quyền Google Drive' : 'Đăng nhập Google & Cấp quyền Drive'}</span>
+                  <span>{userEmail ? 'Cấp lại quyền Drive' : 'Đăng nhập Google & Cấp quyền Drive'}</span>
                 </button>
               </div>
             ) : (
@@ -4756,29 +4756,32 @@ export function HealthDashboard({
                         <FileUp className="w-4 h-4" />
                         <span>Số hóa tài liệu ngay</span>
                       </button>
-                      {!driveAuthorized ? (
+                      {needsDriveAuthorization || !userEmail ? (
                         <button
                           type="button"
-                          onClick={onConnectDrive}
+                          onClick={() => {
+                            setErrorMessage('');
+                            onConnectDrive();
+                          }}
                           className="py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
                         >
                           <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>{userEmail ? 'Cấp lại quyền Drive' : 'Đăng nhập Google'}</span>
+                          <span>{driveActionLabel}</span>
                         </button>
                       ) : (
                         <button
                           type="button"
                           disabled={isSyncing}
                           onClick={() => {
-                            if (workspace.rootFolderId === 'local_offline_workspace') {
-                              void handleCreateWorkspace();
-                            } else {
+                            if (hasRemoteWorkspace) {
                               void handleManualSync();
+                            } else {
+                              void handleCreateWorkspace();
                             }
                           }}
                           className="py-2.5 px-3 rounded-xl border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center gap-1 transition-all disabled:opacity-50"
                         >
-                          {isSyncing ? 'Đang đồng bộ...' : (workspace.rootFolderId === 'local_offline_workspace' ? 'Tạo kho dữ liệu' : 'Đồng bộ dữ liệu')}
+                          {isSyncing ? 'Đang đồng bộ...' : driveActionLabel}
                         </button>
                       )}
                     </div>

@@ -188,6 +188,15 @@ function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
 
+function reportDriveHttpError(response: Response): void {
+  if (response.ok || response.status === 401 || typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent('google-drive-request-error', {
+      detail: { status: response.status },
+    }),
+  );
+}
+
 async function performDriveFetch(
   url: string,
   init: RequestInit,
@@ -197,7 +206,11 @@ async function performDriveFetch(
   const canUseNativeHttp = Capacitor.isNativePlatform() &&
     (nativeJsonResponse || !url.includes('alt=media')) &&
     (init.body === undefined || typeof init.body === 'string');
-  if (!canUseNativeHttp) return fetch(url, { ...init, headers });
+  if (!canUseNativeHttp) {
+    const response = await fetch(url, { ...init, headers });
+    reportDriveHttpError(response);
+    return response;
+  }
 
   const nativeResponse = await CapacitorHttp.request({
     url,
@@ -212,10 +225,12 @@ async function performDriveFetch(
     ? nativeResponse.data
     : JSON.stringify(nativeResponse.data ?? '');
   const responseBody = [204, 205, 304].includes(nativeResponse.status) ? null : body;
-  return new Response(responseBody, {
+  const response = new Response(responseBody, {
     status: nativeResponse.status,
     headers: nativeResponse.headers,
   });
+  reportDriveHttpError(response);
+  return response;
 }
 
 async function authenticatedDriveFetch(
@@ -252,6 +267,13 @@ async function driveRequest<T>(
       ...init.headers,
     },
   }, nativeJsonResponse);
+  if (!response.ok && typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('google-drive-request-error', {
+        detail: { status: response.status },
+      }),
+    );
+  }
   if (response.status === 412) {
     throw new DriveConflictError('Hồ sơ vừa được thay đổi trên một thiết bị khác.');
   }
