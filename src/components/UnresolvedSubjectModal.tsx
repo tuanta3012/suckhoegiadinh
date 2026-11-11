@@ -59,7 +59,7 @@ export function UnresolvedSubjectModal({
             <div className="flex items-center gap-2 flex-wrap mb-1">
               <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[10px] font-extrabold text-amber-800">
                 <AlertCircle className="w-3 h-3 text-amber-600" />
-                Cần chọn hồ sơ gán dữ liệu
+                Cần chọn người bệnh
               </span>
               {batchStatus && (
                 <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-extrabold text-slate-600">
@@ -77,18 +77,12 @@ export function UnresolvedSubjectModal({
             </p>
             {suggestedSubjectName && (
               <p className="mt-1 text-xs text-amber-800">
-                AI nhận diện: <strong>{suggestedSubjectName}</strong>. Hãy xác nhận hồ sơ trước khi lưu.
+                AI nhận diện: <strong className="font-bold text-amber-950">{suggestedSubjectName}</strong>
               </p>
             )}
-            {!canResolveSubject ? (
-              <p role="alert" className="mt-2 rounded-xl bg-rose-50 border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-800">
-                OCR chưa đọc được họ tên. Chọn hồ sơ có sẵn hoặc tạo hồ sơ mới để xác nhận gán thủ công.
-              </p>
-            ) : (
-              <p className="mt-2 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs font-semibold text-amber-900">
-                Chọn đúng người bệnh để xác nhận gán thủ công; tên OCR được giữ nguyên trong dữ liệu trích xuất.
-              </p>
-            )}
+            <p className="mt-2 rounded-xl bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 text-xs font-semibold text-amber-900">
+              Hãy chọn thành viên có sẵn hoặc nhập tên mới để gán tài liệu:
+            </p>
           </div>
           <button
             type="button"
@@ -105,7 +99,7 @@ export function UnresolvedSubjectModal({
         {members.length > 0 && (
           <div className="space-y-2">
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-              1. Chọn hồ sơ thành viên có sẵn trong gia đình:
+              1. Chọn thành viên có sẵn:
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-1">
               {members.map((member) => {
@@ -139,8 +133,8 @@ export function UnresolvedSubjectModal({
 
         {/* Create New Member Form */}
         {existingMemberName && (
-          <p className="rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900">
-            Hồ sơ vừa tạo: <strong className="font-extrabold text-emerald-950">{existingMemberName}</strong>. Chọn hồ sơ này bên trên để tiếp tục gán.
+          <p className="rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-2 text-xs font-semibold text-emerald-900">
+            Hồ sơ vừa tạo: <strong className="font-extrabold text-emerald-950">{existingMemberName}</strong>. Chọn hồ sơ này ở trên để tiếp tục gán.
           </p>
         )}
 
@@ -148,7 +142,7 @@ export function UnresolvedSubjectModal({
           {members.length > 0 && (
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                Hoặc tạo hồ sơ thành viên mới:
+                2. Hoặc tạo thành viên mới:
               </span>
               <button
                 type="button"
@@ -162,10 +156,7 @@ export function UnresolvedSubjectModal({
           )}
 
           {(showAddForm || members.length === 0) && (
-            <div className="space-y-2 bg-slate-50/80 p-3 rounded-2xl border border-slate-200">
-              <label className="block text-xs font-bold text-slate-700">
-                Họ và tên thành viên mới
-              </label>
+            <div className="space-y-2 bg-slate-50/80 p-2.5 rounded-2xl border border-slate-200">
               <div className="flex gap-2">
                 <input
                   autoFocus
@@ -176,7 +167,7 @@ export function UnresolvedSubjectModal({
                       onCreateMember(memberName);
                     }
                   }}
-                  placeholder="Nhập họ tên thành viên"
+                  placeholder="Nhập họ tên thành viên mới"
                   disabled={isSaving}
                   className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 placeholder:font-normal focus:border-emerald-500 focus:outline-none disabled:bg-slate-100"
                 />
@@ -195,7 +186,7 @@ export function UnresolvedSubjectModal({
         </div>
 
         {error && (
-          <p role="alert" className="rounded-2xl bg-rose-50 border border-rose-200 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
+          <p role="alert" className="rounded-2xl bg-rose-50 border border-rose-200 px-3.5 py-2 text-xs font-semibold text-rose-700">
             {error}
           </p>
         )}
@@ -210,7 +201,7 @@ export function UnresolvedSubjectModal({
               className="rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-3 py-2 text-xs font-bold disabled:opacity-50 flex items-center gap-1.5 transition-colors"
             >
               <OctagonX className="w-4 h-4 shrink-0 text-rose-600" />
-              <span>Dừng toàn bộ hàng đợi</span>
+              <span>Dừng hàng đợi</span>
             </button>
           ) : (
             <div />
@@ -223,7 +214,7 @@ export function UnresolvedSubjectModal({
               onClick={onDefer}
               className="rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-bold text-slate-700 disabled:opacity-50 transition-colors"
             >
-              {batchStatus ? 'Bỏ qua tệp này & Tiếp tục' : 'Để sau'}
+              {batchStatus ? 'Bỏ qua tệp này' : 'Để sau'}
             </button>
           </div>
         </div>

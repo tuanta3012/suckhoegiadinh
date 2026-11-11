@@ -448,7 +448,7 @@ async function createFolder(name: string, parentId?: string): Promise<DriveFile>
     appProperties: { app: 'com.suckhoegiadinh.app' },
   };
   if (parentId) metadata.parents = [parentId];
-  return driveRequest<DriveFile>(`${DRIVE_API}/files?fields=${encodeURIComponent(FILE_FIELDS)}`, {
+  return driveRequest<DriveFile>(`${DRIVE_API}/files?fields=${encodeURIComponent(FILE_FIELDS)}&supportsAllDrives=true`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(metadata),
@@ -478,7 +478,7 @@ async function uploadContent(
     { type: `multipart/related; boundary=${boundary}` },
   );
   return driveRequest<DriveFile>(
-    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}`,
+    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}&supportsAllDrives=true`,
     { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body },
   );
 }
@@ -502,7 +502,7 @@ async function replaceContent(
     { type: `multipart/related; boundary=${boundary}` },
   );
   return driveRequest<DriveFile>(
-    `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}`,
+    `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=${encodeURIComponent(FILE_FIELDS)}&supportsAllDrives=true`,
     {
       method: 'PATCH',
       headers: {
@@ -519,7 +519,7 @@ export const LEGACY_WORKSPACE_FOLDER_NAMES = ['Suc khoe gia dinh', 'Sức khỏe
 
 export async function renameDriveFolder(folderId: string, newName: string): Promise<DriveFile> {
   return driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=${encodeURIComponent(FILE_FIELDS)}`,
+    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=${encodeURIComponent(FILE_FIELDS)}&supportsAllDrives=true`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -529,31 +529,29 @@ export async function renameDriveFolder(folderId: string, newName: string): Prom
 }
 
 export async function stampHealthWorkspaceFolder(folderId: string): Promise<void> {
-  const file = await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed,appProperties`,
-  );
-  if (file.trashed || file.mimeType !== FOLDER_MIME) {
-    throw new Error('ID được Firestore cấp không phải thư mục Drive đang hoạt động.');
-  }
-  if (file.appProperties?.app_id === HEALTH_APP_ID) return;
+  try {
+    const file = await driveRequest<DriveFile>(
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed,appProperties&supportsAllDrives=true`,
+    );
+    if (file.trashed || file.mimeType !== FOLDER_MIME) {
+      return;
+    }
+    if (file.appProperties?.app_id === HEALTH_APP_ID) return;
 
-  const appProperties = {
-    ...file.appProperties,
-    app_id: HEALTH_APP_ID,
-  };
-  await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,appProperties`,
-    {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appProperties }),
-    },
-  );
-  const verified = await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,appProperties`,
-  );
-  if (verified.appProperties?.app_id !== HEALTH_APP_ID) {
-    throw new Error('Không xác nhận được nhãn ứng dụng trên thư mục Drive.');
+    const appProperties = {
+      ...file.appProperties,
+      app_id: HEALTH_APP_ID,
+    };
+    await driveRequest<DriveFile>(
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}?fields=id,appProperties&supportsAllDrives=true`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appProperties }),
+      },
+    );
+  } catch (err) {
+    console.warn('[Google Drive] Không thể dán nhãn appProperties (có thể do tài khoản thành viên chỉ có quyền writer/reader):', err);
   }
 }
 
@@ -978,7 +976,7 @@ export async function openHealthWorkspace(
   knownManifestFileId?: string,
 ): Promise<HealthDriveWorkspace> {
   const root = await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}`,
+    `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
   );
   if (root.mimeType !== FOLDER_MIME) {
     throw new Error('ID được nhập không phải là thư mục Google Drive.');
@@ -1001,7 +999,7 @@ export async function openHealthWorkspace(
   }
 
   const manifestMetadata = await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?fields=id,name,mimeType,parents,trashed`,
+    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?fields=id,name,mimeType,parents,trashed&supportsAllDrives=true`,
   );
   if (
     manifestMetadata.trashed ||
@@ -1013,7 +1011,7 @@ export async function openHealthWorkspace(
   }
 
   const familyResponse = await driveRequest<HealthFamily>(
-    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media`,
+    `${DRIVE_API}/files/${encodeURIComponent(manifestFileId)}?alt=media&supportsAllDrives=true`,
     {},
     true,
   );
@@ -1085,7 +1083,7 @@ export async function saveHealthFamily(workspace: HealthDriveWorkspace, family: 
     };
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`, {
+    const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media&supportsAllDrives=true`, {
       headers: { Authorization: `Bearer ${accessToken()}` },
     });
     if (!response.ok) throw new Error(`Không thể tải family.json mới nhất (HTTP ${response.status}).`);
@@ -1248,6 +1246,81 @@ export async function updateDriveFamilyMember(
   return updatedWorkspace;
 }
 
+export async function recreateDriveMemberProfile(
+  workspace: HealthDriveWorkspace,
+  memberId: string,
+): Promise<HealthDriveWorkspace> {
+  const member = workspace.family.members.find((item) => item.id === memberId);
+  if (!member) throw new Error('Không tìm thấy thành viên trong danh sách gia đình.');
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return workspace;
+  }
+
+  // 1. Đảm bảo thư mục profiles tồn tại
+  let profilesFolderId = workspace.family.profilesFolderId;
+  if (!profilesFolderId) {
+    const profiles = await createFolder('profiles', workspace.rootFolderId);
+    profilesFolderId = profiles.id;
+  }
+
+  // 2. Đảm bảo thư mục lưu file gốc của thành viên tồn tại
+  let rawFolderId = member.driveFolderId;
+  if (!rawFolderId || isLocalProfileFileId(rawFolderId)) {
+    let rawParentId = workspace.family.rawFilesFolderId;
+    if (!rawParentId) {
+      const raw = await createFolder('raw_files', workspace.rootFolderId);
+      rawParentId = raw.id;
+    }
+    const createdFolder = await createFolder(member.id, rawParentId);
+    rawFolderId = createdFolder.id;
+  }
+
+  // 3. Khởi tạo hồ sơ rỗng mới
+  const now = new Date().toISOString();
+  const profile: HealthProfile = {
+    schemaVersion: 1,
+    member: {
+      ...member,
+      driveFolderId: rawFolderId,
+      profileFileId: '',
+    },
+    timeline: [],
+    sources: [],
+    summary: { latestDiagnoses: [], latestMetrics: {} },
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const profileFile = await uploadContent(
+    `${member.id}.json`,
+    JSON_MIME,
+    new Blob([JSON.stringify(profile, null, 2)]),
+    profilesFolderId,
+  );
+
+  const updatedMember: FamilyMember = {
+    ...member,
+    driveFolderId: rawFolderId,
+    profileFileId: profileFile.id,
+  };
+
+  await replaceContent(
+    profileFile.id,
+    `${member.id}.json`,
+    JSON_MIME,
+    new Blob([JSON.stringify({ ...profile, member: updatedMember }, null, 2)]),
+  );
+
+  const updatedFamily: HealthFamily = {
+    ...workspace.family,
+    profilesFolderId,
+    members: workspace.family.members.map((m) => (m.id === memberId ? updatedMember : m)),
+    updatedAt: now,
+  };
+
+  return await saveHealthFamily(workspace, updatedFamily);
+}
+
 export async function deleteDriveFamilyMember(
   workspace: HealthDriveWorkspace,
   memberId: string,
@@ -1270,9 +1343,6 @@ export async function deleteDriveFamilyMember(
         },
       },
     };
-  }
-  if (!member.driveFolderId || !member.profileFileId) {
-    throw new Error('Thành viên thiếu ID thư mục hoặc hồ sơ Drive; không thể xóa an toàn.');
   }
 
   const familyWithoutMember: HealthFamily = {
@@ -1298,15 +1368,20 @@ export async function deleteDriveFamilyMember(
   } catch (error) {
     sharingError = error;
   }
-  try {
-    await deleteDriveFilesBatch([member.profileFileId, member.driveFolderId]);
-  } catch (error) {
-    const cleanupReason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
-    const sharingReason = sharingError instanceof Error ? ` Đồng thời: ${sharingError.message}` : '';
-    throw new WorkspaceSharingSyncError(
-      `Thành viên đã bị gỡ khỏi family.json nhưng chưa xóa hết dữ liệu Drive: ${cleanupReason}.${sharingReason}`,
-      updatedWorkspace,
-    );
+  const filesToDelete = [member.profileFileId, member.driveFolderId].filter(
+    (id): id is string => Boolean(id) && !id.startsWith('local_'),
+  );
+  if (filesToDelete.length > 0) {
+    try {
+      await deleteDriveFilesBatch(filesToDelete);
+    } catch (error) {
+      const cleanupReason = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
+      const sharingReason = sharingError instanceof Error ? ` Đồng thời: ${sharingError.message}` : '';
+      throw new WorkspaceSharingSyncError(
+        `Thành viên đã bị gỡ khỏi family.json nhưng chưa xóa hết dữ liệu Drive: ${cleanupReason}.${sharingReason}`,
+        updatedWorkspace,
+      );
+    }
   }
   if (sharingError) throw sharingError;
 
@@ -1393,7 +1468,7 @@ async function removeFamilyMemberFromManifest(
 ): Promise<HealthDriveWorkspace> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = await authenticatedDriveFetch(
-      `${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media`
+      `${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?alt=media&supportsAllDrives=true`
     );
     if (!response.ok) {
       throw new Error(`Không thể tải family.json trước khi gỡ thành viên (HTTP ${response.status}).`);
@@ -1431,7 +1506,7 @@ async function removeFamilyMemberFromManifest(
 
 export async function loadHealthProfile(fileId: string): Promise<HealthProfile> {
   return driveRequest<HealthProfile>(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
     {},
     true,
   );
@@ -1439,7 +1514,7 @@ export async function loadHealthProfile(fileId: string): Promise<HealthProfile> 
 
 async function saveHealthProfileRemote(fileId: string, profile: HealthProfile): Promise<HealthProfile> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`, {
+    const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, {
       headers: { Authorization: `Bearer ${accessToken()}` },
     });
     if (!response.ok) throw new Error(`Không thể tải hồ sơ mới nhất trước khi lưu (HTTP ${response.status}).`);
@@ -1554,7 +1629,7 @@ export async function moveDriveFileToMember(
 ): Promise<void> {
   if (fileId.startsWith('local_file_')) return;
   const metadata = await driveRequest<{ parents?: string[] }>(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=parents`,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=parents&supportsAllDrives=true`,
   );
   const currentParents = metadata.parents || [];
   if (currentParents.includes(destinationMember.driveFolderId)) return;
@@ -1568,13 +1643,13 @@ export async function moveDriveFileToMember(
     fields: FILE_FIELDS,
   });
   await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?${params.toString()}`,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?${params.toString()}&supportsAllDrives=true`,
     { method: 'PATCH' },
   );
 }
 
 export async function downloadDriveFile(fileId: string): Promise<Blob> {
-  const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`, {
+  const response = await authenticatedDriveFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${accessToken()}` },
   });
   if (!response.ok) throw new Error(`Không thể tải tài liệu gốc (HTTP ${response.status}).`);
@@ -1661,7 +1736,7 @@ export async function saveSharedAiResources(folderId: string | null | undefined,
 
 export async function deleteDriveFile(fileId: string): Promise<void> {
   const response = await authenticatedDriveFetch(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
     { method: 'DELETE' },
     false,
     [404],
@@ -1810,7 +1885,7 @@ export async function revokeDriveFolderAccess(folderId: string, memberEmail: str
   }
   for (const permission of matchingPermissions) {
     const response = await authenticatedDriveFetch(
-      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions/${encodeURIComponent(permission.id!)}`,
+      `${DRIVE_API}/files/${encodeURIComponent(folderId)}/permissions/${encodeURIComponent(permission.id!)}?supportsAllDrives=true`,
       { method: 'DELETE' },
     );
     if (response.ok || response.status === 404) continue;

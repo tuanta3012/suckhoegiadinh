@@ -64,10 +64,10 @@ export function findMemberByOcrPatientName(
   members: FamilyMember[],
   patientBirthDate?: string,
   patientGender?: string,
-): FamilyMember | undefined {
-  if (!isRecognizablePatientName(patientName)) return undefined;
+): { matched?: FamilyMember; candidates: FamilyMember[] } {
+  if (!isRecognizablePatientName(patientName)) return { candidates: [] };
   const normalizedName = normalizePatientName(patientName);
-  if (!normalizedName) return undefined;
+  if (!normalizedName) return { candidates: [] };
 
   const birthDate = normalizeBirthDate(patientBirthDate);
   const gender = normalizeGender(patientGender);
@@ -79,7 +79,10 @@ export function findMemberByOcrPatientName(
     if (gender && memberGender && gender !== memberGender) return false;
     return true;
   });
-  return candidates.length === 1 ? candidates[0] : undefined;
+  return {
+    matched: candidates.length === 1 ? candidates[0] : undefined,
+    candidates,
+  };
 }
 
 export function isOcrSubjectMatchedToMember(
@@ -90,10 +93,11 @@ export function isOcrSubjectMatchedToMember(
   patientGender?: string,
 ): boolean {
   if (!patientName) return false;
-  return findMemberByOcrPatientName(
+  const result = findMemberByOcrPatientName(
     patientName,
     members,
     patientBirthDate,
     patientGender,
-  )?.id === member.id;
+  );
+  return result.matched?.id === member.id;
 }

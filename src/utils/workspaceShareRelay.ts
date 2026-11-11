@@ -11,12 +11,10 @@ import {
 } from 'firebase/firestore';
 import { getSignedInGoogleEmail } from './googleDriveService';
 import { firestoreAuth as auth, firestoreDb as db } from './firebaseFirestore';
-const RELAY_COLLECTION = 'health_workspace_relays';
-const MEMBER_COLLECTION = 'members';
-const INVITE_COLLECTION = 'health_workspace_invites';
-const ASSIGNED_FOLDER_COLLECTION = 'health_assigned_folders';
 
-export type WorkspaceAccessRole = 'EDITOR' | 'VIEWER';
+const ASSIGNED_SHARES_COLLECTION = 'assigned_shares';
+
+export type WorkspaceAccessRole = 'ADMIN' | 'EDITOR' | 'VIEWER';
 
 export interface HealthWorkspaceAssignment {
   rootFolderId: string;
@@ -50,7 +48,13 @@ function authenticatedEmail(): string {
 }
 
 function isWorkspaceRole(value: unknown): value is WorkspaceAccessRole {
-  return value === 'EDITOR' || value === 'VIEWER';
+  return value === 'ADMIN' || value === 'EDITOR' || value === 'VIEWER' || value === 'Admin' || value === 'Editor' || value === 'Viewer';
+}
+
+function normalizeRole(value: unknown): WorkspaceAccessRole {
+  if (value === 'ADMIN' || value === 'Admin') return 'ADMIN';
+  if (value === 'VIEWER' || value === 'Viewer') return 'VIEWER';
+  return 'EDITOR';
 }
 
 function isFirestorePermissionDenied(error: unknown): boolean {
@@ -62,22 +66,8 @@ function isFirestorePermissionDenied(error: unknown): boolean {
   );
 }
 
-function memberAssignmentRef(rootFolderId: string, memberEmail: string) {
-  return doc(db, RELAY_COLLECTION, rootFolderId, MEMBER_COLLECTION, normalizeEmail(memberEmail));
-}
-
-function memberInviteRef(rootFolderId: string, memberEmail: string) {
-  return doc(
-    db,
-    INVITE_COLLECTION,
-    normalizeEmail(memberEmail),
-    'workspaces',
-    rootFolderId,
-  );
-}
-
-function assignedFolderRef(memberEmail: string) {
-  return doc(db, ASSIGNED_FOLDER_COLLECTION, normalizeEmail(memberEmail));
+function assignedShareRef(memberEmail: string) {
+  return doc(db, ASSIGNED_SHARES_COLLECTION, normalizeEmail(memberEmail));
 }
 
 export async function findAdminWorkspaceRelay(
@@ -87,19 +77,34 @@ export async function findAdminWorkspaceRelay(
   if (!cleanEmail) return null;
 
   try {
+    const adminDocRef = assignedShareRef(cleanEmail);
+    const snapshot = await getDoc(adminDocRef);
+    if (snapshot.exists()) {
+      const data = snapshot.data();
+      if (data.adminEmail === cleanEmail && (data.assignedFileId || data.rootFolderId) && data.familyFileId) {
+        return {
+          rootFolderId: data.assignedFileId || data.rootFolderId,
+          familyFileId: data.familyFileId,
+        };
+      }
+    }
+
     const q = query(
-      collection(db, RELAY_COLLECTION),
+      collection(db, ASSIGNED_SHARES_COLLECTION),
       where('adminEmail', '==', cleanEmail)
     );
-    const snapshot = await getDocs(q);
-    if (snapshot.empty) return null;
+    const querySnapshot = await getDocs(q);
+    if (querySnapshot.empty) return null;
 
-    const docs = snapshot.docs.map(d => d.data());
+    const docs = querySnapshot.docs.map(d => d.data());
     docs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const latest = docs[0];
 
+    const rootId = latest.assignedFileId || latest.rootFolderId;
+    if (!rootId || !latest.familyFileId) return null;
+
     return {
-      rootFolderId: latest.rootFolderId,
+      rootFolderId: rootId,
       familyFileId: latest.familyFileId,
     };
   } catch (error) {
@@ -121,19 +126,24 @@ export async function registerHealthWorkspaceRelay(
     throw new Error('Chỉ tài khoản Admin của Workspace mới được đăng ký chuyển tiếp.');
   }
 
-  const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
-  const existing = await getDoc(workspaceRef);
+  const shareRef = assignedShareRef(cleanAdminEmail);
+  const existing = await getDoc(shareRef);
+  const now = Date.now();
+
   if (existing.exists()) {
     const data = existing.data();
-    if (data.adminEmail !== cleanAdminEmail || data.rootFolderId !== rootFolderId) {
+    const existingRoot = data.assignedFileId || data.rootFolderId;
+    if (data.adminEmail !== cleanAdminEmail || existingRoot !== rootFolderId) {
       throw new Error('Workspace trên Firestore đã được đăng ký bởi tài khoản Admin khác.');
     }
-    if (data.familyFileId !== familyFileId) {
+    if (data.familyFileId !== familyFileId || data.role !== 'ADMIN' || data.assignedFileName !== 'Suc khoe gia dinh') {
       await setDoc(
-        workspaceRef,
+        shareRef,
         {
           familyFileId,
-          updatedAt: Date.now(),
+          role: 'ADMIN',
+          assignedFileName: 'Suc khoe gia dinh',
+          updatedAt: now,
         },
         { merge: true },
       );
@@ -141,11 +151,16 @@ export async function registerHealthWorkspaceRelay(
     return;
   }
 
-  await setDoc(workspaceRef, {
-    rootFolderId,
+  await setDoc(shareRef, {
+    assignedFileId: rootFolderId,
+    assignedFileName: 'Suc khoe gia dinh',
     familyFileId,
     adminEmail: cleanAdminEmail,
-    updatedAt: Date.now(),
+    memberEmail: cleanAdminEmail,
+    role: 'ADMIN',
+    status: 'active',
+    updatedAt: now,
+    createdAt: now,
   });
 }
 
@@ -175,67 +190,42 @@ export async function publishHealthWorkspaceAssignments(
       throw new Error('Danh sách thành viên chia sẻ có quyền không hợp lệ.');
     }
     uniqueMembers.set(email, {
-      role: member.role,
+      role: normalizeRole(member.role),
       source: member.source,
     });
   }
   if (uniqueMembers.size > 250) {
     throw new Error('Workspace vượt quá giới hạn 250 tài khoản được chia sẻ.');
   }
-  const assignedMemberEmails = [...uniqueMembers]
-    .filter(([, assignment]) => assignment.source === 'family_member')
-    .map(([email]) => email);
 
-  const existingAssignments = await listHealthWorkspaceAssignments(rootFolderId);
-  const existingByEmail = new Map(existingAssignments.map((assignment) => [assignment.memberEmail, assignment]));
   const now = Date.now();
-  const writes: HealthWorkspaceAssignment[] = [];
+  const writes: Array<{ email: string; payload: Record<string, unknown> }> = [];
+
   for (const [memberEmail, { role, source }] of uniqueMembers) {
-    const existing = existingByEmail.get(memberEmail);
-    if (
-      existing &&
-      existing.familyFileId === familyFileId &&
-      existing.adminEmail === cleanAdminEmail &&
-      existing.role === role &&
-      existing.source === source
-    ) {
-      continue;
-    }
     writes.push({
-      rootFolderId,
-      familyFileId,
-      adminEmail: cleanAdminEmail,
-      memberEmail,
-      role,
-      updatedAt: now,
-      ...(source ? { source } : {}),
+      email: memberEmail,
+      payload: {
+        assignedFileId: rootFolderId,
+        assignedFileName: 'Suc khoe gia dinh',
+        familyFileId,
+        adminEmail: cleanAdminEmail,
+        memberEmail,
+        role,
+        status: 'active',
+        updatedAt: now,
+        createdAt: now,
+        ...(source ? { source } : {}),
+      },
     });
   }
 
   for (let offset = 0; offset < writes.length; offset += 200) {
     const batch = writeBatch(db);
-    for (const assignment of writes.slice(offset, offset + 200)) {
-      batch.set(memberAssignmentRef(rootFolderId, assignment.memberEmail), assignment);
-      batch.set(memberInviteRef(rootFolderId, assignment.memberEmail), assignment);
+    for (const item of writes.slice(offset, offset + 200)) {
+      batch.set(assignedShareRef(item.email), item.payload, { merge: true });
     }
     await batch.commit();
   }
-
-  for (let offset = 0; offset < assignedMemberEmails.length; offset += 200) {
-    const batch = writeBatch(db);
-    for (const memberEmail of assignedMemberEmails.slice(offset, offset + 200)) {
-      batch.set(assignedFolderRef(memberEmail), {
-        folderId: rootFolderId,
-        status: 'active',
-        adminEmail: cleanAdminEmail,
-        memberEmail,
-        familyFileId,
-        updatedAt: now,
-      } satisfies HealthAssignedFolder);
-    }
-    await batch.commit();
-  }
-
 }
 
 export async function readHealthAssignedFolder(
@@ -243,21 +233,20 @@ export async function readHealthAssignedFolder(
 ): Promise<HealthAssignedFolder | null> {
   const cleanEmail = normalizeEmail(memberEmail);
   if (!cleanEmail) return null;
-  
+
   try {
     const currentEmail = authenticatedEmail();
     if (currentEmail !== cleanEmail) return null;
   } catch (error) {
-    // Không có phiên đăng nhập hợp lệ
     return null;
   }
 
   let snapshot;
   try {
-    snapshot = await getDoc(assignedFolderRef(cleanEmail));
+    snapshot = await getDoc(assignedShareRef(cleanEmail));
   } catch (error) {
     if (isFirestorePermissionDenied(error)) {
-      console.warn('[WorkspaceRelay] Firestore từ chối đọc health_assigned_folders:', cleanEmail);
+      console.warn('[WorkspaceRelay] Firestore từ chối đọc assigned_shares:', cleanEmail);
       return null;
     }
     throw new Error('Không thể tải thông tin liên kết thư mục từ Firestore.');
@@ -265,10 +254,11 @@ export async function readHealthAssignedFolder(
   if (!snapshot.exists()) return null;
 
   const data = snapshot.data();
+  const folderId = data.assignedFileId || data.folderId || data.rootFolderId;
   if (
     data.status !== 'active' ||
-    typeof data.folderId !== 'string' ||
-    !data.folderId.trim() ||
+    typeof folderId !== 'string' ||
+    !folderId.trim() ||
     typeof data.adminEmail !== 'string' ||
     !data.adminEmail.trim() ||
     typeof data.memberEmail !== 'string' ||
@@ -277,10 +267,18 @@ export async function readHealthAssignedFolder(
     !data.familyFileId.trim() ||
     typeof data.updatedAt !== 'number'
   ) {
-    console.warn('[WorkspaceRelay] Bản ghi health_assigned_folders không hợp lệ:', cleanEmail);
+    console.warn('[WorkspaceRelay] Bản ghi assigned_shares không hợp lệ:', cleanEmail);
     return null;
   }
-  return data as HealthAssignedFolder;
+
+  return {
+    folderId,
+    status: 'active',
+    adminEmail: data.adminEmail,
+    memberEmail: data.memberEmail,
+    familyFileId: data.familyFileId,
+    updatedAt: data.updatedAt,
+  };
 }
 
 export async function readHealthWorkspaceAssignment(
@@ -301,89 +299,59 @@ export async function readHealthWorkspaceAssignment(
   }
 
   const folderAssignment = await readHealthAssignedFolder(cleanEmail);
-  if (folderAssignment) {
-    return {
-      rootFolderId: folderAssignment.folderId,
-      familyFileId: folderAssignment.familyFileId,
-      adminEmail: folderAssignment.adminEmail,
-      memberEmail: folderAssignment.memberEmail,
-      role: 'EDITOR',
-      updatedAt: folderAssignment.updatedAt,
-      source: 'family_member',
-    };
-  }
+  if (!folderAssignment) return null;
 
-  let invites;
-  try {
-    invites = await getDocs(collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces'));
-  } catch (error) {
-    if (isFirestorePermissionDenied(error)) return null;
-    throw new Error('Không thể tải lời mời Workspace. Hãy kiểm tra kết nối rồi thử lại.');
-  }
+  const snapshot = await getDoc(assignedShareRef(cleanEmail));
+  const data = snapshot.exists() ? snapshot.data() : null;
 
-  if (!invites || invites.empty) {
-    return null;
-  }
-
-  const matchingAssignments: HealthWorkspaceAssignment[] = [];
-  for (const invite of invites.docs) {
-    const data = invite.data();
-    if (
-      data &&
-      typeof data.rootFolderId === 'string' &&
-      data.rootFolderId === invite.id &&
-      typeof data.familyFileId === 'string' &&
-      data.familyFileId &&
-      typeof data.adminEmail === 'string' &&
-      data.memberEmail === cleanEmail &&
-      isWorkspaceRole(data.role) &&
-      typeof data.updatedAt === 'number'
-    ) {
-      matchingAssignments.push(data as HealthWorkspaceAssignment);
-    }
-  }
-
-  if (matchingAssignments.length === 0) {
-    return null;
-  }
-
-  if (matchingAssignments.length > 1) {
-    throw new Error('Tài khoản có nhiều lời mời Workspace. Hãy mở Workspace bằng liên kết hoặc thư mục Drive cụ thể.');
-  }
-  return matchingAssignments[0] || null;
+  return {
+    rootFolderId: folderAssignment.folderId,
+    familyFileId: folderAssignment.familyFileId,
+    adminEmail: folderAssignment.adminEmail,
+    memberEmail: folderAssignment.memberEmail,
+    role: data ? normalizeRole(data.role) : 'EDITOR',
+    updatedAt: folderAssignment.updatedAt,
+    source: data?.source === 'family_member' ? 'family_member' : undefined,
+  };
 }
 
 export async function listHealthWorkspaceAssignments(
   rootFolderId: string,
 ): Promise<HealthWorkspaceAssignment[]> {
   try {
-    const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
-    const workspace = await getDoc(workspaceRef);
     const currentEmail = authenticatedEmail();
-    if (!workspace.exists()) {
-      return [];
-    }
-    const data = workspace.data();
-    if (!data.adminEmail || normalizeEmail(data.adminEmail) !== currentEmail) {
-      return [];
-    }
+    const q = query(
+      collection(db, ASSIGNED_SHARES_COLLECTION),
+      where('adminEmail', '==', currentEmail)
+    );
+    const snapshot = await getDocs(q);
+    if (snapshot.empty) return [];
 
-    const members = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
-    return members.docs.map((snapshot) => {
-      const memberData = snapshot.data();
-      if (
-        memberData.rootFolderId !== rootFolderId ||
-        typeof memberData.familyFileId !== 'string' ||
-        normalizeEmail(memberData.adminEmail) !== currentEmail ||
-        memberData.memberEmail !== snapshot.id ||
-        !isWorkspaceRole(memberData.role) ||
-        (memberData.source !== undefined && memberData.source !== 'family_member') ||
-        typeof memberData.updatedAt !== 'number'
-      ) {
-        return null;
-      }
-      return memberData as HealthWorkspaceAssignment;
-    }).filter(Boolean) as HealthWorkspaceAssignment[];
+    return snapshot.docs
+      .map((docSnap) => {
+        const data = docSnap.data();
+        const docRootId = data.assignedFileId || data.rootFolderId || data.folderId;
+        if (
+          docRootId !== rootFolderId ||
+          typeof data.familyFileId !== 'string' ||
+          normalizeEmail(data.adminEmail) !== currentEmail ||
+          !isWorkspaceRole(data.role) ||
+          typeof data.updatedAt !== 'number'
+        ) {
+          return null;
+        }
+
+        return {
+          rootFolderId: docRootId,
+          familyFileId: data.familyFileId,
+          adminEmail: data.adminEmail,
+          memberEmail: data.memberEmail || docSnap.id,
+          role: normalizeRole(data.role),
+          updatedAt: data.updatedAt,
+          source: data.source === 'family_member' ? 'family_member' : undefined,
+        } satisfies HealthWorkspaceAssignment;
+      })
+      .filter(Boolean) as HealthWorkspaceAssignment[];
   } catch (error) {
     if (isFirestorePermissionDenied(error)) {
       return [];
@@ -399,46 +367,45 @@ export async function removeHealthWorkspaceAssignment(
 ): Promise<void> {
   const cleanEmail = normalizeEmail(memberEmail);
   const currentEmail = authenticatedEmail();
-  const workspace = await getDoc(doc(db, RELAY_COLLECTION, rootFolderId));
-  if (!workspace.exists()) return;
-  const isAdmin = normalizeEmail(workspace.data().adminEmail) === currentEmail;
+  const shareRef = assignedShareRef(cleanEmail);
+  const snapshot = await getDoc(shareRef);
+  if (!snapshot.exists()) return;
+
+  const data = snapshot.data();
+  const isAdmin = normalizeEmail(data.adminEmail) === currentEmail;
   if (!isAdmin && cleanEmail !== currentEmail) {
     throw new Error('Không có quyền thu hồi lời mời này.');
   }
+
   const batch = writeBatch(db);
-  batch.delete(memberAssignmentRef(rootFolderId, cleanEmail));
-  batch.delete(memberInviteRef(rootFolderId, cleanEmail));
-  batch.delete(assignedFolderRef(cleanEmail));
+  batch.delete(shareRef);
   await batch.commit();
 }
+
 export async function unregisterHealthWorkspace(
   rootFolderId: string,
 ): Promise<void> {
   const currentEmail = authenticatedEmail();
-  const workspaceRef = doc(db, RELAY_COLLECTION, rootFolderId);
-  const snapshot = await getDoc(workspaceRef);
-  
-  if (!snapshot.exists()) return;
-  
-  const data = snapshot.data();
-  if (normalizeEmail(data.adminEmail) !== currentEmail) {
-    throw new Error('Chỉ tài khoản Admin mới có quyền xóa đăng ký Workspace.');
-  }
+  const q = query(
+    collection(db, ASSIGNED_SHARES_COLLECTION),
+    where('adminEmail', '==', currentEmail)
+  );
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) return;
 
-  const membersSnapshot = await getDocs(collection(workspaceRef, MEMBER_COLLECTION));
-  const memberEmails = membersSnapshot.docs.map((memberDoc) => memberDoc.id);
-  for (let offset = 0; offset < memberEmails.length; offset += 200) {
+  const matchingDocs = snapshot.docs.filter((docSnap) => {
+    const data = docSnap.data();
+    const docRootId = data.assignedFileId || data.rootFolderId || data.folderId;
+    return docRootId === rootFolderId;
+  });
+
+  for (let offset = 0; offset < matchingDocs.length; offset += 200) {
     const batch = writeBatch(db);
-    for (const memberEmail of memberEmails.slice(offset, offset + 200)) {
-      batch.delete(memberAssignmentRef(rootFolderId, memberEmail));
-      batch.delete(memberInviteRef(rootFolderId, memberEmail));
+    for (const docSnap of matchingDocs.slice(offset, offset + 200)) {
+      batch.delete(docSnap.ref);
     }
     await batch.commit();
   }
-
-  const batch = writeBatch(db);
-  batch.delete(workspaceRef);
-  await batch.commit();
 }
 
 export function subscribeHealthWorkspaceAssignments(
@@ -452,36 +419,40 @@ export function subscribeHealthWorkspaceAssignments(
     return () => {};
   }
 
-  const invitesRef = collection(db, INVITE_COLLECTION, cleanEmail, 'workspaces');
+  const shareRef = assignedShareRef(cleanEmail);
   return onSnapshot(
-    invitesRef,
+    shareRef,
     (snapshot) => {
-      if (snapshot.empty) {
+      if (!snapshot.exists()) {
         onAssignmentChange(null);
         return;
       }
-      const matching: HealthWorkspaceAssignment[] = [];
-      for (const inviteDoc of snapshot.docs) {
-        const data = inviteDoc.data();
-        if (
-          data &&
-          typeof data.rootFolderId === 'string' &&
-          data.rootFolderId === inviteDoc.id &&
-          typeof data.familyFileId === 'string' &&
-          data.familyFileId &&
-          typeof data.adminEmail === 'string' &&
-          data.memberEmail === cleanEmail &&
-          isWorkspaceRole(data.role) &&
-          typeof data.updatedAt === 'number'
-        ) {
-          matching.push(data as HealthWorkspaceAssignment);
-        }
+      const data = snapshot.data();
+      const rootId = data.assignedFileId || data.rootFolderId || data.folderId;
+      if (
+        data &&
+        data.status === 'active' &&
+        typeof rootId === 'string' &&
+        rootId &&
+        typeof data.familyFileId === 'string' &&
+        data.familyFileId &&
+        typeof data.adminEmail === 'string' &&
+        normalizeEmail(data.memberEmail || snapshot.id) === cleanEmail &&
+        isWorkspaceRole(data.role) &&
+        typeof data.updatedAt === 'number'
+      ) {
+        onAssignmentChange({
+          rootFolderId: rootId,
+          familyFileId: data.familyFileId,
+          adminEmail: data.adminEmail,
+          memberEmail: cleanEmail,
+          role: normalizeRole(data.role),
+          updatedAt: data.updatedAt,
+          source: data.source === 'family_member' ? 'family_member' : undefined,
+        });
+      } else {
+        onAssignmentChange(null);
       }
-      if (matching.length > 1) {
-        onError?.(new Error('Tài khoản có nhiều lời mời Workspace. Hãy nhờ quản trị viên thu hồi các lời mời trùng.'));
-        return;
-      }
-      onAssignmentChange(matching[0] || null);
     },
     (error) => {
       console.warn('[WorkspaceRelay] Lỗi khi lắng nghe thay đổi phân quyền Firestore:', error);

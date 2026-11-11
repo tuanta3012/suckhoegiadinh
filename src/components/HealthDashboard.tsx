@@ -89,6 +89,7 @@ import {
   openHealthWorkspace,
   loadHealthProfile,
   moveDriveFileToMember,
+  recreateDriveMemberProfile,
   revokeDriveFolderAccess,
   saveHealthProfile,
   updateDriveFamilyMember,
@@ -569,6 +570,7 @@ export function HealthDashboard({
 
   const workspaceRef = useRef<HealthDriveWorkspace | null>(null);
   const isCreatingWorkspaceRef = useRef(false);
+  const isResettingRef = useRef(false);
   const profilesRef = useRef<Record<string, HealthProfile>>({});
   const shouldRefreshCachedWorkspaceRef = useRef(
     Capacitor.isNativePlatform() &&
@@ -1222,111 +1224,116 @@ export function HealthDashboard({
       onDriveWorkspaceReset();
     }
     
-    // --- TỐI ƯU HÓA: CẬP NHẬT TỨC THỜI (OPTIMISTIC RESET) ---
     setIsLoading(true);
-    
-    // 1. Lưu lại các tham số cần thiết để dọn dẹp ở nền
+    isResettingRef.current = true;
+    discoveryAttemptedRef.current = true;
+
+    // 1. Lưu lại các tham số cần thiết
     const oldRootFolderId = workspace?.rootFolderId;
     const oldUserEmail = userEmail;
-    const hasRemote = hasRemoteWorkspace;
     const canDeleteRemote = canDeleteDrive;
 
-    // 2. Tạo trạng thái mới sạch sẽ ngay lập tức
+    // 2. Tạo trạng thái mới sạch sẽ
     const freshWs = createDefaultLocalWorkspace(userEmail);
     const freshProf = {};
 
-    // 3. Xóa cache "Sổ đăng ký" (Registry) ngay lập tức để Sync/Discovery không tìm lại folder cũ
-    if (oldUserEmail) {
-      void clearWorkspaceCache(oldUserEmail);
-    }
-    
-    // Xóa các key quan trọng trong localStorage ngay lập tức
-    localStorage.removeItem(PROFILE_ROOT_KEY);
-    localStorage.removeItem(LOCAL_WORKSPACE_KEY);
-    localStorage.removeItem(LOCAL_PROFILES_KEY);
-    if (oldUserEmail) {
-      const emailSuffix = `_${encodeURIComponent(oldUserEmail.trim().toLowerCase())}`;
-      localStorage.removeItem(`${PROFILE_ROOT_KEY}${emailSuffix}`);
-      localStorage.removeItem(`${LOCAL_WORKSPACE_KEY}${emailSuffix}`);
-      localStorage.removeItem(`${LOCAL_PROFILES_KEY}${emailSuffix}`);
-      localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, oldUserEmail));
-      localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, oldUserEmail));
-    }
-
-    // 4. CẬP NHẬT UI NGAY LẬP TỨC (Instant Transition)
-    workspaceRef.current = freshWs;
-    profilesRef.current = freshProf;
-    setWorkspace(freshWs);
-    setProfiles(freshProf);
-    setProfileErrors({});
-    setSelectedMemberId('');
-    setRootIdInput('');
-    setDigitizationDraft(null);
-    setIdentityResolutionDraft(null);
-    setPendingSubjectMember(null);
-    setIsCreatingSubjectMember(false);
-    setOcrRecoveryJobs([]);
-    setPendingLocalUploadCount(0);
-    setPendingUploadFiles([]);
-    setUploadQueue([]);
-    uploadQueueRef.current = [];
-    pendingUploadIdsRef.current = [];
-    setChatMessages([]);
-    setChatInput('');
-    digitizationLogger.clearLogs();
-    setIsSyncing(false);
-    setIsLoading(false); // Tắt spinner ngay lập tức để người dùng thấy UI sạch sẽ
-
-    // 5. Chuyển các tác vụ nặng (Network/Filesystem/Deep Cleanup) vào nền
-    void (async () => {
-      try {
-        // A. Xóa Drive & Firestore Registry (Đã tối ưu Rename + Background trong service)
-        if (canDeleteRemote && oldRootFolderId) {
+    try {
+      // 3. Xóa dữ liệu Google Drive và Registry nếu có quyền
+      if (canDeleteRemote && oldRootFolderId) {
+        showToast('Đang xóa toàn bộ dữ liệu trên Google Drive...', 'info');
+        try {
           await deleteHealthWorkspaceFolder(oldRootFolderId);
+        } catch (delError) {
+          console.warn('[FactoryReset] Lỗi khi xóa trên Google Drive:', delError);
         }
-
-        // B. Xóa Capacitor Filesystem (Hành động rất chậm trên di động)
-        if (supportsDurableOfflineQueue()) {
-          try {
-            await localSyncOutbox.clearAll();
-          } catch (e) { /* ignore FS errors */ }
-        }
-
-        // C. Quét và dọn dẹp sâu LocalStorage (Dọn sạch các key cũ)
-        if (typeof localStorage !== 'undefined') {
-          const exactKeys = new Set([
-            'health_offline_workspace_v2',
-            'health_offline_profiles_v2',
-            'family_health_ai_digitization_logs',
-          ]);
-          const keyPrefixes = [
-            `${LOCAL_WORKSPACE_KEY}_`,
-            `${LOCAL_PROFILES_KEY}_`,
-            `${PROFILE_ROOT_KEY}_`,
-            'health_ocr_recovery_v1_',
-            'health_pending_member_deletions_v1_',
-            'health_retention_',
-            'health_local_profile_',
-          ];
-          const keysToRemove: string[] = [];
-          for (let index = 0; index < localStorage.length; index += 1) {
-            const key = localStorage.key(index);
-            if (key && (exactKeys.has(key) || keyPrefixes.some((p) => key.startsWith(p)))) {
-              keysToRemove.push(key);
-            }
-          }
-          for (const key of keysToRemove) {
-            try {
-              localStorage.removeItem(key);
-            } catch (e) { /* ignore */ }
-          }
-        }
-        
-        showToast('Đã xóa sạch toàn bộ dữ liệu và dọn dẹp hệ thống.', 'success');
-      } catch (err) {
-        console.error('[Cleanup] Background cleanup failed:', err);
       }
-    })();
+
+      // 4. Xóa cache "Sổ đăng ký" (Registry) ngay lập tức để Sync/Discovery không tìm lại folder cũ
+      if (oldUserEmail) {
+        await clearWorkspaceCache(oldUserEmail).catch(() => {});
+      }
+      
+      // 5. Xóa các key quan trọng trong localStorage
+      localStorage.removeItem(PROFILE_ROOT_KEY);
+      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+      localStorage.removeItem(LOCAL_PROFILES_KEY);
+      if (oldUserEmail) {
+        const emailSuffix = `_${encodeURIComponent(oldUserEmail.trim().toLowerCase())}`;
+        localStorage.removeItem(`${PROFILE_ROOT_KEY}${emailSuffix}`);
+        localStorage.removeItem(`${LOCAL_WORKSPACE_KEY}${emailSuffix}`);
+        localStorage.removeItem(`${LOCAL_PROFILES_KEY}${emailSuffix}`);
+        localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, oldUserEmail));
+        localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, oldUserEmail));
+      }
+
+      // 6. Xóa Capacitor Filesystem (Offline outbox queue)
+      if (supportsDurableOfflineQueue()) {
+        try {
+          await localSyncOutbox.clearAll();
+        } catch (e) { /* ignore FS errors */ }
+      }
+
+      // 7. Quét và dọn dẹp sâu LocalStorage
+      if (typeof localStorage !== 'undefined') {
+        const exactKeys = new Set([
+          'health_offline_workspace_v2',
+          'health_offline_profiles_v2',
+          'family_health_ai_digitization_logs',
+        ]);
+        const keyPrefixes = [
+          `${LOCAL_WORKSPACE_KEY}_`,
+          `${LOCAL_PROFILES_KEY}_`,
+          `${PROFILE_ROOT_KEY}_`,
+          'health_ocr_recovery_v1_',
+          'health_pending_member_deletions_v1_',
+          'health_retention_',
+          'health_local_profile_',
+        ];
+        const keysToRemove: string[] = [];
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (key && (exactKeys.has(key) || keyPrefixes.some((p) => key.startsWith(p)))) {
+            keysToRemove.push(key);
+          }
+        }
+        for (const key of keysToRemove) {
+          try {
+            localStorage.removeItem(key);
+          } catch (e) { /* ignore */ }
+        }
+      }
+
+      // 8. Cập nhật UI sau khi xóa hoàn tất
+      workspaceRef.current = freshWs;
+      profilesRef.current = freshProf;
+      setWorkspace(freshWs);
+      setProfiles(freshProf);
+      setProfileErrors({});
+      setSelectedMemberId('');
+      setRootIdInput('');
+      setDigitizationDraft(null);
+      setIdentityResolutionDraft(null);
+      setPendingSubjectMember(null);
+      setIsCreatingSubjectMember(false);
+      setOcrRecoveryJobs([]);
+      setPendingLocalUploadCount(0);
+      setPendingUploadFiles([]);
+      setUploadQueue([]);
+      uploadQueueRef.current = [];
+      pendingUploadIdsRef.current = [];
+      setChatMessages([]);
+      setChatInput('');
+      digitizationLogger.clearLogs();
+      setIsSyncing(false);
+      discoveryAttemptedRef.current = true;
+      showToast('Đã xóa sạch toàn bộ dữ liệu trên Google Drive và thiết bị thành công.', 'success');
+    } catch (err) {
+      console.error('[FactoryReset] Reset failed:', err);
+      showToast('Đã xảy ra lỗi trong quá trình xóa dữ liệu.', 'error');
+    } finally {
+      isResettingRef.current = false;
+      setIsLoading(false);
+    }
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1852,7 +1859,7 @@ export function HealthDashboard({
 
   // Auto-connect to Drive Workspace on login
   useEffect(() => {
-    if (!driveAuthorized || !userEmail) return;
+    if (!driveAuthorized || !userEmail || isResettingRef.current) return;
     const shouldRefreshCachedWorkspace = shouldRefreshCachedWorkspaceRef.current;
     
     // Skip if already connected (unless force refresh) or if we already tried discovery and failed
@@ -2661,6 +2668,28 @@ export function HealthDashboard({
     }
   }
 
+  async function handleRecreateMemberProfile(memberId: string) {
+    if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return;
+    setIsLoading(true);
+    showToast('Đang khởi tạo lại tệp hồ sơ trên Google Drive...', 'info');
+    try {
+      const updated = await recreateDriveMemberProfile(workspace, memberId);
+      workspaceRef.current = updated;
+      setWorkspace(updated);
+      await reloadProfiles(updated);
+      setProfileErrors((prev) => {
+        const next = { ...prev };
+        delete next[memberId];
+        return next;
+      });
+      showToast('Đã khởi tạo lại tệp hồ sơ thành công trên Google Drive.', 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể khởi tạo lại tệp hồ sơ.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function handleCleanupDriveDuplicates() {
     if (!workspace || !driveAuthorized) return;
     const confirmed = await confirm({
@@ -3199,7 +3228,8 @@ export function HealthDashboard({
         );
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress, file.name);
       };
-      const result = await extractHealthEventWithProgress(file, member, reportProgress);
+      const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
+      const result = await extractHealthEventWithProgress(file, member, reportProgress, { isAutoDetect });
       if (!driveFileId) throw new Error('Không xác định được mã tài liệu Drive để lưu kết quả OCR.');
 
       const source = Object.values(profilesRef.current)
@@ -3280,7 +3310,7 @@ export function HealthDashboard({
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
       setTrackerState((previous) => ({ ...previous, memberId: targetMember.id }));
-      const saved = await saveExtractedDocumentAutomatically(draft, targetMember);
+      const saved = await saveExtractedDocumentAutomatically(draft, targetMember, true);
       if (!saved) {
         batchFailureCountRef.current += 1;
         setTrackerState((previous) => ({
@@ -3324,34 +3354,164 @@ export function HealthDashboard({
     const currentWorkspace = workspaceRef.current;
     if (!currentWorkspace) throw new Error('Không tìm thấy Workspace để gán tài liệu OCR.');
     const currentMembers = currentWorkspace.family.members;
-    const matchingMember = findMemberByOcrPatientName(
+
+    const findEmptyPlaceholder = () => {
+      return currentMembers.find((candidate) => {
+        const profile = profilesRef.current[candidate.id] || profiles[candidate.id];
+        const isPlaceholder = candidate.name === 'Thành viên mới' ||
+          candidate.name === 'Gia đình' ||
+          candidate.name.toLowerCase().includes('thanh vien');
+        const isEmpty = !profile || (profile.timeline.length === 0 && profile.sources.length <= 1);
+        return isPlaceholder && isEmpty;
+      });
+    };
+    
+    const { matched, candidates } = findMemberByOcrPatientName(
       patientName,
       currentMembers,
       extracted.patientBirthDate,
       extracted.patientGender,
     );
-    if (matchingMember) {
+
+    if (matched) {
       digitizationLogger.log(
         'info',
         'subject_match',
-        `Khớp chủ thể bệnh nhân "${patientName}" với thành viên gia đình: "${matchingMember.name}" (${matchingMember.id})`,
-        { patientName, matchedMemberId: matchingMember.id, matchedMemberName: matchingMember.name }
+        `Khớp chủ thể bệnh nhân "${patientName}" với thành viên gia đình: "${matched.name}" (${matched.id})`,
+        { patientName, matchedMemberId: matched.id, matchedMemberName: matched.name }
       );
-      if (!profilesRef.current[matchingMember.id]) {
-        const reloaded = await reloadProfiles(currentWorkspace);
+
+      // Nếu có thành viên rỗng 'Thành viên mới' thừa phát sinh trong quá trình chuẩn bị hàng đợi,
+      // tự động dọn dẹp để không làm rác danh sách gia đình
+      const emptyPlaceholder = findEmptyPlaceholder();
+      if (emptyPlaceholder && emptyPlaceholder.id !== matched.id && isWorkspaceAdmin) {
+        try {
+          const { workspace: cleanedWs } = await deleteDriveFamilyMember(currentWorkspace, emptyPlaceholder.id);
+          workspaceRef.current = cleanedWs;
+          setWorkspace(cleanedWs);
+        } catch (e) {
+          console.warn('[OCR Subject Match] Could not cleanup leftover placeholder member:', e);
+        }
+      }
+
+      if (!profilesRef.current[matched.id]) {
+        const reloaded = await reloadProfiles(workspaceRef.current || currentWorkspace);
         profilesRef.current = reloaded;
         setProfiles(reloaded);
       }
-      return matchingMember;
+      return matched;
+    }
+
+    // Nếu không có ứng viên nào và tên là hợp lệ -> Tự động đổi tên thành viên rỗng hoặc tạo thành viên mới
+    if (candidates.length === 0 && isRecognizablePatientName(patientName)) {
+      digitizationLogger.log(
+        'info',
+        'subject_auto_create',
+        `Không tìm thấy thành viên khớp; tự động tạo/cập nhật hồ sơ cho "${patientName}"`,
+        { patientName }
+      );
+      
+      try {
+        const normalizedName = normalizeVietnameseProperName(patientName);
+        const emptyPlaceholder = findEmptyPlaceholder();
+
+        let targetMember: FamilyMember;
+        let updatedWorkspace: HealthDriveWorkspace;
+
+        if (emptyPlaceholder) {
+          // Ưu tiên CẬP NHẬT/ĐỔI TÊN thành viên rỗng 'Thành viên mới' sẵn có thành "Trương Anh Tuấn"
+          if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+            updatedWorkspace = await updateDriveFamilyMember(currentWorkspace, emptyPlaceholder.id, {
+              name: normalizedName,
+              gender: genderFromOcr(extracted.patientGender, emptyPlaceholder.gender),
+              birthDate: extracted.patientBirthDate || emptyPlaceholder.birthDate,
+            });
+            targetMember = updatedWorkspace.family.members.find(m => m.id === emptyPlaceholder.id)!;
+          } else {
+            targetMember = {
+              ...emptyPlaceholder,
+              name: normalizedName,
+              gender: genderFromOcr(extracted.patientGender, emptyPlaceholder.gender),
+              birthDate: extracted.patientBirthDate || emptyPlaceholder.birthDate,
+            };
+            updatedWorkspace = {
+              ...currentWorkspace,
+              family: {
+                ...currentWorkspace.family,
+                members: currentWorkspace.family.members.map(m => m.id === emptyPlaceholder.id ? targetMember : m),
+                updatedAt: new Date().toISOString(),
+              },
+            };
+          }
+        } else {
+          // Nếu không có thành viên rỗng sẵn có -> Tạo mới hoàn toàn
+          const newMemberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+          if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+            updatedWorkspace = await addDriveFamilyMember(currentWorkspace, {
+              id: newMemberId,
+              name: normalizedName,
+              gender: genderFromOcr(extracted.patientGender),
+              birthDate: extracted.patientBirthDate,
+              role: 'other',
+            });
+            targetMember = updatedWorkspace.family.members.find(m => m.id === newMemberId)!;
+          } else {
+            targetMember = {
+              id: newMemberId,
+              name: normalizedName,
+              gender: genderFromOcr(extracted.patientGender),
+              birthDate: extracted.patientBirthDate,
+              role: 'other',
+              driveFolderId: `local_folder_${newMemberId}`,
+              profileFileId: `local_profile_${newMemberId}`,
+            };
+            const localProfile = { ...createHealthProfile(targetMember), syncPending: true };
+            if (offlineOwnerKey) {
+              await localSyncOutbox.enqueueMemberSave(
+                offlineOwnerKey,
+                currentWorkspace.rootFolderId,
+                targetMember,
+                localProfile,
+                true,
+              );
+            }
+            updatedWorkspace = {
+              ...currentWorkspace,
+              family: {
+                ...currentWorkspace.family,
+                members: [...currentWorkspace.family.members, targetMember],
+                updatedAt: new Date().toISOString(),
+              },
+            };
+            profilesRef.current = { ...profilesRef.current, [targetMember.id]: localProfile };
+            setProfiles((prev) => ({ ...prev, [targetMember.id]: localProfile }));
+          }
+        }
+
+        workspaceRef.current = updatedWorkspace;
+        setWorkspace(updatedWorkspace);
+        
+        // Ensure profile is loaded for the target member
+        if (!profilesRef.current[targetMember.id]) {
+          const reloaded = await reloadProfiles(updatedWorkspace);
+          profilesRef.current = reloaded;
+          setProfiles(reloaded);
+        }
+        
+        showToast(`Đã tự động gán hồ sơ cho "${normalizedName}".`, 'success');
+        return targetMember;
+      } catch (error) {
+        console.error('[OCR Auto-create] Failed to create or update member:', error);
+      }
     }
 
     digitizationLogger.log(
       'warn',
       'subject_match_requires_confirmation',
-      `Không thể khớp chủ thể OCR "${patientName}" với duy nhất một hồ sơ; yêu cầu xác nhận thủ công.`,
+      `Không thể khớp chủ thể OCR "${patientName}" tự động (số ứng viên: ${candidates.length}); yêu cầu xác nhận thủ công.`,
       {
         patientName,
-        memberNames: currentMembers.map((candidate) => candidate.name),
+        candidateNames: candidates.map((c) => c.name),
         patientBirthDate: extracted.patientBirthDate,
         patientGender: extracted.patientGender,
       }
@@ -4386,7 +4546,7 @@ export function HealthDashboard({
                       <div className="font-bold text-slate-800">{driveActionLabel}</div>
                       <div className="text-[10px] text-slate-400 font-normal truncate">
                         {needsDriveAuthorization
-                          ? 'Kết nối lại để tiếp tục với Google Drive'
+                          ? 'Cấp lại quyền truy cập Drive'
                           : hasRemoteWorkspace
                             ? 'Đồng bộ 2 chiều với Drive'
                             : 'Khởi tạo thư mục trên Drive'}
@@ -4583,21 +4743,37 @@ export function HealthDashboard({
         {selectedMember && profileErrors[selectedMember.id] && (
           <div
             role="alert"
-            className="mb-4 flex flex-col gap-2 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between"
+            className="mb-4 flex flex-col gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="text-sm">
               <p className="font-bold">Chưa tải được hồ sơ của {selectedMember.name}</p>
-              <p className="mt-1 text-xs">{profileErrors[selectedMember.id]}</p>
-              <p className="mt-1 text-xs">Để tránh ghi đè nhầm bằng hồ sơ rỗng, thao tác số hóa và AI đang bị khóa.</p>
+              <p className="mt-1 text-xs font-mono break-all text-amber-900">{profileErrors[selectedMember.id]}</p>
+              <p className="mt-1 text-xs">
+                {/file not found|404|không tìm thấy tệp/i.test(profileErrors[selectedMember.id])
+                  ? 'Tệp hồ sơ trên Google Drive đã bị xóa hoặc không còn tồn tại. Bạn có thể khởi tạo lại tệp hồ sơ mới hoặc xóa thành viên này khỏi gia đình.'
+                  : 'Để tránh ghi đè nhầm bằng hồ sơ rỗng, thao tác số hóa và AI đang bị khóa.'}
+              </p>
             </div>
-            <button
-              type="button"
-              disabled={isLoading || !workspace}
-              onClick={() => workspace && void reloadProfiles(workspace)}
-              className="shrink-0 rounded-xl bg-amber-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
-            >
-              Tải lại hồ sơ
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {/file not found|404|không tìm thấy tệp/i.test(profileErrors[selectedMember.id]) && workspace?.rootFolderId !== 'local_offline_workspace' && (
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => void handleRecreateMemberProfile(selectedMember.id)}
+                  className="rounded-xl bg-emerald-700 px-3 py-2 text-xs font-bold text-white shadow hover:bg-emerald-800 disabled:opacity-50"
+                >
+                  Khởi tạo lại hồ sơ trên Drive
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={isLoading || !workspace}
+                onClick={() => workspace && void reloadProfiles(workspace)}
+                className="shrink-0 rounded-xl bg-amber-700 px-3 py-2 text-xs font-bold text-white hover:bg-amber-800 disabled:opacity-50"
+              >
+                Tải lại hồ sơ
+              </button>
+            </div>
           </div>
         )}
 
@@ -4799,7 +4975,7 @@ export function HealthDashboard({
                         <FileUp className="w-4 h-4" />
                         <span>Số hóa tài liệu ngay</span>
                       </button>
-                      {needsDriveAuthorization || !userEmail ? (
+                      {!userEmail ? (
                         <button
                           type="button"
                           onClick={() => {
@@ -4816,7 +4992,9 @@ export function HealthDashboard({
                           type="button"
                           disabled={isSyncing}
                           onClick={() => {
-                            if (hasRemoteWorkspace) {
+                            if (needsDriveAuthorization) {
+                              onConnectDrive();
+                            } else if (hasRemoteWorkspace) {
                               void handleManualSync();
                             } else {
                               void handleCreateWorkspace();
@@ -6331,7 +6509,7 @@ function findBestMemberMatch(
   currentSelectedId: string
 ): string {
   if (!members.length) return '';
-  const matched = extracted.patientName
+  const result = extracted.patientName
     ? findMemberByOcrPatientName(
         extracted.patientName,
         members,
@@ -6339,7 +6517,7 @@ function findBestMemberMatch(
         extracted.patientGender,
       )
     : undefined;
-  if (matched) return matched.id;
+  if (result?.matched) return result.matched.id;
   return currentSelectedId || members[0]?.id || '';
 }
 

@@ -1,63 +1,28 @@
 {
   "entities": {
-    "WorkspaceRelay": {
-      "title": "WorkspaceRelay",
-      "description": "Bản ghi chuyển tiếp Workspace trung tâm trên Firestore",
+    "AssignedShare": {
+      "title": "AssignedShare",
+      "description": "Bản ghi liên kết kho dữ liệu y tế gia đình duy nhất cho Admin và Thành viên",
       "type": "object",
       "properties": {
-        "rootFolderId": { "type": "string" },
-        "familyFileId": { "type": "string" },
-        "adminEmail": { "type": "string" },
-        "updatedAt": { "type": "number" }
-      },
-      "required": ["rootFolderId", "familyFileId", "adminEmail", "updatedAt"]
-    },
-    "WorkspaceMember": {
-      "title": "WorkspaceMember",
-      "description": "Thành viên được chia sẻ quyền truy cập Workspace",
-      "type": "object",
-      "properties": {
-        "rootFolderId": { "type": "string" },
+        "assignedFileId": { "type": "string" },
+        "assignedFileName": { "type": "string" },
         "familyFileId": { "type": "string" },
         "adminEmail": { "type": "string" },
         "memberEmail": { "type": "string" },
-        "role": { "type": "string", "enum": ["EDITOR", "VIEWER"] },
+        "role": { "type": "string", "enum": ["ADMIN", "EDITOR", "VIEWER", "Admin", "Editor", "Viewer"] },
+        "status": { "type": "string", "enum": ["active"] },
         "updatedAt": { "type": "number" },
+        "createdAt": { "type": "number" },
         "source": { "type": "string", "enum": ["family_member"] }
       },
-      "required": ["rootFolderId", "familyFileId", "adminEmail", "memberEmail", "role", "updatedAt"]
-    },
-    "AssignedFolder": {
-      "title": "AssignedFolder",
-      "description": "Bản ghi bắt tay (handshake) liên kết thư mục cho thành viên",
-      "type": "object",
-      "properties": {
-        "folderId": { "type": "string" },
-        "status": { "type": "string", "enum": ["active"] },
-        "adminEmail": { "type": "string" },
-        "memberEmail": { "type": "string" },
-        "familyFileId": { "type": "string" },
-        "updatedAt": { "type": "number" }
-      },
-      "required": ["folderId", "status", "adminEmail", "memberEmail", "familyFileId", "updatedAt"]
+      "required": ["assignedFileId", "adminEmail", "memberEmail", "role", "status", "updatedAt"]
     }
   },
   "firestore": {
-    "/health_workspace_relays/{rootId}": {
-      "schema": "WorkspaceRelay",
-      "description": "Đăng ký Workspace Drive lên Firestore"
-    },
-    "/health_workspace_relays/{rootId}/members/{memberEmail}": {
-      "schema": "WorkspaceMember",
-      "description": "Danh sách thành viên của một Workspace"
-    },
-    "/health_workspace_invites/{memberEmail}/workspaces/{rootId}": {
-      "schema": "WorkspaceMember",
-      "description": "Lời mời Workspace cho từng cá nhân"
-    },
-    "/health_assigned_folders/{memberEmail}": {
-      "schema": "AssignedFolder",
-      "description": "Liên kết thư mục Workspace ngầm dựa trên email thành viên"
+    "/assigned_shares/{memberEmail}": {
+      "schema": "AssignedShare",
+      "description": "Kho liên kết dữ liệu duy nhất lưu theo email của thành viên/admin"
     }
   }
 }

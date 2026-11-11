@@ -22,20 +22,20 @@ describe('OCR subject routing', () => {
   );
 
   it('matches recognized names against existing members regardless of Vietnamese accents', () => {
-    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [member])).toEqual(member);
+    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [member]).matched).toEqual(member);
   });
 
   it('does not auto-match a partial name to a different full name', () => {
     expect(findMemberByOcrPatientName('Tu Anh', [
       { ...member, name: 'Vũ Thị Tú Anh' },
-    ])).toBeUndefined();
+    ]).matched).toBeUndefined();
   });
 
   it('requires manual confirmation when matching names are ambiguous', () => {
     expect(findMemberByOcrPatientName('Nguyen Thi Mai', [
       member,
       { ...member, id: 'member-2', profileFileId: 'profile-2' },
-    ])).toBeUndefined();
+    ]).matched).toBeUndefined();
   });
 
   it('rejects a name match when the OCR birth date or gender conflicts with the member', () => {
@@ -44,24 +44,24 @@ describe('OCR subject routing', () => {
       [{ ...member, birthDate: '1980-12-30', gender: 'female' }],
       '1981-12-30',
       'Nữ',
-    )).toBeUndefined();
+    ).matched).toBeUndefined();
     expect(findMemberByOcrPatientName(
       'Nguyen Thi Mai',
       [{ ...member, birthDate: '1980-12-30', gender: 'female' }],
       '30/12/1980',
       'Nam',
-    )).toBeUndefined();
+    ).matched).toBeUndefined();
   });
 
   it('can match a member created by an earlier file in the same upload queue', () => {
     const earlierCreatedMember = { ...member, id: 'member-2', name: 'Trần Văn Minh' };
-    expect(findMemberByOcrPatientName('Tran Van Minh', [member, earlierCreatedMember])).toEqual(
+    expect(findMemberByOcrPatientName('Tran Van Minh', [member, earlierCreatedMember]).matched).toEqual(
       earlierCreatedMember,
     );
   });
 
   it('does not assign a document when OCR did not identify a usable name', () => {
-    expect(findMemberByOcrPatientName('Không rõ', [member])).toBeUndefined();
+    expect(findMemberByOcrPatientName('Không rõ', [member]).matched).toBeUndefined();
   });
 
   it('only confirms a target member when OCR has a matching subject', () => {

@@ -1,6 +1,0 @@
-{
-  "summary":  "Kế hoạch nâng cấp và khai thác trực tiếp các module sẵn có (workspaceShareRelay.ts, healthDriveService.ts, googleDriveService.ts) để tự động gắn nhãn appProperties, quét nhận diện kho Drive và đồng bộ 2 chiều qua Firestore khi thành viên đăng nhập.",
-  "updatedAt":  "2026-11-10T12:16:28.989427239Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

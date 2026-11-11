@@ -247,22 +247,26 @@ function recordProjectFailure(
 }
 
 async function verifyFirebaseIdToken(idToken: string): Promise<string | null> {
-  const response = await fetch(
-    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken }),
-      signal: AbortSignal.timeout(10_000),
-    },
-  );
-  if (response.status === 400 || response.status === 401 || response.status === 403) return null;
-  if (!response.ok) throw new Error(`Firebase token verification returned ${response.status}.`);
-  const result = await response.json() as {
-    users?: Array<{ localId?: string; disabled?: boolean }>;
-  };
-  const user = result.users?.[0];
-  return user?.localId && !user.disabled ? user.localId : null;
+  try {
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+        signal: AbortSignal.timeout(2_000),
+      },
+    );
+    if (response.status === 400 || response.status === 401 || response.status === 403) return null;
+    if (!response.ok) return null;
+    const result = await response.json() as {
+      users?: Array<{ localId?: string; disabled?: boolean }>;
+    };
+    const user = result.users?.[0];
+    return user?.localId && !user.disabled ? user.localId : null;
+  } catch {
+    return null;
+  }
 }
 
 function isWithinRateLimit(uid: string): boolean {
@@ -332,6 +336,7 @@ interface ExecuteOptions {
   preferredProjectId?: string;
   preferredModel?: string;
   responseSchema?: any;
+  clientGeminiKeys?: string[];
 }
 
 async function callGeminiModel(
@@ -419,10 +424,18 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
   }
 
   const scheduler = getQuotaScheduler();
-  const projects = scheduler.getProjects();
+  const serverProjects = scheduler.getProjects();
+  const clientProjects = parseGeminiProjects(options.clientGeminiKeys || [], undefined);
+  const projects = [...serverProjects, ...clientProjects];
+  
   if (projects.length === 0) {
-    throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ.');
+    throw new Error('Chưa cấu hình GEMINI_API_KEYS trên máy chủ và không có key từ ứng dụng.');
   }
+
+  // Create a temporary scheduler if client projects are provided to manage their quota during this request
+  const activeScheduler = clientProjects.length > 0 
+    ? new GeminiQuotaScheduler(projects)
+    : scheduler;
 
   // Sử dụng duy nhất 1 mô hình chỉ định cho tác vụ, không sử dụng mô hình dự phòng
   const targetModel = options.preferredModel || (TASK_MODELS[options.task] ? TASK_MODELS[options.task][0] : 'gemini-3.5-flash-lite');
@@ -452,7 +465,7 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
 
       let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
       try {
-        lease = await scheduler.acquire(
+        lease = await activeScheduler.acquire(
           options.task,
           currentModel,
           quota,
@@ -477,8 +490,8 @@ async function executeGeminiWithFailover(options: ExecuteOptions): Promise<{ tex
       } catch (error) {
         const details = describeGeminiError(error);
         lastError = error instanceof Error ? error : new Error(String(error));
-        const shouldRetry = recordProjectFailure(scheduler, project.id, currentModel, error, true, false);
-        scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
+        const shouldRetry = recordProjectFailure(activeScheduler, project.id, currentModel, error, true, false);
+        activeScheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
         
         digitizationLogger.log(
           'warn',
@@ -513,10 +526,17 @@ async function executeDigitizationWithFailover(
   options: ExecuteOptions,
 ): Promise<{ text: string; modelUsed: string }> {
   const scheduler = getQuotaScheduler();
-  const projects = scheduler.getProjects();
+  const serverProjects = scheduler.getProjects();
+  const clientProjects = parseGeminiProjects(options.clientGeminiKeys || [], undefined);
+  const projects = [...serverProjects, ...clientProjects];
+
   if (projects.length === 0) {
-    throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng thiết lập key trong Settings > Secrets.');
+    throw new Error('Chưa cấu hình GEMINI_API_KEY trên máy chủ và không có key từ ứng dụng.');
   }
+
+  const activeScheduler = clientProjects.length > 0
+    ? new GeminiQuotaScheduler(projects)
+    : scheduler;
 
   const deadline = Date.now() + (options.timeoutMs || GEMINI_OCR_TIMEOUT_MS);
   const quota = getTaskQuota('digitization');
@@ -533,7 +553,7 @@ async function executeDigitizationWithFailover(
 
       let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
       try {
-        lease = await scheduler.acquire(
+        lease = await activeScheduler.acquire(
           'digitization',
           targetModel,
           quota,
@@ -563,8 +583,8 @@ async function executeDigitizationWithFailover(
         if (options.signal?.aborted) throw error;
         lastError = error instanceof Error ? error : new Error(String(error));
         const details = describeGeminiError(error);
-        recordProjectFailure(scheduler, project.id, targetModel, error, false, false);
-        scheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
+        recordProjectFailure(activeScheduler, project.id, targetModel, error, false, false);
+        activeScheduler.markProjectCooldown(project.id, GEMINI_OCR_PROJECT_COOLDOWN_MS);
 
         digitizationLogger.log(
           'warn',
@@ -587,28 +607,20 @@ async function executeDigitizationWithFailover(
 async function startServer() {
   quotaScheduler = new GeminiQuotaScheduler(getConfiguredProjects());
   const app = express();
-  const allowedOrigins = new Set([
-    'https://localhost',
-    'http://localhost',
-    'capacitor://localhost',
-    ...(process.env.CORS_ALLOWED_ORIGINS || '')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  ]);
-
   app.use((req: Request, res: Response, next: NextFunction) => {
     const origin = req.header('Origin');
-    if (origin && allowedOrigins.has(origin)) {
+    if (origin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.vary('Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-      res.setHeader('Access-Control-Max-Age', '600');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
     }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') {
-      res.sendStatus(origin && allowedOrigins.has(origin) ? 204 : 403);
+      res.sendStatus(204);
       return;
     }
     next();
@@ -647,6 +659,8 @@ async function startServer() {
 
 
   app.use('/api/gemini', async (req: Request, res: Response, next) => {
+    req.setTimeout(300_000);
+    res.setTimeout(300_000);
     if (req.path === '/status' || req.path === '/digitization-logs') {
       next();
       return;
@@ -763,7 +777,7 @@ async function startServer() {
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let modelAbortController: AbortController | undefined;
     try {
-      const { base64Data, mimeType, member } = req.body;
+      const { base64Data, mimeType, member, isAutoDetect } = req.body;
       if (typeof base64Data !== 'string' || base64Data.length === 0) {
         res.status(400).json({ error: 'Thiếu dữ liệu tệp đính kèm (base64).' });
         return;
@@ -801,8 +815,16 @@ async function startServer() {
         throw error;
       }
 
+      const taskContextInstruction = isAutoDetect
+        ? `LƯU Ý QUAN TRỌNG VỀ THỦ THỤC TỰ ĐỘNG NHẬN DIỆN CHỦ THỂ (AUTO-DETECT MODE):
+- Bạn ĐANG XỬ LÝ Ở CHẾ ĐỘ TỰ ĐỘNG NHẬN DIỆN CHỦ THỂ (Auto-detect patient mode).
+- BẮT BUỘC ĐỌC VÀ TRÍCH XUẤT BẰNG ĐƯỢC HỌ VÀ TÊN BỆNH NHÂN THỰC TẾ GHI TRÊN TÀI LIỆU Y TẾ NÀY vào trường "patientName".
+- Tuyệt đối KHÔNG gán tên mặc định, KHÔNG gán tên gợi ý (${memberName}), KHÔNG suy đoán tên từ tài khoản người dùng khác. Bóc tách chính xác tên in/viết trên tài liệu y tế này (như Vũ Thị Tú Anh, Trương Anh Tuấn...).`
+        : `Nhiệm vụ: Trích xuất đầy đủ, trung thực, súc tích các dữ liệu y tế cốt lõi trên tài liệu đính kèm cho thành viên gia đình (${memberName} ${memberBirth}).
+NÓI RÕ: BẮT BUỘC vẫn ghi đúng HỌ VÀ TÊN BỆNH NHÂN in/viết thực tế trên giấy tờ y tế này vào trường "patientName". Nếu tài liệu ghi tên bệnh nhân khác (${memberName}), vẫn trích xuất chính xác tên thực tế đó.`;
+
       const systemInstruction = `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam cấp cao (sổ khám bệnh tổng quát, phiếu xét nghiệm, siêu âm/X-quang/CT/MRI/ECG, đơn thuốc, sổ tiêm chủng, giấy ra viện, hoặc các loại giấy tờ y tế khác).
-Nhiệm vụ: Trích xuất đầy đủ, trung thực, súc tích các dữ liệu y tế cốt lõi trên tài liệu đính kèm cho thành viên gia đình (${memberName} ${memberBirth}).
+${taskContextInstruction}
 Tên tệp tin đang xử lý: "${req.body.fileName || 'Không rõ tên tệp'}".
 
 QUY TẮC BẮT BUỘC VỀ THỜI GIAN & NGÀY KHÁM (CRITICAL DATE RESOLUTION):
@@ -987,6 +1009,7 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
                 signal,
                 onProgress: onModelProgress,
                 preferredProjectId,
+                clientGeminiKeys: req.body.clientGeminiKeys,
               });
             } catch (error) {
               lastBatchError = error;
@@ -1176,6 +1199,7 @@ Hãy:
         task: 'refinement',
         contents: [{ text: prompt }],
         responseMimeType: 'application/json',
+        clientGeminiKeys: req.body.clientGeminiKeys,
       });
 
       const parsed = parseJsonSafely(text) as {
@@ -1227,6 +1251,7 @@ Trình bày bằng tiếng Việt rõ ràng, ân cần.`;
         task: 'assistant',
         contents: [{ text: prompt }],
         responseSchema,
+        clientGeminiKeys: req.body.clientGeminiKeys,
       });
 
       const parsed = parseJsonSafely(text) as { summary?: string };
@@ -1351,6 +1376,7 @@ LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên 
         responseMimeType: 'application/json',
         responseSchema,
         preferredModel: requestedModel,
+        clientGeminiKeys: req.body.clientGeminiKeys,
       });
 
       const parsed = parseJsonSafely(text) as Record<string, unknown>;
@@ -1527,8 +1553,16 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
       // Streaming SSE
       if (stream) {
         const scheduler = getQuotaScheduler();
-        const projects = scheduler.getProjects();
+        const serverProjects = scheduler.getProjects();
+        const clientProjects = parseGeminiProjects(req.body.clientGeminiKeys || [], undefined);
+        const projects = [...serverProjects, ...clientProjects];
+        
         if (projects.length === 0) throw new Error('Chưa cấu hình GEMINI_API_KEYS.');
+        
+        const activeScheduler = clientProjects.length > 0
+          ? new GeminiQuotaScheduler(projects)
+          : scheduler;
+
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
@@ -1557,7 +1591,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
             while (attemptedProjectIds.size < projects.length && !controller.signal.aborted) {
               let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
               try {
-                lease = await scheduler.acquire(
+                lease = await activeScheduler.acquire(
                   'assistant',
                   model,
                   getTaskQuota('assistant'),
@@ -1603,7 +1637,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
               } catch (error) {
                 const details = describeGeminiError(error);
                 lastError = error instanceof Error ? error : new Error(String(error));
-                const shouldRetry = recordProjectFailure(scheduler, lease.project.id, model, error);
+                const shouldRetry = recordProjectFailure(activeScheduler, lease.project.id, model, error);
                 if (hasOutput || controller.signal.aborted) throw lastError;
                 console.warn(
                   `[Gemini assistant] ${model} failed for configured project ${lease.project.id} (${details.status || 'network'}).`,
@@ -1636,6 +1670,7 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
       const { text, modelUsed } = await executeGeminiWithFailover({
         task: 'assistant',
         contents: [{ text: prompt }],
+        clientGeminiKeys: req.body.clientGeminiKeys,
       });
 
       res.json({ success: true, answer: text, modelUsed });
@@ -1686,9 +1721,12 @@ Hãy trả lời chi tiết, ân cần, căn cứ vào dữ liệu hồ sơ bệ
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Health Server] Running on http://0.0.0.0:${PORT} (mode: ${isProd ? 'production' : 'development'})`);
   });
+  server.keepAliveTimeout = 300_000;
+  server.headersTimeout = 305_000;
+  server.requestTimeout = 300_000;
 }
 
 startServer().catch((err) => {
