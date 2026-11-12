@@ -11,7 +11,11 @@ export function getApiBaseUrl(): string {
     return envUrl;
   }
 
-  if (Capacitor.isNativePlatform() || import.meta.env.VITE_APP_MODE === 'apk') {
+  if (
+    Capacitor.isNativePlatform() ||
+    import.meta.env.VITE_APP_MODE === 'apk' ||
+    import.meta.env.VITE_APP_MODE === 'play'
+  ) {
     throw new Error(
       'Chưa cấu hình máy chủ AI cho ứng dụng Android. Hãy đặt VITE_BACKEND_URL thành URL HTTPS của máy chủ API đã triển khai.',
     );

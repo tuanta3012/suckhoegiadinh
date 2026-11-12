@@ -142,6 +142,7 @@ import {
   summarizeHealthProfile,
   type ExtractionProgressUpdate,
 } from '../utils/geminiService';
+import type { HealthAssistantCitation } from '../utils/healthAssistantContext';
 import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
 import { getPdfPageCount } from '../utils/pdfPageBatches';
 import { RawFilesManagerModal } from './RawFilesManagerModal';
@@ -219,6 +220,7 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   timestamp?: string;
+  citations?: HealthAssistantCitation[];
 }
 const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
 const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
@@ -492,6 +494,8 @@ export function HealthDashboard({
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatRequestIdRef = useRef(0);
   const [selectedMetric, setSelectedMetric] = useState('');
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -502,6 +506,13 @@ export function HealthDashboard({
   const [showAiResourcesModal, setShowAiResourcesModal] = useState(false);
   const memberMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (activeTab !== 'assistant') return;
+    const chatContainer = chatScrollRef.current;
+    if (!chatContainer) return;
+    chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+  }, [activeTab, chatMessages.length, isChatting]);
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -568,8 +579,10 @@ export function HealthDashboard({
   useEffect(() => {
     if (previousSelectedMemberIdRef.current !== selectedMemberId) {
       previousSelectedMemberIdRef.current = selectedMemberId;
+      chatRequestIdRef.current += 1;
       setChatMessages([]);
       setChatInput('');
+      setIsChatting(false);
       setSelectedMetric('');
       setTimelineFilter('all');
     }
@@ -577,8 +590,10 @@ export function HealthDashboard({
   useEffect(() => {
     if (previousWorkspaceRootRef.current !== workspace?.rootFolderId) {
       previousWorkspaceRootRef.current = workspace?.rootFolderId;
+      chatRequestIdRef.current += 1;
       setChatMessages([]);
       setChatInput('');
+      setIsChatting(false);
       setSelectedMetric('');
       setTimelineFilter('all');
     }
@@ -588,6 +603,7 @@ export function HealthDashboard({
   useEffect(() => {
     if (previousUserEmailRef.current === normalizedUserEmail) return;
     previousUserEmailRef.current = normalizedUserEmail;
+    chatRequestIdRef.current += 1;
     const nextOfflineState = loadNativeOfflineState(userEmail);
     setWorkspace(nextOfflineState.workspace);
     shouldRefreshCachedWorkspaceRef.current =
@@ -606,6 +622,7 @@ export function HealthDashboard({
     setPendingSubjectMember(null);
     setIsCreatingSubjectMember(false);
     setChatMessages([]);
+    setIsChatting(false);
     setOcrRecoveryJobs([]);
     setWorkspaceAssignments([]);
     setEditingMember(null);
@@ -4055,21 +4072,39 @@ export function HealthDashboard({
     event.preventDefault();
     if (!selectedMember || !selectedProfile || !chatInput.trim()) return;
     const question = chatInput.trim();
+    const requestId = ++chatRequestIdRef.current;
+    const requestMemberId = selectedMember.id;
+    const requestWorkspaceRootId = workspaceRef.current?.rootFolderId;
+    const requestUserEmail = authIdentityRef.current.userEmail;
+    const isCurrentRequest = () =>
+      requestId === chatRequestIdRef.current &&
+      selectedMemberIdRef.current === requestMemberId &&
+      workspaceRef.current?.rootFolderId === requestWorkspaceRootId &&
+      authIdentityRef.current.userEmail === requestUserEmail;
     const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    const history = chatMessages.slice(-10).map(({ role, text }) => ({ role, text }));
     setChatInput('');
     setChatMessages((prev) => [...prev, { role: 'user', text: question, timestamp: timeStr }]);
     setIsChatting(true);
     try {
-      const answer = await askHealthAssistant(question, selectedMember, selectedProfile);
+      const { answer, citations } = await askHealthAssistant(
+        question,
+        selectedMember,
+        selectedProfile,
+        history,
+      );
+      if (!isCurrentRequest()) return;
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
           text: answer,
+          citations,
           timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setChatMessages((prev) => [
         ...prev,
         {
@@ -4082,7 +4117,7 @@ export function HealthDashboard({
         },
       ]);
     } finally {
-      setIsChatting(false);
+      if (isCurrentRequest()) setIsChatting(false);
     }
   }
   async function handleAiSummary(model: string = 'gemini-3.6-flash') {
@@ -4229,9 +4264,9 @@ export function HealthDashboard({
     }
   }
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
+    <div className={`${activeTab === 'assistant' ? 'h-[100dvh] min-h-0 overflow-hidden' : 'min-h-screen'} bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900`}>
       {/* 1. TOP BAR CONTRACT: One row, clean zones, thumb-friendly safe area */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 safe-area-header shadow-xs">
+      <header className="sticky top-0 z-30 shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 safe-area-header shadow-xs">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
           {/* Zone 1: Brand Wordmark & Logo */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -4520,7 +4555,9 @@ export function HealthDashboard({
         </div>
       </header>
       {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-28">
+      <main className={activeTab === 'assistant'
+        ? 'flex-1 min-h-0 max-w-6xl w-full mx-auto px-3 sm:px-4 pt-2 sm:pt-3 assistant-viewport-content overflow-hidden flex flex-col'
+        : 'flex-1 max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-28'}>
         {errorMessage && (() => {
           const isDriveApiDisabled =
             errorMessage.includes('drive.googleapis.com') ||
@@ -5441,114 +5478,132 @@ export function HealthDashboard({
             )}
             {/* VIEW 3: TRỢ LÝ AI (HEALTH CHAT ASSISTANT) */}
             {activeTab === 'assistant' && (
-              <div className="max-w-2xl mx-auto space-y-4 animate-in fade-in duration-150">
-                {/* Assistant Info Banner */}
-                <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shrink-0 shadow-sm">
-                      <Bot className="w-5 h-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="font-extrabold text-slate-900 text-sm">
-                        Trợ lý Y Tế Gia Đình AI
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        Đang tra cứu hồ sơ của: <strong>{selectedMember?.name}</strong> (
-                        {selectedProfile?.timeline.length || 0} hồ sơ đã ghi nhận)
-                      </p>
-                    </div>
+              <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col gap-2.5 animate-in fade-in duration-150">
+                <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-xs">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white shadow-sm">
+                    <Bot className="h-5 w-5" />
                   </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="truncate text-sm font-extrabold text-slate-900">Trợ lý Y tế Gia đình</h3>
+                    <p className="truncate text-[11px] text-slate-500">
+                      {selectedMember?.name || 'Chưa chọn thành viên'} · {selectedProfile?.timeline.length || 0} hồ sơ
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
+                    AI hỗ trợ
+                  </span>
                 </div>
-                {/* Quick Prompts */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 text-xs">
-                  {[
-                    'Lần gần nhất khám ở đâu và có chẩn đoán gì?',
-                    'Các loại thuốc đang uống theo đơn gần đây?',
-                    'Chỉ số huyết áp dao động thế nào?',
-                    'Có lịch hẹn tái khám nào sắp tới không?',
-                  ].map((promptText, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setChatInput(promptText)}
-                      className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-emerald-50 hover:border-emerald-300 text-slate-700 font-medium whitespace-nowrap active:scale-95 transition-all text-xs"
-                    >
-                      {promptText}
-                    </button>
-                  ))}
-                </div>
-                {/* Chat Container */}
-                <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs flex flex-col h-[520px] overflow-hidden">
+
+                <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
                   <div
-                    tabIndex={0}
+                    ref={chatScrollRef}
+                    role="log"
                     aria-live="polite"
+                    aria-relevant="additions text"
                     aria-label="Lịch sử trò chuyện với trợ lý y tế"
-                    className="flex-1 overflow-y-auto p-4 space-y-3.5 focus:outline-none"
+                    tabIndex={0}
+                    className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 sm:p-4 focus:outline-none"
                   >
                     {chatMessages.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400">
-                        <Sparkles className="w-10 h-10 text-emerald-400 mb-2 animate-bounce" />
-                        <p className="font-bold text-slate-700 text-sm">
-                          Hỏi bất kỳ điều gì về hồ sơ sức khỏe
+                      <div className="flex min-h-full flex-col items-center justify-center px-2 py-5 text-center">
+                        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+                          <Sparkles className="h-6 w-6" />
+                        </div>
+                        <p className="text-sm font-bold text-slate-800">Bạn muốn tìm hiểu điều gì?</p>
+                        <p className="mt-1 max-w-sm text-xs leading-relaxed text-slate-500">
+                          Hỏi về hồ sơ sức khỏe hoặc kiến thức y tế nói chung. Khi có nguồn đáng tin cậy, trợ lý sẽ đính kèm liên kết tham khảo. AI không thay thế tư vấn của bác sĩ.
                         </p>
-                        <p className="text-xs text-slate-500 max-w-sm mt-1 leading-relaxed">
-                          AI sẽ tự động đọc lại các đơn thuốc, kết quả xét nghiệm đã lưu trên Drive để trả lời chuẩn xác cho bạn.
-                        </p>
+                        <div className="mt-4 flex max-w-lg flex-wrap justify-center gap-2">
+                          {[
+                            'Lần gần nhất khám ở đâu?',
+                            'Các thuốc gần đây là gì?',
+                            'Huyết áp thay đổi thế nào?',
+                            'Sắp tới có lịch tái khám không?',
+                            'Tăng huyết áp là gì?',
+                          ].map((promptText) => (
+                            <button
+                              key={promptText}
+                              type="button"
+                              onClick={() => setChatInput(promptText)}
+                              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-600 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-800"
+                            >
+                              {promptText}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     ) : (
                       chatMessages.map((msg, index) => (
                         <div
                           key={index}
-                          className={`flex flex-col max-w-[85%] ${
+                          className={`flex max-w-[90%] flex-col sm:max-w-[82%] ${
                             msg.role === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'
                           }`}
                         >
                           <div
-                            className={`p-3.5 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap ${
+                            className={`break-words rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] ${
                               msg.role === 'user'
-                                ? 'bg-emerald-600 text-white rounded-br-xs'
-                                : 'bg-slate-100 text-slate-800 rounded-bl-xs border border-slate-200/60'
+                                ? 'rounded-br-md bg-emerald-600 text-white'
+                                : 'rounded-bl-md border border-slate-200/70 bg-slate-50 text-slate-800'
                             }`}
                           >
                             {msg.text}
                           </div>
+                          {msg.role === 'assistant' && Boolean(msg.citations?.length) && (
+                            <div className="mt-1.5 flex flex-wrap gap-1.5 px-1">
+                              {msg.citations?.map((citation, citationIndex) => (
+                                <a
+                                  key={citation.url}
+                                  href={citation.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex max-w-full items-center gap-1 rounded-full border border-emerald-100 bg-white px-2 py-1 text-[10px] font-medium text-emerald-800 hover:bg-emerald-50"
+                                  aria-label={`Nguồn tham khảo ${citationIndex + 1}: ${citation.title}`}
+                                >
+                                  <ExternalLink className="h-3 w-3 shrink-0" />
+                                  <span className="truncate">{`[${citationIndex + 1}] ${citation.title}`}</span>
+                                </a>
+                              ))}
+                            </div>
+                          )}
                           {msg.timestamp && (
-                            <span className="text-[10px] text-slate-400 mt-1 px-1">
-                              {msg.timestamp}
-                            </span>
+                            <span className="mt-1 px-1 text-[10px] text-slate-400">{msg.timestamp}</span>
                           )}
                         </div>
                       ))
                     )}
                     {isChatting && (
-                      <div className="flex items-center gap-2 text-slate-400 text-xs p-2">
-                        <LoaderCircle className="w-4 h-4 animate-spin text-emerald-600" />
-                        <span>Trợ lý đang đọc hồ sơ và tổng hợp câu trả lời...</span>
+                      <div role="status" className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                        <LoaderCircle className="h-4 w-4 animate-spin text-emerald-600" />
+                        <span>Trợ lý đang tổng hợp câu trả lời...</span>
                       </div>
                     )}
                   </div>
-                  {/* Chat Input Bar */}
+
                   <form
                     onSubmit={(e) => void handleAskAssistant(e)}
-                    className="p-3 border-t border-slate-100 bg-slate-50 flex items-center gap-2"
+                    className="flex shrink-0 items-end gap-2 border-t border-slate-100 bg-white p-2.5 sm:p-3"
                   >
                     <input
                       type="text"
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      placeholder={`Hỏi về hồ sơ sức khỏe của ${selectedMember?.name}...`}
+                      placeholder="Nhập câu hỏi..."
+                      aria-label={`Hỏi về hồ sơ sức khỏe của ${selectedMember?.name || 'thành viên'}`}
+                      enterKeyHint="send"
                       disabled={isChatting}
-                      className="flex-1 px-4 py-2.5 rounded-2xl border border-slate-200 bg-white text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                      className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/15 disabled:opacity-60"
                     />
                     <button
                       type="submit"
+                      aria-label="Gửi câu hỏi"
                       disabled={isChatting || !chatInput.trim()}
-                      className="w-10 h-10 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white flex items-center justify-center shrink-0 shadow-sm transition-all disabled:opacity-40"
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      <Send className="w-4 h-4" />
+                      <Send className="h-4 w-4" />
                     </button>
                   </form>
-                </div>
+                </section>
               </div>
             )}
             {/* VIEW 4: GIA ĐÌNH (FAMILY MEMBERS) */}

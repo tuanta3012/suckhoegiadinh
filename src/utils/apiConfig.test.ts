@@ -22,6 +22,14 @@ describe('backend API URL configuration', () => {
     expect(() => getApiBaseUrl()).toThrow('VITE_BACKEND_URL');
   });
 
+  it('requires a configured backend for Play builds', () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.stubEnv('VITE_APP_MODE', 'play');
+
+    expect(() => getApiBaseUrl()).toThrow('VITE_BACKEND_URL');
+  });
+
   it('keeps web requests same-origin when no backend URL is configured', () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
     vi.stubEnv('VITE_BACKEND_URL', '');

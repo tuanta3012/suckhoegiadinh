@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getSharedGeminiKeys,
+  getSharedGeminiKeysForRequest,
   parseGeminiKeyInput,
   setSharedGeminiKeys,
   testGeminiApiKey,
+  trackSharedGeminiKeysLoad,
 } from './geminiSharedResources';
 
 describe('shared Gemini resources', () => {
@@ -34,6 +36,13 @@ describe('shared Gemini resources', () => {
     expect(loaded).toEqual(['key-one', 'key-two']);
     loaded.push('caller-mutation');
     expect(getSharedGeminiKeys()).toEqual(['key-one', 'key-two']);
+  });
+
+  it('waits for shared Drive keys to load before returning request keys', async () => {
+    const loading = Promise.resolve().then(() => setSharedGeminiKeys(['drive-key']));
+    trackSharedGeminiKeysLoad(loading);
+
+    await expect(getSharedGeminiKeysForRequest()).resolves.toEqual(['drive-key']);
   });
 
   it('validates API keys through the server proxy', async () => {

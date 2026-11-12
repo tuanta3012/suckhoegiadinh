@@ -1,3 +1,5 @@
+import { buildApiUrl } from './apiConfig';
+import { readApiJson } from './apiResponse';
 
 const LOCAL_AI_KEYS_STORAGE_KEY = 'health_local_ai_resources_keys_v1';
 
@@ -54,6 +56,13 @@ export function getSharedGeminiKeys(): string[] {
   return [...sharedGeminiKeys];
 }
 
+export async function getSharedGeminiKeysForRequest(): Promise<string[]> {
+  if (sharedGeminiKeysLoad) {
+    await sharedGeminiKeysLoad;
+  }
+  return getSharedGeminiKeys();
+}
+
 /**
  * Kiểm tra tính hợp lệ của API Key thông qua server.
  */
@@ -63,8 +72,7 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
     throw new Error('API key không được để trống.');
   }
 
-  const apiBase = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
-  const url = `${apiBase}/api/gemini/test-key`;
+  const url = buildApiUrl('/api/gemini/test-key');
 
   const response = await fetch(url, {
     method: 'POST',
@@ -72,10 +80,5 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
     body: JSON.stringify({ key: cleanKey }),
   });
 
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Lỗi server (${response.status}) khi kiểm tra key.`);
-  }
-
-  return await response.json();
+  return readApiJson(response, 'Server Gemini (test-key)');
 }

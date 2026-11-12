@@ -28,6 +28,10 @@ html, body {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 1rem);
 }
 
+.assistant-viewport-content {
+  padding-bottom: calc(4rem + max(env(safe-area-inset-bottom, 0px), 1rem));
+}
+
 /* Hide scrollbar for clean horizontal tabs/chips */
 .no-scrollbar::-webkit-scrollbar {
   display: none;

@@ -16,7 +16,14 @@ import { classifyHealthEventType, isHealthEventType } from './healthEventType';
 import { splitPdfIntoBatches, PdfPageBatchError } from './pdfPageBatches';
 import { mergeExtractedBatches, type ExtractedPageBatch } from './healthDocumentExtraction';
 import { getValidGoogleAccessToken } from './googleDriveService';
-import { getSharedGeminiKeys } from './geminiSharedResources';
+import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
+import { buildApiUrl } from './apiConfig';
+import { readApiJson } from './apiResponse';
+import {
+  isApprovedMedicalCitationUrl,
+  type HealthAssistantCitation,
+  type HealthAssistantHistoryMessage,
+} from './healthAssistantContext';
 
 export interface ExtractionProgressUpdate {
   stage:
@@ -74,8 +81,7 @@ export function cleanErrorMessage(rawMessage?: string): string {
 
 async function callGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const getDuration = digitizationLogger.startTimer();
-  const apiBase = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
-  const url = `${apiBase}/api/gemini/${endpoint}`;
+  const url = buildApiUrl(`/api/gemini/${endpoint}`);
   
   digitizationLogger.log('info', 'api', `Gọi Gemini server cho tác vụ ${endpoint}.`, { endpoint });
 
@@ -97,7 +103,7 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
         console.warn('[Gemini Service] Could not attach auth token:', e);
       }
 
-      const clientGeminiKeys = getSharedGeminiKeys();
+      const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
       const response = await fetch(url, {
         method: 'POST',
@@ -106,20 +112,18 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
         const status = response.status;
-        const msg = errorData.error || `Server Gemini trả về mã lỗi ${status}`;
         
         if ((status === 502 || status === 503 || status === 504) && attempt < maxRetries - 1) {
           const backoff = (attempt + 1) * 2000;
           digitizationLogger.log('warn', 'api', `Mã lỗi ${status} từ server ở tác vụ ${endpoint}; thử lại lần ${attempt + 1}/${maxRetries} sau ${backoff}ms...`);
+          await response.text();
           await new Promise((res) => setTimeout(res, backoff));
           continue;
         }
-        throw new Error(msg);
       }
 
-      const data = await response.json();
+      const data = await readApiJson<T>(response, `Server Gemini (${endpoint})`);
       const durationMs = getDuration();
       digitizationLogger.log(
         'info',
@@ -164,7 +168,7 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 1: SỐ HÓA, OCR, NHẬN DẠNG TÀI LIỆU, HIỆU CHỈNH & SẮP XẾP DỮ LIỆU
-// OCR uses gemini-3.5-flash-lite directly from both web and native clients.
+// Web and native clients send OCR requests through the shared Gemini gateway.
 // ============================================================================
 
 /**
@@ -294,8 +298,7 @@ async function extractServerHealthEvent(
   getDuration: () => number,
   options?: { isAutoDetect?: boolean },
 ): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
-  const apiBase = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
-  const url = `${apiBase}/api/gemini/extract-health-event`;
+  const url = buildApiUrl('/api/gemini/extract-health-event');
 
   let headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -310,7 +313,7 @@ async function extractServerHealthEvent(
     console.warn('[Gemini Service] Could not attach auth token for extraction:', e);
   }
 
-  const clientGeminiKeys = getSharedGeminiKeys();
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
   const response = await fetch(url, {
     method: 'POST',
@@ -327,8 +330,12 @@ async function extractServerHealthEvent(
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Server Gemini trả về mã lỗi ${response.status}`);
+    await readApiJson<never>(response, 'Server Gemini (extract-health-event)');
+  }
+
+  if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    await readApiJson<unknown>(response, 'Server Gemini (extract-health-event)');
+    throw new Error('Server Gemini không trả về luồng dữ liệu OCR như mong đợi.');
   }
 
   const reader = response.body?.getReader();
@@ -567,27 +574,45 @@ export async function summarizeHealthProfile(
 export async function askHealthAssistant(
   question: string,
   member: FamilyMember,
-  profile: HealthProfile
-): Promise<string> {
-  const data = await callGemini<{ success: boolean; answer: string }>('ask-assistant', {
+  profile: HealthProfile,
+  history: HealthAssistantHistoryMessage[] = [],
+): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  const data = await callGemini<{
+    success: boolean;
+    answer: string;
+    citations?: unknown;
+  }>('ask-assistant', {
     question,
     member,
     profile,
+    history,
     stream: false,
   });
   if (typeof data.answer !== 'string' || !data.answer.trim()) {
     throw new Error('Trợ lý AI chưa trả về câu trả lời hợp lệ. Vui lòng thử lại.');
   }
-  return data.answer;
+  return {
+    answer: data.answer,
+    citations: normalizeHealthAssistantCitations(data.citations),
+  };
+}
+
+function normalizeHealthAssistantCitations(value: unknown): HealthAssistantCitation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): HealthAssistantCitation[] => {
+    if (!isRecord(item) || typeof item.title !== 'string' || typeof item.url !== 'string') return [];
+    return isApprovedMedicalCitationUrl(item.url)
+      ? [{ title: item.title.slice(0, 200), url: item.url }]
+      : [];
+  }).slice(0, 6);
 }
 
 async function callGeminiStream(
   endpoint: string,
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void,
-): Promise<string> {
-  const apiBase = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
-  const url = `${apiBase}/api/gemini/${endpoint}`;
+): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  const url = buildApiUrl(`/api/gemini/${endpoint}`);
   
   let headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -602,7 +627,7 @@ async function callGeminiStream(
     console.warn('[Gemini Service] Could not attach auth token for stream:', e);
   }
 
-  const clientGeminiKeys = getSharedGeminiKeys();
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
   const response = await fetch(url, {
     method: 'POST',
@@ -611,8 +636,12 @@ async function callGeminiStream(
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Server Gemini trả về mã lỗi ${response.status}`);
+    await readApiJson<never>(response, `Server Gemini (${endpoint})`);
+  }
+
+  if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    await readApiJson<unknown>(response, `Server Gemini (${endpoint})`);
+    throw new Error(`Server Gemini (${endpoint}) không trả về luồng dữ liệu như mong đợi.`);
   }
 
   const reader = response.body?.getReader();
@@ -621,6 +650,7 @@ async function callGeminiStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let citations: HealthAssistantCitation[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -633,31 +663,37 @@ async function callGeminiStream(
     for (const line of lines) {
       if (!line.trim()) continue;
       
-      // Handle both "data: {...}" and raw text if the server sends it directly
       if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        let event: unknown;
         try {
-          const json = JSON.parse(line.slice(6));
-          if (json.text) {
-            onChunk(json.text);
-            fullText += json.text;
-          } else if (json.type === 'error') {
-            throw new Error(json.error || 'Lỗi xử lý từ server AI.');
-          }
-        } catch (e) {
-          if (e instanceof Error && e.message.includes('Lỗi xử lý từ server AI')) throw e;
-          // If not valid JSON, maybe it's just raw text chunk
-          onChunk(line.slice(6));
-          fullText += line.slice(6);
+          event = JSON.parse(data);
+        } catch {
+          onChunk(data);
+          fullText += data;
+          continue;
+        }
+
+        if (!isRecord(event)) continue;
+        if (event.type === 'error') {
+          throw new Error(typeof event.error === 'string' ? event.error : 'Lỗi xử lý từ server AI.');
+        }
+        if (typeof event.text === 'string') {
+          onChunk(event.text);
+          fullText += event.text;
+        }
+        if (event.type === 'sources') {
+          citations = normalizeHealthAssistantCitations(event.citations);
         }
       } else {
-        // Raw line (might happen depending on server implementation)
         onChunk(line);
         fullText += line;
       }
     }
   }
 
-  return fullText;
+  return { answer: fullText, citations };
 }
 
 /**
@@ -668,8 +704,9 @@ export async function streamHealthAssistant(
   member: FamilyMember,
   profile: HealthProfile,
   onChunk: (chunk: string) => void,
-): Promise<string> {
-  return callGeminiStream('ask-assistant', { question, member, profile }, onChunk);
+  history: HealthAssistantHistoryMessage[] = [],
+): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  return callGeminiStream('ask-assistant', { question, member, profile, history }, onChunk);
 }
 
 export async function analyzeComprehensiveHealth(

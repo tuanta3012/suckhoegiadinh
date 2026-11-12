@@ -293,7 +293,13 @@ jobs:
           VITE_APP_MODE: apk
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
           VITE_GOOGLE_PICKER_API_KEY: ${{ secrets.GOOGLE_PICKER_API_KEY }}
-        run: npm run build
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
+        run: |
+          if [ -z "$VITE_BACKEND_URL" ]; then
+            echo "::error::Set the VITE_BACKEND_URL Actions secret to the deployed HTTPS API origin before building the APK."
+            exit 1
+          fi
+          npm run build
 
       - name: Sync APK Assets to Android
         run: |
@@ -323,7 +329,13 @@ jobs:
         env:
           VITE_APP_MODE: play
           VITE_APP_VERSION: ${{ steps.auto_version.outputs.RELEASE_VERSION }}
-        run: npm run build
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
+        run: |
+          if [ -z "$VITE_BACKEND_URL" ]; then
+            echo "::error::Set the VITE_BACKEND_URL Actions secret to the deployed HTTPS API origin before building the AAB."
+            exit 1
+          fi
+          npm run build
 
       - name: Sync AAB Assets to Android
         if: steps.auto_version.outputs.BUILD_AAB == 'true'

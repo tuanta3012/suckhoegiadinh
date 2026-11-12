@@ -7,12 +7,12 @@ export function parseGeminiApiKeys(raw: string | undefined): string[] {
     try {
       const parsed: unknown = JSON.parse(trimmed);
       if (!Array.isArray(parsed)) {
-        throw new Error('GEMINI_API_KEYS must be a JSON array or a delimited string.');
+        throw new Error('Gemini API keys must be a JSON array or delimited text.');
       }
       candidates = parsed;
     } catch (error) {
       if (error instanceof SyntaxError) {
-        throw new Error('GEMINI_API_KEYS contains invalid JSON.', { cause: error });
+        throw new Error('Gemini API keys contain invalid JSON.', { cause: error });
       }
       throw error;
     }
