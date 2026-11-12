@@ -2060,7 +2060,14 @@ export function HealthDashboard({
   const workspaceRootFolderId = workspace?.rootFolderId;
   const workspaceFamilyFileId = workspace?.familyFileId;
   const reloadWorkspaceAssignments = useCallback(async () => {
-    if (!workspaceRootFolderId || !workspaceFamilyFileId || !isWorkspaceAdmin) return;
+    if (
+      !driveAuthorized ||
+      !userEmail ||
+      !workspaceRootFolderId ||
+      workspaceRootFolderId === 'local_offline_workspace' ||
+      !workspaceFamilyFileId ||
+      !isWorkspaceAdmin
+    ) return;
     try {
       const activeWorkspace = workspaceRef.current;
       if (!activeWorkspace ||
@@ -2081,7 +2088,7 @@ export function HealthDashboard({
       console.warn('Lỗi tải quyền chia sẻ:', error);
       setErrorMessage(error instanceof Error ? error.message : 'Không thể đồng bộ quyền chia sẻ Workspace.');
     }
-  }, [isWorkspaceAdmin, workspaceFamilyFileId, workspaceRootFolderId]);
+  }, [driveAuthorized, isWorkspaceAdmin, userEmail, workspaceFamilyFileId, workspaceRootFolderId]);
 
   useEffect(() => {
     void reloadWorkspaceAssignments();
