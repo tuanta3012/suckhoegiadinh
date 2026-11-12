@@ -1150,6 +1150,14 @@ export function HealthDashboard({
       const synchronized = await applyPendingMemberDeletions(loaded);
       setWorkspace(synchronized);
       await reloadProfiles(synchronized);
+      
+      // Tự động đồng bộ quyền truy cập cho thành viên nếu là Admin
+      if (isWorkspaceAdmin) {
+        void syncHealthWorkspaceMemberAssignments(synchronized).catch(err => {
+          console.warn('[Sync] Tự động đồng bộ quyền Drive thất bại:', err);
+        });
+      }
+
       showToast('Đã đồng bộ dữ liệu 2 chiều thành công!', 'success');
     } catch (error) {
       showToast(
@@ -1947,7 +1955,16 @@ export function HealthDashboard({
             const message = error instanceof Error
               ? error.message
               : 'Không thể xác minh hoặc mở thư mục được chia sẻ.';
-            setErrorMessage(`Chưa liên kết được thư mục của Admin. Lời mời vẫn được giữ để thử lại. ${message}`);
+            const isNotFound = /file not found|404|not found/i.test(message);
+            const isForbidden = /forbidden|403|permission/i.test(message);
+            
+            if (isNotFound) {
+              setErrorMessage(`Chưa liên kết được thư mục của Admin (ID: ${assignment.rootFolderId}). Hãy kiểm tra xem bạn đã thấy thư mục này trong mục "Được chia sẻ với tôi" trên Google Drive chưa. Nếu chưa, hãy nhờ Admin bấm "Đồng bộ quyền truy cập" trong mục Gia đình.`);
+            } else if (isForbidden) {
+              setErrorMessage('Bạn không có quyền truy cập thư mục này. Hãy nhờ Admin cấp lại quyền cho email của bạn.');
+            } else {
+              setErrorMessage(`Lỗi liên kết: ${message}`);
+            }
             showToast(message, 'error');
             setIsSyncing(false);
             return;
@@ -1998,7 +2015,11 @@ export function HealthDashboard({
               showToast(message, 'error');
             });
         } else if (!cancelled) {
-          // Silent end of discovery if nothing found
+          // Nếu không có lời mời và cũng không tìm thấy thư mục cũ trên Drive
+          if (!assignment) {
+            setErrorMessage('Tài khoản chưa được mời vào gia đình. Hãy nhờ Quản trị viên (Admin) thêm email của bạn vào danh sách thành viên.');
+          }
+          setIsSyncing(false);
         }
       } catch (err) {
         console.warn('[Auto-Connect Error]:', err);
@@ -4331,7 +4352,7 @@ export function HealthDashboard({
         workspace.rootFolderId,
         workspace.familyFileId,
         userEmail,
-        [...assignments].map(([memberEmail, role]) => ({ email: memberEmail, role }))
+        [...assignments].map(([memberEmail, role]) => ({ email: memberEmail, role, memberId: memberEmail }))
       );
       setInviteEmail('');
       await reloadWorkspaceAssignments();
@@ -5755,10 +5776,39 @@ export function HealthDashboard({
             {activeTab === 'family' && (
               <div className="max-w-3xl mx-auto space-y-4 animate-in fade-in duration-150">
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-6 shadow-xs">
-                  <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 mb-4">
-                    <Users className="w-5 h-5 text-emerald-600" />
-                    <span>Hồ sơ thành viên ({members.length})</span>
-                  </h3>
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                      <Users className="w-5 h-5 text-emerald-600" />
+                      <span>Hồ sơ thành viên ({members.length})</span>
+                    </h3>
+                    {isWorkspaceAdmin && driveAuthorized && hasRemoteWorkspace && (
+                      <button
+                        type="button"
+                        disabled={isLoading || isSyncing}
+                        onClick={async () => {
+                          if (!workspace) return;
+                          setIsLoading(true);
+                          showToast('Đang kiểm tra và đồng bộ lại quyền truy cập Drive/Firestore cho tất cả thành viên...', 'info');
+                          try {
+                            await syncHealthWorkspaceMemberAssignments(workspace);
+                            await reloadWorkspaceAssignments();
+                            showToast('Đã đồng bộ quyền truy cập thành công!', 'success');
+                          } catch (error) {
+                            const msg = error instanceof Error ? error.message : 'Lỗi đồng bộ quyền.';
+                            console.error('[Sync] Lỗi đồng bộ:', error);
+                            showToast(msg, 'error');
+                            setErrorMessage(msg);
+                          } finally {
+                            setIsLoading(false);
+                          }
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-[11px] transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        <ShieldAlert className="w-3.5 h-3.5" />
+                        <span>Đồng bộ quyền truy cập</span>
+                      </button>
+                    )}
+                  </div>
 
                   <div className="divide-y divide-slate-100">
                     {members.map((m) => {

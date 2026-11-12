@@ -61,7 +61,7 @@ export default function App() {
               email: firebaseUser.email,
               name: firebaseUser.displayName || 'Người dùng',
               photoURL: firebaseUser.photoURL || undefined,
-              role: 'ADMIN',
+              role: 'Owner',
               title: 'Quản trị viên',
             });
             setDriveAuthorized(Boolean(token) || isGoogleTokenValid());

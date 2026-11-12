@@ -9,45 +9,48 @@ service cloud.firestore {
       return request.auth.token.email.lower();
     }
 
-    match /assigned_shares/{memberKey} {
-      function isMember() {
-        return signedIn()
-          && (memberKey.lower() == authenticatedEmail()
-              || (resource != null && resource.data.memberEmail is string && resource.data.memberEmail.lower() == authenticatedEmail()));
-      }
+    function activeMember(familyId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.status == "active";
+    }
 
-      function isAdminForAssignment() {
-        return signedIn()
-          && (
-            (resource != null && resource.data.adminEmail is string && resource.data.adminEmail.lower() == authenticatedEmail())
-            || (request.resource != null && request.resource.data.adminEmail is string && request.resource.data.adminEmail.lower() == authenticatedEmail())
-          );
-      }
+    function isAdmin(familyId) {
+      return signedIn() && 
+        (
+          (exists(/databases/$(database)/documents/families/$(familyId)) && get(/databases/$(database)/documents/families/$(familyId)).data.adminUid == request.auth.uid)
+          || (request.resource != null && request.resource.data.adminUid == request.auth.uid)
+        );
+    }
 
-      function validAssignment() {
-        return request.resource.data.keys().hasOnly([
-            'assignedFileId', 'assignedFileName', 'familyFileId', 'adminEmail', 'memberEmail',
-            'role', 'status', 'updatedAt', 'createdAt', 'source'
-          ])
-          && request.resource.data.assignedFileId is string
-          && request.resource.data.assignedFileId.size() > 0
-          && request.resource.data.adminEmail is string
-          && request.resource.data.memberEmail is string
-          && request.resource.data.memberEmail.size() > 0
-          && request.resource.data.role is string
-          && (request.resource.data.role in ['ADMIN', 'EDITOR', 'VIEWER', 'Admin', 'Editor', 'Viewer'])
-          && request.resource.data.status == 'active'
-          && request.resource.data.updatedAt is number;
-      }
+    match /families/{familyId} {
+      allow get: if activeMember(familyId) || isAdmin(familyId);
+      allow create: if signedIn() && request.resource.data.adminUid == request.auth.uid;
+      allow update: if isAdmin(familyId);
+      allow delete: if isAdmin(familyId);
 
-      allow get: if signedIn() && (
-        memberKey.lower() == authenticatedEmail()
-        || (resource != null && (resource.data.memberEmail.lower() == authenticatedEmail() || resource.data.adminEmail.lower() == authenticatedEmail()))
-      );
+      match /members/{memberUid} {
+        allow get: if signedIn() && (request.auth.uid == memberUid || activeMember(familyId) || isAdmin(familyId));
+        allow list: if activeMember(familyId) || isAdmin(familyId);
+        allow create, update: if isAdmin(familyId) || request.auth.uid == memberUid;
+        allow delete: if isAdmin(familyId);
+      }
+    }
+
+    match /userFamilyLinks/{uid}/families/{familyId} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if signedIn() && (request.auth.uid == uid || isAdmin(familyId));
+    }
+
+    match /invitations/{email} {
+      allow get: if signedIn();
       allow list: if signedIn();
-      allow create: if signedIn() && validAssignment();
-      allow update: if signedIn() && validAssignment() && (isAdminForAssignment() || isMember());
-      allow delete: if signedIn() && (isAdminForAssignment() || isMember());
+      allow create, update, delete: if signedIn();
+    }
+
+    // Legacy support (optional, but good for transition)
+    match /assigned_shares/{memberEmail} {
+      allow read, write: if false; // Block legacy access once migrated
     }
 
     match /{document=**} {

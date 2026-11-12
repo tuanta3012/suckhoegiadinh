@@ -143,6 +143,22 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
     .filter((email) => email && email !== adminEmail && !familyEmails.has(email));
 
   try {
+    // Luôn đảm bảo thông tin Registry của gia đình (folder gốc) tồn tại trên Firestore
+    try {
+      await registerHealthWorkspaceRelay(
+        workspace.rootFolderId,
+        workspace.familyFileId,
+        adminEmail,
+        {
+          profilesFolderId: workspace.family.profilesFolderId,
+          rawFilesFolderId: workspace.family.rawFilesFolderId,
+        }
+      );
+    } catch (relayErr) {
+      console.error('[Sync] Lỗi đăng ký Registry:', relayErr);
+      throw new Error(`Đăng ký Registry thất bại: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`);
+    }
+
     const existing = await listHealthWorkspaceAssignments(workspace.rootFolderId);
     const staleEmails = [...new Set([
       ...explicitlyRemovedEmails,
@@ -178,6 +194,7 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
           : [],
       );
       if (permissionFailures.length > 0) {
+        console.error('[Sync] Lỗi quyền Drive:', permissionFailures);
         throw new Error(`Chưa thể xác nhận quyền Drive cho: ${permissionFailures.join('; ')}`);
       }
     }
@@ -203,10 +220,16 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
         workspace.rootFolderId,
         workspace.familyFileId,
         adminEmail,
-        [...assignments].map(([email, assignment]) => ({
-          email,
-          ...assignment,
-        })),
+        [...assignments].map(([email, assignment]) => {
+          const member = workspace.family.members.find(m => normalizedEmail(m.email) === email);
+          return {
+            email,
+            role: assignment.role,
+            memberId: member?.id || email,
+            profileFileId: member?.profileFileId,
+            rawFolderId: member?.driveFolderId,
+          };
+        }),
       );
     } catch (firestoreErr) {
       console.warn('[Firestore Relay] Không thể đồng bộ lời mời lên Firestore:', firestoreErr);
@@ -551,7 +574,17 @@ export async function stampHealthWorkspaceFolder(folderId: string): Promise<void
       },
     );
   } catch (err) {
-    console.warn('[Google Drive] Không thể dán nhãn appProperties (có thể do tài khoản thành viên chỉ có quyền writer/reader):', err);
+    const message = err instanceof Error ? err.message : '';
+    const isNotFound = /file not found|404|not found/i.test(message);
+    const isForbidden = /forbidden|403|permission/i.test(message);
+    
+    if (isNotFound) {
+      console.warn('[Google Drive] Thư mục gốc không tồn tại hoặc chưa được chia sẻ (404).');
+    } else if (isForbidden) {
+      console.warn('[Google Drive] Không có quyền dán nhãn appProperties (403) - Bỏ qua bước này.');
+    } else {
+      console.warn('[Google Drive] Lỗi không xác định khi đóng dấu thư mục:', err);
+    }
   }
 }
 
@@ -716,12 +749,12 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     console.warn('[Discovery] Không thể quét thư mục đã đóng dấu:', error);
   }
 
-  // 4. Fallback: Quét Drive (Chậm nhất, chỉ chạy 1 lần duy nhất)
+  // 4. Fallback: Quét Drive (Chậm nhất, chỉ chạy khi Firestore không có thông tin và người dùng có thể là Admin)
   try {
     const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
     if (foldersToInspect.length === 0) return null;
 
-    // 3. Fast-path inspection: Look for family.json directly in root candidates & auto-deduplicate
+    // Fast-path inspection: Look for family.json directly in root candidates & auto-deduplicate
     const inspectionResults = await Promise.all(
       foldersToInspect.map(async (folder) => {
         try {
@@ -741,18 +774,22 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
           console.warn('[Google Drive] Could not normalize legacy folder name.', error);
         });
       }
+      
       const opened = await openSharedHealthWorkspace(folder.id, manifestId, userEmail);
       
-      // Đăng ký lại vào Firestore & localStorage để lần sau tìm nhanh hơn
-      if (userEmail && opened.family.adminEmail === userEmail.trim().toLowerCase()) {
+      // Đăng ký lại vào Firestore & localStorage nếu là Admin để lần sau tìm nhanh qua Registry
+      if (userEmail && opened.family.adminEmail?.trim().toLowerCase() === userEmail.trim().toLowerCase()) {
         const payload = { rootFolderId: opened.rootFolderId, familyFileId: opened.familyFileId };
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(cacheKey, JSON.stringify(payload));
         }
         void registerHealthWorkspaceRelay(opened.rootFolderId, opened.familyFileId, userEmail).catch(() => {});
+        return opened;
       }
-      
-      return opened;
+
+      // Nếu không phải Admin và không có Registry, chúng ta không tự động mở để tránh nhầm lẫn
+      console.warn('[Discovery] Tìm thấy thư mục Drive nhưng không có Registry Firestore và tài khoản không phải Admin.');
+      return null;
     }
   } catch (error) {
     console.warn('[Discovery] Lỗi khi quét thư mục Drive:', error);
@@ -975,9 +1012,22 @@ export async function openHealthWorkspace(
   rootFolderId: string,
   knownManifestFileId?: string,
 ): Promise<HealthDriveWorkspace> {
-  const root = await driveRequest<DriveFile>(
-    `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
-  );
+  let root: DriveFile;
+  try {
+    root = await driveRequest<DriveFile>(
+      `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (/file not found|404|not found/i.test(message)) {
+      throw new Error(`Không tìm thấy kho dữ liệu (ID: ${rootFolderId}). Nếu đây là kho được chia sẻ, hãy nhờ Quản trị viên bấm "Đồng bộ quyền truy cập" trong mục Gia đình.`);
+    }
+    if (/forbidden|403|permission/i.test(message)) {
+      throw new Error(`Bạn không có quyền truy cập kho dữ liệu này. Hãy nhờ Quản trị viên cấp lại quyền cho email của bạn.`);
+    }
+    throw error;
+  }
+
   if (root.mimeType !== FOLDER_MIME) {
     throw new Error('ID được nhập không phải là thư mục Google Drive.');
   }

@@ -221,7 +221,7 @@ export interface HealthFamily {
   updatedAt: string;
 }
 
-export type UserRole = 'ADMIN' | 'EDITOR' | 'VIEWER';
+export type UserRole = 'Owner' | 'Editor' | 'Viewer';
 
 export interface WorkspaceMember {
   id: string;
@@ -239,7 +239,7 @@ export interface AppSettings {
 }
 
 export function canEditData(role?: string | null): boolean {
-  return role === 'ADMIN' || role === 'EDITOR';
+  return role === 'Owner' || role === 'Editor';
 }
 export interface AuthUser {
   email: string;
