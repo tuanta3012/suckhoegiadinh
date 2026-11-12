@@ -14,6 +14,7 @@ import {
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
   removeHealthWorkspaceAssignment,
+  registerHealthWorkspaceRelay,
 } from './workspaceShareRelay';
 
 vi.mock('./workspaceShareRelay', () => ({
@@ -125,6 +126,14 @@ describe('resolveSingleFamilyManifestFile', () => {
         memberEmail: 'guest@example.com',
         role: 'VIEWER',
         updatedAt: 1,
+      }, {
+        rootFolderId: 'workspace-1',
+        familyFileId: 'family-1',
+        adminEmail: 'user@example.com',
+        memberEmail: 'user@example.com',
+        role: 'ADMIN',
+        updatedAt: 1,
+        source: 'family_member',
       }]);
       vi.mocked(publishHealthWorkspaceAssignments).mockResolvedValue();
       globalThis.fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
@@ -144,11 +153,53 @@ describe('resolveSingleFamilyManifestFile', () => {
         'family-1',
         'user@example.com',
         expect.arrayContaining([
-          { email: 'member@example.com', role: 'EDITOR', source: 'family_member' },
-          { email: 'guest@example.com', role: 'VIEWER', source: undefined },
+          {
+            email: 'member@example.com',
+            role: 'EDITOR',
+            source: 'family_member',
+          },
+          {
+            email: 'guest@example.com',
+            role: 'VIEWER',
+            source: undefined,
+          },
         ]),
       );
-      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(removeHealthWorkspaceAssignment).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds Firestore assignments from an empty collection using one Drive permission lookup', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([]);
+      vi.mocked(publishHealthWorkspaceAssignments).mockResolvedValue();
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        permissions: [{
+          id: 'member-permission',
+          type: 'user',
+          emailAddress: 'member@example.com',
+          role: 'writer',
+          permissionDetails: [{ inherited: false }],
+        }],
+      }), { status: 200 }));
+
+      await syncHealthWorkspaceMemberAssignments(workspace);
+
+      expect(registerHealthWorkspaceRelay).toHaveBeenCalledWith(
+        'workspace-1',
+        'family-1',
+        'user@example.com',
+      );
+      expect(publishHealthWorkspaceAssignments).toHaveBeenCalledWith(
+        'workspace-1',
+        'family-1',
+        'user@example.com',
+        [{
+          email: 'member@example.com',
+          role: 'EDITOR',
+          source: 'family_member',
+        }],
+      );
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('revokes a removed member and removes the matching Firestore assignment', async () => {
@@ -293,6 +344,26 @@ describe('resolveSingleFamilyManifestFile', () => {
         'Chưa thể xác nhận quyền Drive',
       );
       expect(publishHealthWorkspaceAssignments).not.toHaveBeenCalled();
+    });
+
+    it('reports Firestore invitation publishing failures instead of silently succeeding', async () => {
+      vi.mocked(listHealthWorkspaceAssignments).mockResolvedValue([]);
+      vi.mocked(publishHealthWorkspaceAssignments).mockRejectedValue(
+        new Error('Firestore unavailable'),
+      );
+      globalThis.fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+        permissions: [{
+          id: 'member-permission',
+          type: 'user',
+          emailAddress: 'member@example.com',
+          role: 'writer',
+          permissionDetails: [{ inherited: false }],
+        }],
+      }), { status: 200 }));
+
+      await expect(syncHealthWorkspaceMemberAssignments(workspace)).rejects.toThrow(
+        'family.json đã được cập nhật, nhưng chưa hoàn tất đồng bộ quyền Drive/Firestore: Firestore unavailable',
+      );
     });
 
     it('serializes overlapping assignment syncs so the latest family email is published last', async () => {

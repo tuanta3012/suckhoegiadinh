@@ -143,20 +143,16 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
     .filter((email) => email && email !== adminEmail && !familyEmails.has(email));
 
   try {
-    // Luôn đảm bảo thông tin Registry của gia đình (folder gốc) tồn tại trên Firestore
+    // Keep the Admin's email-keyed access record current.
     try {
       await registerHealthWorkspaceRelay(
         workspace.rootFolderId,
         workspace.familyFileId,
         adminEmail,
-        {
-          profilesFolderId: workspace.family.profilesFolderId,
-          rawFilesFolderId: workspace.family.rawFilesFolderId,
-        }
       );
     } catch (relayErr) {
-      console.error('[Sync] Lỗi đăng ký Registry:', relayErr);
-      throw new Error(`Đăng ký Registry thất bại: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`);
+      console.error('[Sync] Lỗi đăng ký quyền Workspace:', relayErr);
+      throw new Error(`Đăng ký quyền Workspace thất bại: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`);
     }
 
     const existing = await listHealthWorkspaceAssignments(workspace.rootFolderId);
@@ -165,6 +161,7 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
       ...existing
         .filter((assignment) =>
           assignment.source === 'family_member' &&
+          normalizedEmail(assignment.memberEmail) !== adminEmail &&
           !familyEmails.has(normalizedEmail(assignment.memberEmail)),
         )
         .map((assignment) => normalizedEmail(assignment.memberEmail)),
@@ -181,23 +178,10 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
       assignments.set(email, { role: 'EDITOR', source: 'family_member' });
     }
 
-    const familyEmailList = [...familyEmails];
-    for (let offset = 0; offset < familyEmailList.length; offset += 10) {
-      const permissionResults = await Promise.allSettled(
-        familyEmailList.slice(offset, offset + 10).map(async (email) => {
-          await ensureDriveFolderAccess(workspace.rootFolderId, email, 'EDITOR');
-        }),
-      );
-      const permissionFailures = permissionResults.flatMap((result, index) =>
-        result.status === 'rejected'
-          ? [`${familyEmailList[offset + index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
-          : [],
-      );
-      if (permissionFailures.length > 0) {
-        console.error('[Sync] Lỗi quyền Drive:', permissionFailures);
-        throw new Error(`Chưa thể xác nhận quyền Drive cho: ${permissionFailures.join('; ')}`);
-      }
-    }
+    await ensureDriveFolderAccessForMembers(
+      workspace.rootFolderId,
+      [...familyEmails].map(email => ({ email, role: 'EDITOR' as const })),
+    );
 
     const cleanupFailures: string[] = [];
     for (const email of staleEmails) {
@@ -215,25 +199,18 @@ async function syncHealthWorkspaceMemberAssignmentsNow(
       }
     }
 
-    try {
-      await publishHealthWorkspaceAssignments(
-        workspace.rootFolderId,
-        workspace.familyFileId,
-        adminEmail,
-        [...assignments].map(([email, assignment]) => {
-          const member = workspace.family.members.find(m => normalizedEmail(m.email) === email);
-          return {
-            email,
-            role: assignment.role,
-            memberId: member?.id || email,
-            profileFileId: member?.profileFileId,
-            rawFolderId: member?.driveFolderId,
-          };
-        }),
-      );
-    } catch (firestoreErr) {
-      console.warn('[Firestore Relay] Không thể đồng bộ lời mời lên Firestore:', firestoreErr);
-    }
+    await publishHealthWorkspaceAssignments(
+      workspace.rootFolderId,
+      workspace.familyFileId,
+      adminEmail,
+      [...assignments].map(([email, assignment]) => {
+        return {
+          email,
+          role: assignment.role,
+          source: assignment.source,
+        };
+      }),
+    );
 
     if (cleanupFailures.length > 0) {
       throw new Error(`Chưa thu hồi hoàn tất quyền của thành viên đã gỡ: ${cleanupFailures.join('; ')}`);
@@ -1912,6 +1889,50 @@ export async function ensureDriveFolderAccess(
   const effectiveRank = verified.reduce((rank, permission) => Math.max(rank, driveRoleRank(permission.role)), 0);
   if (effectiveRank !== desiredRank) {
     throw new Error(`Google Drive chưa xác nhận chính xác quyền ${role} cho ${normalizedEmail}.`);
+  }
+}
+
+export async function ensureDriveFolderAccessForMembers(
+  folderId: string,
+  members: Array<{ email: string; role: 'EDITOR' | 'VIEWER' }>,
+): Promise<void> {
+  if (!members.length) return;
+  if (!folderId.trim()) {
+    throw new Error('Thiếu mã thư mục để kiểm tra quyền Google Drive.');
+  }
+  const permissions = await listFolderPermissions(folderId).catch((error: unknown) => {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Chưa thể xác nhận quyền Drive: ${reason}`);
+  });
+  const uniqueMembers = new Map<string, 'EDITOR' | 'VIEWER'>();
+  for (const member of members) {
+    const email = member.email.trim().toLowerCase();
+    if (email) uniqueMembers.set(email, member.role);
+  }
+  const pending = [...uniqueMembers];
+
+  for (let offset = 0; offset < pending.length; offset += 10) {
+    const group = pending.slice(offset, offset + 10);
+    const results = await Promise.allSettled(group.map(async ([email, role]) => {
+      const desiredRole = role === 'EDITOR' ? 'writer' : 'reader';
+      const effectiveRank = permissions
+        .filter(permission =>
+          permission.type === 'user' &&
+          !permission.deleted &&
+          permission.emailAddress?.trim().toLowerCase() === email,
+        )
+        .reduce((rank, permission) => Math.max(rank, driveRoleRank(permission.role)), 0);
+      if (effectiveRank === driveRoleRank(desiredRole)) return;
+      await ensureDriveFolderAccess(folderId, email, role);
+    }));
+    const failures = results.flatMap((result, index) =>
+      result.status === 'rejected'
+        ? [`${group[index][0]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+        : [],
+    );
+    if (failures.length > 0) {
+      throw new Error(`Chưa thể xác nhận quyền Drive cho: ${failures.join('; ')}`);
+    }
   }
 }
 

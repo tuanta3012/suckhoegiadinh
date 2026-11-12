@@ -6,59 +6,19 @@ import {
   onSnapshot,
   query,
   setDoc,
-  deleteDoc,
   where,
   writeBatch,
-  type Firestore,
 } from 'firebase/firestore';
 import { getSignedInGoogleEmail } from './googleDriveService';
 import { firestoreAuth as auth, firestoreDb as db } from './firebaseFirestore';
 
-const FAMILIES_COLLECTION = 'families';
-const USER_LINKS_COLLECTION = 'userFamilyLinks';
-const INVITATIONS_COLLECTION = 'invitations';
+const ACCESS_COLLECTION = 'workspaceAccess';
+const LEGACY_FAMILIES_COLLECTION = 'families';
+const LEGACY_USER_LINKS_COLLECTION = 'userFamilyLinks';
+const LEGACY_INVITATIONS_COLLECTION = 'invitations';
 
 export type WorkspaceAccessRole = 'ADMIN' | 'EDITOR' | 'VIEWER' | 'Owner' | 'Editor' | 'Viewer';
 
-export interface HealthFamilyRegistry {
-  familyId: string;
-  rootFolderId: string;
-  familyFileId: string;
-  profilesFolderId?: string;
-  rawFilesFolderId?: string;
-  adminEmail: string;
-  adminUid: string;
-  status: 'active' | 'unlinked';
-  schemaVersion: number;
-  updatedAt: number;
-  createdAt: number;
-}
-
-export interface HealthFamilyMember {
-  memberId: string;
-  uid?: string;
-  email: string;
-  role: WorkspaceAccessRole;
-  status: 'active' | 'revoked';
-  profileFileId?: string;
-  rawFolderId?: string;
-  updatedAt: number;
-}
-
-export interface UserFamilyLink {
-  familyId: string;
-  status: 'active' | 'unlinked';
-  updatedAt: number;
-}
-
-export interface Invitation {
-  familyId: string;
-  adminEmail: string;
-  role: WorkspaceAccessRole;
-  updatedAt: number;
-}
-
-// For compatibility with old code
 export interface HealthWorkspaceAssignment {
   rootFolderId: string;
   familyFileId: string;
@@ -67,6 +27,7 @@ export interface HealthWorkspaceAssignment {
   role: WorkspaceAccessRole;
   updatedAt: number;
   source?: 'family_member';
+  migrationComplete?: boolean;
 }
 
 export interface HealthAssignedFolder {
@@ -75,6 +36,38 @@ export interface HealthAssignedFolder {
   adminEmail: string;
   memberEmail: string;
   familyFileId: string;
+  updatedAt: number;
+}
+
+interface WorkspaceAccessRecord {
+  email: string;
+  rootFolderId: string;
+  familyFileId: string;
+  adminEmail: string;
+  adminUid: string;
+  role: WorkspaceAccessRole;
+  status: 'active' | 'unlinked' | 'revoked';
+  schemaVersion: 2;
+  updatedAt: number;
+  createdAt?: number;
+  migrationComplete?: boolean;
+  source?: 'family_member';
+}
+
+interface LegacyFamilyRegistry {
+  familyId: string;
+  rootFolderId: string;
+  familyFileId: string;
+  adminEmail: string;
+  adminUid: string;
+  status: 'active' | 'unlinked';
+  updatedAt: number;
+}
+
+interface LegacyInvitation {
+  familyId: string;
+  adminEmail: string;
+  role: WorkspaceAccessRole;
   updatedAt: number;
 }
 
@@ -104,57 +97,150 @@ function normalizeRole(value: unknown): WorkspaceAccessRole {
   return 'EDITOR';
 }
 
+function toAssignment(record: WorkspaceAccessRecord): HealthWorkspaceAssignment | null {
+  if (record.status !== 'active') return null;
+  if (!record.rootFolderId || !record.familyFileId || !record.adminEmail || !record.email) {
+    throw new Error(`Bản ghi quyền truy cập của ${record.email || 'email không xác định'} thiếu thông tin Workspace.`);
+  }
+  return {
+    rootFolderId: record.rootFolderId,
+    familyFileId: record.familyFileId,
+    adminEmail: normalizeEmail(record.adminEmail),
+    memberEmail: normalizeEmail(record.email),
+    role: normalizeRole(record.role),
+    updatedAt: record.updatedAt,
+    source: record.source,
+    ...(record.migrationComplete !== undefined
+      ? { migrationComplete: record.migrationComplete }
+      : {}),
+  };
+}
+
+function toAssignedFolder(assignment: HealthWorkspaceAssignment): HealthAssignedFolder {
+  return {
+    folderId: assignment.rootFolderId,
+    status: 'active',
+    adminEmail: assignment.adminEmail,
+    memberEmail: assignment.memberEmail,
+    familyFileId: assignment.familyFileId,
+    updatedAt: assignment.updatedAt,
+  };
+}
+
+async function readWorkspaceAccess(email: string): Promise<WorkspaceAccessRecord | null> {
+  const snapshot = await getDoc(doc(db, ACCESS_COLLECTION, normalizeEmail(email)));
+  return snapshot.exists() ? snapshot.data() as WorkspaceAccessRecord : null;
+}
+
+async function getLegacyFamilyById(familyId: string): Promise<LegacyFamilyRegistry | null> {
+  const snapshot = await getDoc(doc(db, LEGACY_FAMILIES_COLLECTION, familyId));
+  return snapshot.exists() ? snapshot.data() as LegacyFamilyRegistry : null;
+}
+
+async function readLegacyAssignedFolder(email: string): Promise<HealthAssignedFolder | null> {
+  const cleanEmail = normalizeEmail(email);
+  const uid = auth.currentUser?.uid;
+
+  if (uid) {
+    const links = await getDocs(query(
+      collection(db, LEGACY_USER_LINKS_COLLECTION, uid, 'families'),
+      where('status', '==', 'active'),
+    ));
+    for (const link of links.docs) {
+      const familyId = String(link.data().familyId || link.id);
+      const family = await getLegacyFamilyById(familyId);
+      if (family?.status === 'active') {
+        return {
+          folderId: family.rootFolderId,
+          status: 'active',
+          adminEmail: normalizeEmail(family.adminEmail),
+          memberEmail: cleanEmail,
+          familyFileId: family.familyFileId,
+          updatedAt: family.updatedAt,
+        };
+      }
+    }
+  }
+
+  const invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  if (!invitationSnapshot.exists()) return null;
+  const invitation = invitationSnapshot.data() as LegacyInvitation;
+  const family = await getLegacyFamilyById(invitation.familyId);
+  if (!family || family.status !== 'active') return null;
+
+  return {
+    folderId: family.rootFolderId,
+    status: 'active',
+    adminEmail: normalizeEmail(family.adminEmail),
+    memberEmail: cleanEmail,
+    familyFileId: family.familyFileId,
+    updatedAt: family.updatedAt,
+  };
+}
+
+async function readLegacyWorkspaceAssignment(email: string): Promise<HealthWorkspaceAssignment | null> {
+  const folder = await readLegacyAssignedFolder(email);
+  if (!folder) return null;
+
+  const cleanEmail = normalizeEmail(email);
+  const invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  const invitation = invitationSnapshot.exists()
+    ? invitationSnapshot.data() as LegacyInvitation
+    : null;
+  const isAdmin = normalizeEmail(folder.adminEmail) === cleanEmail;
+
+  return {
+    rootFolderId: folder.folderId,
+    familyFileId: folder.familyFileId,
+    adminEmail: folder.adminEmail,
+    memberEmail: cleanEmail,
+    role: invitation ? normalizeRole(invitation.role) : isAdmin ? 'ADMIN' : 'EDITOR',
+    updatedAt: folder.updatedAt,
+    source: isAdmin || !invitation ? 'family_member' : undefined,
+  };
+}
+
 /**
- * Đăng ký thông tin gia đình lên Firestore (Registry)
+ * Register the Admin's email-keyed access record for direct, cross-device lookup.
+ * The old collections are read-only fallbacks for workspaces not yet migrated.
  */
 export async function registerHealthWorkspaceRelay(
   familyId: string,
   familyFileId: string,
   adminEmail: string,
-  extra?: { profilesFolderId?: string; rawFilesFolderId?: string },
 ): Promise<void> {
   const uid = authenticatedUid();
   const cleanEmail = normalizeEmail(adminEmail);
-  const now = Date.now();
+  if (cleanEmail !== authenticatedEmail()) {
+    throw new Error('Email Admin không khớp với tài khoản Google đang đăng nhập.');
+  }
 
-  const familyRef = doc(db, FAMILIES_COLLECTION, familyId);
-  const familyData: HealthFamilyRegistry = {
-    familyId,
+  const accessRef = doc(db, ACCESS_COLLECTION, cleanEmail);
+  const existingSnapshot = await getDoc(accessRef);
+  const existing = existingSnapshot.exists()
+    ? existingSnapshot.data() as WorkspaceAccessRecord
+    : null;
+  if (existing && existing.adminUid !== uid) {
+    throw new Error('Email này đã được đăng ký bởi một Admin Workspace khác.');
+  }
+
+  const now = Date.now();
+  const sameWorkspace = existing?.rootFolderId === familyId && existing.familyFileId === familyFileId;
+  const record: WorkspaceAccessRecord = {
+    email: cleanEmail,
     rootFolderId: familyId,
     familyFileId,
-    profilesFolderId: extra?.profilesFolderId,
-    rawFilesFolderId: extra?.rawFilesFolderId,
     adminEmail: cleanEmail,
     adminUid: uid,
-    status: 'active',
-    schemaVersion: 1,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  const batch = writeBatch(db);
-  batch.set(familyRef, familyData, { merge: true });
-
-  const memberRef = doc(db, FAMILIES_COLLECTION, familyId, 'members', uid);
-  const memberData: HealthFamilyMember = {
-    memberId: 'admin_member',
-    uid,
-    email: cleanEmail,
     role: 'ADMIN',
     status: 'active',
+    schemaVersion: 2,
+    createdAt: sameWorkspace ? existing?.createdAt || now : now,
     updatedAt: now,
+    migrationComplete: sameWorkspace && existing?.status === 'active' && existing.migrationComplete === true,
+    source: 'family_member',
   };
-  batch.set(memberRef, memberData, { merge: true });
-
-  const linkRef = doc(db, USER_LINKS_COLLECTION, uid, 'families', familyId);
-  const linkData: UserFamilyLink = {
-    familyId,
-    status: 'active',
-    updatedAt: now,
-  };
-  batch.set(linkRef, linkData, { merge: true });
-
-  await batch.commit();
+  await setDoc(accessRef, record, { merge: true });
 }
 
 export async function publishHealthWorkspaceAssignments(
@@ -164,187 +250,232 @@ export async function publishHealthWorkspaceAssignments(
   members: Array<{
     email: string;
     role: WorkspaceAccessRole;
-    memberId: string;
-    profileFileId?: string;
-    rawFolderId?: string;
+    source?: 'family_member';
   }>,
 ): Promise<void> {
   const adminUid = authenticatedUid();
-  const now = Date.now();
-
-  const familySnap = await getDoc(doc(db, FAMILIES_COLLECTION, familyId));
-  if (familySnap.exists() && familySnap.data()?.adminUid !== adminUid) {
-    throw new Error('Chỉ Admin mới có quyền cập nhật danh sách thành viên.');
+  const cleanAdminEmail = normalizeEmail(adminEmail);
+  if (cleanAdminEmail !== authenticatedEmail()) {
+    throw new Error('Chỉ Admin đang đăng nhập mới được cập nhật danh sách thành viên.');
   }
 
-  const batch = writeBatch(db);
-  for (const member of members) {
-    const cleanEmail = normalizeEmail(member.email);
-    if (cleanEmail === normalizeEmail(adminEmail)) continue;
+  const adminRef = doc(db, ACCESS_COLLECTION, cleanAdminEmail);
+  const adminSnapshot = await getDoc(adminRef);
+  if (
+    !adminSnapshot.exists() ||
+    adminSnapshot.data()?.adminUid !== adminUid ||
+    adminSnapshot.data()?.status !== 'active'
+  ) {
+    throw new Error('Workspace chưa có bản ghi Admin hợp lệ. Hãy đồng bộ lại Workspace trước.');
+  }
 
-    const inviteRef = doc(db, INVITATIONS_COLLECTION, cleanEmail);
-    const inviteData: Invitation = {
-      familyId,
-      adminEmail: normalizeEmail(adminEmail),
+  const now = Date.now();
+  const batch = writeBatch(db);
+  batch.set(adminRef, {
+    rootFolderId: familyId,
+    familyFileId,
+    adminEmail: cleanAdminEmail,
+    adminUid,
+    role: 'ADMIN',
+    status: 'active',
+    schemaVersion: 2,
+    updatedAt: now,
+    migrationComplete: true,
+  }, { merge: true });
+
+  const normalizedMembers = members
+    .map(member => ({ ...member, email: normalizeEmail(member.email) }))
+    .filter(member => member.email && member.email !== cleanAdminEmail);
+  for (const member of normalizedMembers) {
+    batch.set(doc(db, ACCESS_COLLECTION, member.email), {
+      email: member.email,
+      rootFolderId: familyId,
+      familyFileId,
+      adminEmail: cleanAdminEmail,
+      adminUid,
       role: normalizeRole(member.role),
+      status: 'active',
+      schemaVersion: 2,
       updatedAt: now,
-    };
-    batch.set(inviteRef, inviteData, { merge: true });
+      ...(member.source ? { source: member.source } : {}),
+    }, { merge: true });
   }
   await batch.commit();
 }
 
-async function getFamilyById(familyId: string): Promise<HealthFamilyRegistry | null> {
-  const snap = await getDoc(doc(db, FAMILIES_COLLECTION, familyId));
-  return snap.exists() ? (snap.data() as HealthFamilyRegistry) : null;
-}
-
 export async function readHealthAssignedFolder(email: string): Promise<HealthAssignedFolder | null> {
-  const cleanEmail = normalizeEmail(email);
-  const uid = auth.currentUser?.uid;
-  
-  if (uid) {
-    const q = query(collection(db, USER_LINKS_COLLECTION, uid, 'families'), where('status', '==', 'active'));
-    const snap = await getDocs(q);
-    if (!snap.empty) {
-      const familyId = snap.docs[0].data().familyId;
-      const family = await getFamilyById(familyId);
-      if (family) {
-        return {
-          folderId: family.rootFolderId,
-          status: 'active',
-          adminEmail: family.adminEmail,
-          memberEmail: cleanEmail,
-          familyFileId: family.familyFileId,
-          updatedAt: family.updatedAt,
-        };
-      }
-    }
+  const record = await readWorkspaceAccess(email);
+  if (record) {
+    const assignment = toAssignment(record);
+    return assignment ? toAssignedFolder(assignment) : null;
   }
-
-  const inviteSnap = await getDoc(doc(db, INVITATIONS_COLLECTION, cleanEmail));
-  if (inviteSnap.exists()) {
-    const invite = inviteSnap.data() as Invitation;
-    const family = await getFamilyById(invite.familyId);
-    if (family) {
-      return {
-        folderId: family.rootFolderId,
-        status: 'active',
-        adminEmail: family.adminEmail,
-        memberEmail: cleanEmail,
-        familyFileId: family.familyFileId,
-        updatedAt: family.updatedAt,
-      };
-    }
-  }
-  return null;
+  return readLegacyAssignedFolder(email);
 }
 
 export async function readHealthWorkspaceAssignment(email: string): Promise<HealthWorkspaceAssignment | null> {
-  const folder = await readHealthAssignedFolder(email);
-  if (!folder) return null;
-
-  const inviteSnap = await getDoc(doc(db, INVITATIONS_COLLECTION, normalizeEmail(email)));
-  const role = inviteSnap.exists() ? normalizeRole(inviteSnap.data().role) : 'EDITOR';
-
-  return {
-    rootFolderId: folder.folderId,
-    familyFileId: folder.familyFileId,
-    adminEmail: folder.adminEmail,
-    memberEmail: folder.memberEmail,
-    role,
-    updatedAt: folder.updatedAt,
-    source: 'family_member',
-  };
+  const record = await readWorkspaceAccess(email);
+  if (record) return toAssignment(record);
+  return readLegacyWorkspaceAssignment(email);
 }
 
 export async function findAdminWorkspaceRelay(email: string): Promise<{ rootFolderId: string; familyFileId: string } | null> {
-  const folder = await readHealthAssignedFolder(email);
-  if (folder) return { rootFolderId: folder.folderId, familyFileId: folder.familyFileId };
-  return null;
+  const assignment = await readHealthWorkspaceAssignment(email);
+  return assignment
+    ? { rootFolderId: assignment.rootFolderId, familyFileId: assignment.familyFileId }
+    : null;
 }
 
 export async function listHealthWorkspaceAssignments(familyId: string): Promise<HealthWorkspaceAssignment[]> {
-  try {
-    const q = collection(db, FAMILIES_COLLECTION, familyId, 'members');
-    const snapshot = await getDocs(q);
-    const familySnap = await getDoc(doc(db, FAMILIES_COLLECTION, familyId));
-    if (!familySnap.exists()) return [];
-    
-    const family = familySnap.data() as HealthFamilyRegistry;
-
-    return snapshot.docs.map(d => {
-      const m = d.data() as HealthFamilyMember;
-      return {
-        rootFolderId: family.rootFolderId,
-        familyFileId: family.familyFileId,
-        adminEmail: family.adminEmail,
-        memberEmail: m.email,
-        role: normalizeRole(m.role),
-        updatedAt: m.updatedAt,
-        source: 'family_member',
-      };
-    });
-  } catch (error) {
-    console.warn('[WorkspaceRelay] Lỗi khi liệt kê thành viên:', error);
-    return [];
+  const uid = authenticatedUid();
+  const accessSnapshot = await getDocs(query(
+    collection(db, ACCESS_COLLECTION),
+    where('adminUid', '==', uid),
+  ));
+  const records = new Map<string, HealthWorkspaceAssignment>();
+  const activeAccessRecords = accessSnapshot.docs
+    .map(snapshot => snapshot.data() as WorkspaceAccessRecord)
+    .filter(record => record.status === 'active' && record.rootFolderId === familyId);
+  for (const record of activeAccessRecords) {
+    const assignment = toAssignment(record);
+    if (assignment) records.set(assignment.memberEmail, assignment);
   }
+
+  const adminRecord = activeAccessRecords.find(record =>
+    record.email === normalizeEmail(record.adminEmail) && record.role === 'ADMIN',
+  );
+  if (adminRecord?.migrationComplete) return [...records.values()];
+
+  const legacyInvitations = await getDocs(query(
+    collection(db, LEGACY_INVITATIONS_COLLECTION),
+    where('familyId', '==', familyId),
+  ));
+  for (const snapshot of legacyInvitations.docs) {
+    const invitation = snapshot.data() as LegacyInvitation;
+    const email = normalizeEmail(snapshot.id);
+    if (!email || records.has(email) || email === normalizeEmail(invitation.adminEmail)) continue;
+    records.set(email, {
+      rootFolderId: familyId,
+      familyFileId: '',
+      adminEmail: normalizeEmail(invitation.adminEmail),
+      memberEmail: email,
+      role: normalizeRole(invitation.role),
+      updatedAt: invitation.updatedAt || 0,
+    });
+  }
+  return [...records.values()];
+}
+
+async function assertWorkspaceAdmin(familyId: string): Promise<void> {
+  const uid = authenticatedUid();
+  const adminEmail = authenticatedEmail();
+  const adminRecord = await readWorkspaceAccess(adminEmail);
+  if (
+    adminRecord &&
+    adminRecord.adminUid === uid &&
+    adminRecord.rootFolderId === familyId &&
+    adminRecord.role === 'ADMIN'
+  ) return;
+
+  const legacyFamily = await getLegacyFamilyById(familyId);
+  if (legacyFamily?.adminUid === uid) return;
+  throw new Error('Chỉ Admin của Workspace mới được thay đổi quyền truy cập.');
 }
 
 export async function removeHealthWorkspaceAssignment(familyId: string, memberEmail: string): Promise<void> {
-  const adminUid = authenticatedUid();
-  const familySnap = await getDoc(doc(db, FAMILIES_COLLECTION, familyId));
-  if (familySnap.exists() && familySnap.data()?.adminUid !== adminUid) {
-    throw new Error('Chỉ Admin mới có quyền thu hồi lời mời.');
+  await assertWorkspaceAdmin(familyId);
+  const cleanEmail = normalizeEmail(memberEmail);
+  if (cleanEmail === authenticatedEmail()) {
+    throw new Error('Không thể thu hồi quyền của Admin đang quản lý Workspace.');
   }
 
-  const cleanEmail = normalizeEmail(memberEmail);
-  const batch = writeBatch(db);
-  batch.delete(doc(db, INVITATIONS_COLLECTION, cleanEmail));
-  
-  // Also try to find member in subcollection
-  const q = query(collection(db, FAMILIES_COLLECTION, familyId, 'members'), where('email', '==', cleanEmail));
-  const snap = await getDocs(q);
-  snap.forEach(d => {
-    batch.delete(d.ref);
-    // Also unlink the user
-    const memberUid = d.id;
-    batch.set(doc(db, USER_LINKS_COLLECTION, memberUid, 'families', familyId), { status: 'unlinked', updatedAt: Date.now() }, { merge: true });
+  const ownedAccessRecords = await getDocs(query(
+    collection(db, ACCESS_COLLECTION),
+    where('adminUid', '==', authenticatedUid()),
+  ));
+  const accessRecord = ownedAccessRecords.docs.find(snapshot => {
+    const data = snapshot.data() as WorkspaceAccessRecord;
+    return data.email === cleanEmail && data.rootFolderId === familyId;
   });
-
+  const batch = writeBatch(db);
+  if (accessRecord) batch.delete(accessRecord.ref);
+  batch.delete(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
   await batch.commit();
 }
 
 export async function unregisterHealthWorkspace(familyId: string): Promise<void> {
+  await assertWorkspaceAdmin(familyId);
   const uid = authenticatedUid();
-  const familySnap = await getDoc(doc(db, FAMILIES_COLLECTION, familyId));
-  if (familySnap.exists() && familySnap.data()?.adminUid !== uid) {
-    throw new Error('Chỉ Admin mới có quyền hủy đăng ký kho dữ liệu.');
+  const accessSnapshot = await getDocs(query(
+    collection(db, ACCESS_COLLECTION),
+    where('adminUid', '==', uid),
+  ));
+  const batch = writeBatch(db);
+  const now = Date.now();
+  for (const snapshot of accessSnapshot.docs) {
+    const record = snapshot.data() as WorkspaceAccessRecord;
+    if (record.rootFolderId === familyId) {
+      batch.update(snapshot.ref, { status: 'unlinked', updatedAt: now });
+    }
   }
 
-  const batch = writeBatch(db);
-  batch.update(doc(db, FAMILIES_COLLECTION, familyId), { status: 'unlinked', updatedAt: Date.now() });
-  batch.update(doc(db, USER_LINKS_COLLECTION, uid, 'families', familyId), { status: 'unlinked', updatedAt: Date.now() });
+  const legacyInvitations = await getDocs(query(
+    collection(db, LEGACY_INVITATIONS_COLLECTION),
+    where('familyId', '==', familyId),
+  ));
+  for (const invitation of legacyInvitations.docs) batch.delete(invitation.ref);
   await batch.commit();
 }
 
 export function subscribeHealthWorkspaceAssignments(
   email: string,
   onAssignmentChange: (assignment: HealthWorkspaceAssignment | null) => void,
-  _onError?: (error: Error) => void,
+  onError?: (error: Error) => void,
 ): () => void {
   const cleanEmail = normalizeEmail(email);
-  const inviteRef = doc(db, INVITATIONS_COLLECTION, cleanEmail);
-  
-  return onSnapshot(inviteRef, async (snap) => {
-    if (!snap.exists()) {
+  const accessRef = doc(db, ACCESS_COLLECTION, cleanEmail);
+  const legacyInviteRef = doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail);
+  let hasCurrentRecord = false;
+  let disposed = false;
+
+  const reportError = (error: unknown) => {
+    const normalizedError = error instanceof Error ? error : new Error(String(error));
+    console.error('[WorkspaceAccess] Subscription error:', normalizedError);
+    onError?.(normalizedError);
+  };
+
+  const unsubscribeAccess = onSnapshot(accessRef, snapshot => {
+    hasCurrentRecord = snapshot.exists();
+    if (snapshot.exists()) {
+      try {
+        onAssignmentChange(toAssignment(snapshot.data() as WorkspaceAccessRecord));
+      } catch (error) {
+        reportError(error);
+      }
+      return;
+    }
+    void readLegacyWorkspaceAssignment(cleanEmail)
+      .then(assignment => {
+        if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
+      })
+      .catch(reportError);
+  }, reportError);
+
+  const unsubscribeLegacy = onSnapshot(legacyInviteRef, snapshot => {
+    if (hasCurrentRecord) return;
+    if (!snapshot.exists()) {
       onAssignmentChange(null);
       return;
     }
-    const invite = snap.data() as Invitation;
-    const assignment = await readHealthWorkspaceAssignment(cleanEmail);
-    onAssignmentChange(assignment);
-  }, (err) => {
-    console.error('[WorkspaceRelay] Subscription error:', err);
-  });
+    void readLegacyWorkspaceAssignment(cleanEmail)
+      .then(assignment => {
+        if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
+      })
+      .catch(reportError);
+  }, reportError);
+
+  return () => {
+    disposed = true;
+    unsubscribeAccess();
+    unsubscribeLegacy();
+  };
 }

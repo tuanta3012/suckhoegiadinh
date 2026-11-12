@@ -53,24 +53,48 @@
         "updatedAt": { "type": "number" }
       },
       "required": ["familyId", "adminEmail", "role"]
+    },
+    "WorkspaceAccess": {
+      "title": "WorkspaceAccess",
+      "description": "Email-keyed access record for one shared Workspace",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "rootFolderId": { "type": "string" },
+        "familyFileId": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "adminUid": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "EDITOR", "VIEWER"] },
+        "status": { "type": "string", "enum": ["active", "unlinked", "revoked"] },
+        "schemaVersion": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "migrationComplete": { "type": "boolean" },
+        "source": { "type": "string", "enum": ["family_member"] }
+      },
+      "required": ["email", "rootFolderId", "familyFileId", "adminEmail", "adminUid", "role", "status"]
     }
   },
   "firestore": {
+    "/workspaceAccess/{lowercaseEmail}": {
+      "schema": "WorkspaceAccess",
+      "description": "Canonical email-keyed access record for the shared Workspace"
+    },
     "/families/{familyId}": {
       "schema": "HealthFamilyRegistry",
-      "description": "Thông tin gốc của gia đình"
+      "description": "Legacy registry retained for migration reads"
     },
     "/families/{familyId}/members/{uid}": {
       "schema": "HealthFamilyMember",
-      "description": "Danh sách thành viên chính thức"
+      "description": "Legacy member index retained for migration reads"
     },
     "/userFamilyLinks/{uid}/families/{familyId}": {
       "schema": "UserFamilyLink",
-      "description": "Liên kết nhanh để tìm gia đình theo người dùng"
+      "description": "Legacy UID index retained for migration reads"
     },
     "/invitations/{email}": {
       "schema": "Invitation",
-      "description": "Lời mời chờ chấp nhận theo email"
+      "description": "Legacy invitations imported into workspaceAccess on Admin sync"
     }
   }
 }

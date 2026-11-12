@@ -1912,17 +1912,10 @@ export function HealthDashboard({
           }
         }
 
-        const shouldDiscover = !discoveryAttemptedRef.current || shouldRefreshCachedWorkspace;
         const assignmentPromise = readHealthWorkspaceAssignment(userEmail).then(
           (value) => ({ value }),
           (error: unknown) => ({ error }),
         );
-        const discoveryPromise = shouldDiscover
-          ? findExistingHealthWorkspace().then(
-              (value) => ({ value }),
-              (error: unknown) => ({ error }),
-            )
-          : Promise.resolve({ value: null });
         const assignmentResult = await assignmentPromise;
         const assignment = 'value' in assignmentResult ? assignmentResult.value : null;
         if ('error' in assignmentResult) {
@@ -1978,9 +1971,7 @@ export function HealthDashboard({
 
         // Tự động tìm kiếm thư mục Sức khỏe Gia đình đã có trên Drive của tài khoản
         discoveryAttemptedRef.current = true;
-        const discoveryResult = await discoveryPromise;
-        if ('error' in discoveryResult) throw discoveryResult.error;
-        const loaded = discoveryResult.value;
+        const loaded = await findExistingHealthWorkspace();
         const discovered = loaded
           ? await applyPendingMemberDeletions(loaded)
           : null;
@@ -2016,7 +2007,7 @@ export function HealthDashboard({
             });
         } else if (!cancelled) {
           // Nếu không có lời mời và cũng không tìm thấy thư mục cũ trên Drive
-          if (!assignment) {
+          if (!assignment && !('error' in assignmentResult)) {
             setErrorMessage('Tài khoản chưa được mời vào gia đình. Hãy nhờ Quản trị viên (Admin) thêm email của bạn vào danh sách thành viên.');
           }
           setIsSyncing(false);
@@ -2075,8 +2066,16 @@ export function HealthDashboard({
       if (!activeWorkspace ||
           activeWorkspace.rootFolderId !== workspaceRootFolderId ||
           activeWorkspace.familyFileId !== workspaceFamilyFileId) return;
-      await syncHealthWorkspaceMemberAssignments(activeWorkspace);
-      const assignments = await listHealthWorkspaceAssignments(workspaceRootFolderId);
+      let assignments = await listHealthWorkspaceAssignments(workspaceRootFolderId);
+      const adminRecord = assignments.find(
+        (assignment) =>
+          assignment.memberEmail.trim().toLowerCase() === activeWorkspace.family.adminEmail.trim().toLowerCase() &&
+          assignment.role === 'ADMIN',
+      );
+      if (!adminRecord?.migrationComplete) {
+        await syncHealthWorkspaceMemberAssignments(activeWorkspace);
+        assignments = await listHealthWorkspaceAssignments(workspaceRootFolderId);
+      }
       setWorkspaceAssignments(assignments);
     } catch (error) {
       console.warn('Lỗi tải quyền chia sẻ:', error);
@@ -4344,15 +4343,24 @@ export function HealthDashboard({
       const assignments = new Map(
         workspaceAssignments
           .filter((a) => a.memberEmail !== email)
-          .map((a) => [a.memberEmail, a.role])
+          .map((a) => [a.memberEmail, { role: a.role, source: a.source }])
       );
-      assignments.set(email, inviteRole);
+      assignments.set(email, {
+        role: inviteRole,
+        source: workspace.family.members.some(
+          (member) => member.email.trim().toLowerCase() === email,
+        ) ? 'family_member' : undefined,
+      });
       await ensureDriveFolderAccess(workspace.rootFolderId, email, inviteRole);
       await publishHealthWorkspaceAssignments(
         workspace.rootFolderId,
         workspace.familyFileId,
         userEmail,
-        [...assignments].map(([memberEmail, role]) => ({ email: memberEmail, role, memberId: memberEmail }))
+        [...assignments].map(([memberEmail, assignment]) => ({
+          email: memberEmail,
+          role: assignment.role,
+          source: assignment.source,
+        }))
       );
       setInviteEmail('');
       await reloadWorkspaceAssignments();
@@ -5786,12 +5794,35 @@ export function HealthDashboard({
                         type="button"
                         disabled={isLoading || isSyncing}
                         onClick={async () => {
-                          if (!workspace) return;
+                          const activeWorkspace = workspaceRef.current;
+                          if (!activeWorkspace) return;
                           setIsLoading(true);
                           showToast('Đang kiểm tra và đồng bộ lại quyền truy cập Drive/Firestore cho tất cả thành viên...', 'info');
                           try {
-                            await syncHealthWorkspaceMemberAssignments(workspace);
-                            await reloadWorkspaceAssignments();
+                            await syncHealthWorkspaceMemberAssignments(activeWorkspace);
+                            const assignments = await listHealthWorkspaceAssignments(activeWorkspace.rootFolderId);
+                            const expectedEmails = new Set([
+                              activeWorkspace.family.adminEmail.trim().toLowerCase(),
+                              ...activeWorkspace.family.members
+                                .map((member) => member.email.trim().toLowerCase())
+                                .filter(Boolean),
+                            ]);
+                            const publishedEmails = new Set(
+                              assignments.map((assignment) => assignment.memberEmail.trim().toLowerCase()),
+                            );
+                            const missingEmails = [...expectedEmails].filter((email) => !publishedEmails.has(email));
+                            const adminRecord = assignments.find(
+                              (assignment) =>
+                                assignment.memberEmail.trim().toLowerCase() === activeWorkspace.family.adminEmail.trim().toLowerCase() &&
+                                assignment.role === 'ADMIN' &&
+                                assignment.migrationComplete,
+                            );
+                            if (!adminRecord || missingEmails.length > 0) {
+                              throw new Error(
+                                `Firestore chưa xác nhận đủ bản ghi quyền${missingEmails.length ? ` cho: ${missingEmails.join(', ')}` : ''}. Kiểm tra Rules đã deploy đúng database chưa.`,
+                              );
+                            }
+                            setWorkspaceAssignments(assignments);
                             showToast('Đã đồng bộ quyền truy cập thành công!', 'success');
                           } catch (error) {
                             const msg = error instanceof Error ? error.message : 'Lỗi đồng bộ quyền.';

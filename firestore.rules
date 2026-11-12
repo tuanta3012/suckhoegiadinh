@@ -9,6 +9,20 @@ service cloud.firestore {
       return request.auth.token.email.lower();
     }
 
+    function hasLegacyInvitation(familyId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/invitations/$(authenticatedEmail())) &&
+        get(/databases/$(database)/documents/invitations/$(authenticatedEmail())).data.familyId == familyId;
+    }
+
+    function workspaceAdmin(adminEmail) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/workspaceAccess/$(adminEmail)) &&
+        get(/databases/$(database)/documents/workspaceAccess/$(adminEmail)).data.adminUid == request.auth.uid &&
+        get(/databases/$(database)/documents/workspaceAccess/$(adminEmail)).data.role == "ADMIN" &&
+        get(/databases/$(database)/documents/workspaceAccess/$(adminEmail)).data.status == "active";
+    }
+
     function activeMember(familyId) {
       return signedIn() &&
         exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
@@ -23,8 +37,39 @@ service cloud.firestore {
         );
     }
 
+    match /workspaceAccess/{email} {
+        allow get: if signedIn() &&
+          (authenticatedEmail() == email || resource.data.adminUid == request.auth.uid);
+        allow list: if signedIn() && resource.data.adminUid == request.auth.uid;
+        allow create: if signedIn() &&
+          request.resource.data.email == email &&
+          request.resource.data.adminUid == request.auth.uid &&
+          (
+            (
+              authenticatedEmail() == email &&
+              request.resource.data.adminEmail == email &&
+              request.resource.data.role == "ADMIN"
+            )
+            || workspaceAdmin(request.resource.data.adminEmail)
+          );
+        allow update: if signedIn() &&
+          request.resource.data.email == email &&
+          request.resource.data.adminUid == request.auth.uid &&
+          (
+            resource.data.adminUid == request.auth.uid ||
+            (
+              authenticatedEmail() == email &&
+              resource.data.role == "ADMIN" &&
+              request.resource.data.role == "ADMIN"
+            )
+          );
+        allow delete: if signedIn() &&
+          resource.data.adminUid == request.auth.uid &&
+          resource.data.role != "ADMIN";
+    }
+
     match /families/{familyId} {
-      allow get: if activeMember(familyId) || isAdmin(familyId);
+        allow get: if activeMember(familyId) || isAdmin(familyId) || hasLegacyInvitation(familyId);
       allow create: if signedIn() && request.resource.data.adminUid == request.auth.uid;
       allow update: if isAdmin(familyId);
       allow delete: if isAdmin(familyId);
