@@ -2467,6 +2467,21 @@ export function HealthDashboard({
 
   async function handleDeleteFamilyMember(member: FamilyMember) {
     if (!workspace) return;
+    const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || '';
+    const currentEmail = normalizeEmail(userEmail || getSignedInGoogleEmail());
+    const adminEmail = normalizeEmail(workspace.family.adminEmail);
+    const memberEmail = normalizeEmail(member.email);
+    const isSelf = Boolean(currentEmail && memberEmail === currentEmail);
+
+    if (!isWorkspaceAdmin && !isSelf) {
+      showToast('Bạn chỉ có quyền xóa hồ sơ của chính mình. Chỉ Quản trị viên mới có quyền xóa hồ sơ của thành viên khác.', 'error');
+      return;
+    }
+    const isAdminProfile = Boolean(adminEmail && memberEmail === adminEmail);
+    if (isAdminProfile) {
+      showToast('Không thể xóa hồ sơ Admin khỏi Workspace.', 'error');
+      return;
+    }
     const isLocalWorkspace = workspace.rootFolderId === 'local_offline_workspace';
     const isUnsyncedMember =
       member.driveFolderId.startsWith('local_folder_') &&
@@ -2475,9 +2490,11 @@ export function HealthDashboard({
       typeof navigator === 'undefined' || navigator.onLine
     );
     const confirmed = await confirm({
-      title: `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
-      message: `Thành viên sẽ bị gỡ khỏi Workspace, xóa lời mời và quyền Drive, đồng thời xóa hồ sơ JSON và toàn bộ tài liệu Drive. Thành viên sẽ không thể liên kết lại Workspace này. Không thể hoàn tác.${!canSyncRemote && !isLocalWorkspace ? ' Yêu cầu sẽ được lưu trên thiết bị và thực hiện khi có mạng.' : ''}`,
-      confirmLabel: 'Xóa vĩnh viễn',
+      title: isSelf && !isWorkspaceAdmin ? `Xóa vĩnh viễn hồ sơ của bạn?` : `Xóa vĩnh viễn hồ sơ của ${member.name}?`,
+      message: isSelf && !isWorkspaceAdmin
+        ? `Thư mục tài liệu gốc (ảnh, PDF) và file hồ sơ JSON của bạn sẽ bị xóa vĩnh viễn khỏi Google Drive. Bạn sẽ rời khỏi không gian gia đình này. Hồ sơ của các thành viên khác vẫn được giữ nguyên. Không thể hoàn tác.`
+        : `Thành viên sẽ bị gỡ khỏi Workspace, xóa lời mời và quyền Drive, đồng thời xóa hồ sơ JSON và toàn bộ tài liệu Drive. Thành viên sẽ không thể liên kết lại Workspace này. Không thể hoàn tác.${!canSyncRemote && !isLocalWorkspace ? ' Yêu cầu sẽ được lưu trên thiết bị và thực hiện khi có mạng.' : ''}`,
+      confirmLabel: isSelf && !isWorkspaceAdmin ? 'Xóa hồ sơ của tôi' : 'Xóa vĩnh viễn',
     });
     if (!confirmed) return;
     setIsLoading(true);
@@ -2542,6 +2559,22 @@ export function HealthDashboard({
         const { [member.id]: _deletedError, ...remaining } = previous;
         return remaining;
       });
+
+      if (isSelf && !isWorkspaceAdmin) {
+        const freshWs = createDefaultLocalWorkspace(userEmail);
+        workspaceRef.current = freshWs;
+        setWorkspace(freshWs);
+        setProfiles({});
+        setSelectedMemberId('');
+        setChatMessages([]);
+        setActiveTab('overview');
+        if (userEmail) {
+          await clearWorkspaceCache(userEmail).catch(() => {});
+        }
+        showToast('Đã xóa thành công hồ sơ cá nhân của bạn và rời khỏi không gian gia đình.', 'success');
+        return;
+      }
+
       setSelectedMemberId(next.family.members[0]?.id || '');
       setChatMessages([]);
       setActiveTab(next.family.members.length ? 'family' : 'overview');
@@ -4380,29 +4413,18 @@ export function HealthDashboard({
                   {/* 2. Xóa dữ liệu */}
                   <button
                     type="button"
-                    disabled={
-                      !isWorkspaceAdmin &&
-                      workspace.rootFolderId !== 'local_offline_workspace' &&
-                      driveAuthorized &&
-                      typeof navigator !== 'undefined' &&
-                      navigator.onLine
-                    }
                     onClick={() => {
                       setShowSettingsDropdown(false);
                       void handleFactoryReset();
                     }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors text-left text-xs font-semibold disabled:opacity-40 disabled:hover:bg-transparent"
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-slate-700 hover:text-rose-900 transition-colors text-left text-xs font-semibold"
                   >
                     <Trash2 className="w-4 h-4 text-rose-600 shrink-0" />
                     <div className="flex-1 min-w-0">
                       <div className="font-bold">Xóa dữ liệu</div>
-                      {!isWorkspaceAdmin &&
-                        workspace.rootFolderId !== 'local_offline_workspace' &&
-                        driveAuthorized &&
-                        typeof navigator !== 'undefined' &&
-                        navigator.onLine && (
-                        <div className="text-[10px] text-rose-400 font-normal">Chỉ dành cho Quản trị viên</div>
-                      )}
+                      <div className="text-[10px] text-slate-400 font-normal">
+                        {isWorkspaceAdmin ? 'Xóa toàn bộ thư mục Drive & thiết bị' : 'Xóa hồ sơ cá nhân & tài liệu raw'}
+                      </div>
                     </div>
                   </button>
                   {/* 3. Đăng nhập / Đăng xuất & Kết nối lại Drive */}
@@ -5657,14 +5679,17 @@ export function HealthDashboard({
                                 <Pencil className="w-4 h-4" />
                               </button>
                             )}
-                            {isWorkspaceAdmin &&
-                              m.email?.trim().toLowerCase() !== workspace?.family.adminEmail?.trim().toLowerCase() && (
+                            {((isWorkspaceAdmin &&
+                              m.email?.trim().toLowerCase() !== workspace?.family.adminEmail?.trim().toLowerCase()) ||
+                              (!isWorkspaceAdmin &&
+                               (userEmail || getSignedInGoogleEmail()) &&
+                               m.email?.trim().toLowerCase() === (userEmail || getSignedInGoogleEmail())?.trim().toLowerCase())) && (
                               <button
                                 type="button"
                                 disabled={isLoading}
                                 onClick={() => void handleDeleteFamilyMember(m)}
                                 aria-label={`Xóa vĩnh viễn hồ sơ của ${m.name}`}
-                                title="Xóa vĩnh viễn thành viên và dữ liệu Drive"
+                                title={isWorkspaceAdmin ? "Xóa vĩnh viễn thành viên và dữ liệu Drive" : "Xóa hồ sơ bản thân khỏi gia đình"}
                                 className="p-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                               >
                                 <Trash2 className="w-4 h-4" />
