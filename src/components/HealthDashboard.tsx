@@ -96,6 +96,7 @@ import {
   uploadRawHealthFile,
   type DriveFile,
 } from '../utils/healthDriveService';
+import { getSignedInGoogleEmail } from '../utils/googleDriveService';
 import {
   fileFromLocalSource,
   fileFromPendingUpload,
@@ -155,7 +156,6 @@ import {
   type FileDuplicateMatch,
   type EventDuplicateMatch,
 } from '../utils/deduplicationService';
-
 import {
   readOcrRecoveryJobs,
   removeOcrRecoveryJob,
@@ -199,9 +199,7 @@ import {
   setupBackgroundAppResumeListener,
 } from '../utils/backgroundNotificationService';
 import { getFollowUpRemindersForSignedInMember } from '../utils/followUpReminders';
-
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
-
 interface HealthDashboardProps {
   userEmail: string | null;
   userName?: string | null;
@@ -213,18 +211,15 @@ interface HealthDashboardProps {
   onLogout: () => void;
   showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
 }
-
 interface DigitizationDraft {
   source: DriveFile;
   extracted: Partial<HealthEvent>;
 }
-
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   timestamp?: string;
 }
-
 const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
 const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
 const LOCAL_PROFILES_KEY = 'health_offline_profiles_v2';
@@ -241,11 +236,9 @@ const EXTRACTION_NOTIFICATION_PHASES: Record<ExtractionProgressUpdate['stage'], 
   matching_patient: 'Ghép hồ sơ',
   completed: 'Lưu kết quả',
 };
-
 function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
 }
-
 function createDefaultLocalWorkspace(
   adminEmail: string | null,
 ): HealthDriveWorkspace {
@@ -263,11 +256,9 @@ function createDefaultLocalWorkspace(
     },
   };
 }
-
 function offlineCacheKey(baseKey: string, userEmail: string | null): string {
   return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
 }
-
 function loadNativeOfflineState(userEmail: string | null): {
   workspace: HealthDriveWorkspace;
   profiles: Record<string, HealthProfile>;
@@ -282,13 +273,11 @@ function loadNativeOfflineState(userEmail: string | null): {
     );
   }
   if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
-
   const workspaceKey = offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail);
   const profilesKey = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
   let serializedWorkspace = localStorage.getItem(workspaceKey);
   let serializedProfiles = localStorage.getItem(profilesKey);
   let migratingLegacyCache = false;
-
   if (!serializedWorkspace) {
     const legacyWorkspace = localStorage.getItem(LOCAL_WORKSPACE_KEY);
     if (legacyWorkspace) {
@@ -310,7 +299,6 @@ function loadNativeOfflineState(userEmail: string | null): {
       }
     }
   }
-
   if (!serializedWorkspace) return fallback;
   try {
     const parsedWorkspace = JSON.parse(serializedWorkspace) as HealthDriveWorkspace;
@@ -348,7 +336,6 @@ function loadNativeOfflineState(userEmail: string | null): {
     return fallback;
   }
 }
-
 function loadGuestLocalState(): {
   workspace: HealthDriveWorkspace;
   profiles: Record<string, HealthProfile>;
@@ -376,12 +363,10 @@ function loadGuestLocalState(): {
     return null;
   }
 }
-
 async function applyPendingMemberDeletions(
   loadedWorkspace: HealthDriveWorkspace,
 ): Promise<HealthDriveWorkspace> {
   if (loadedWorkspace.rootFolderId === 'local_offline_workspace') return loadedWorkspace;
-
   const pending = readPendingMemberDeletions(loadedWorkspace.rootFolderId);
   let updatedWorkspace = loadedWorkspace;
   for (const deletion of pending) {
@@ -393,7 +378,6 @@ async function applyPendingMemberDeletions(
   }
   return updatedWorkspace;
 }
-
 function isNetworkUnavailableError(error: unknown): boolean {
   if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
   if (
@@ -407,7 +391,6 @@ function isNetworkUnavailableError(error: unknown): boolean {
   return error instanceof TypeError &&
     /failed to fetch|networkerror|load failed|network request failed/i.test(error.message);
 }
-
 const EVENT_TYPE_OPTIONS: Array<{
   value: HealthEvent['type'];
   label: string;
@@ -423,7 +406,6 @@ const EVENT_TYPE_OPTIONS: Array<{
   { value: 'discharge', label: 'Ra viện', color: 'indigo', icon: FileHeart },
   { value: 'other', label: 'Khác', color: 'slate', icon: FileText },
 ];
-
 export function HealthDashboard({
   userEmail,
   userName,
@@ -438,7 +420,6 @@ export function HealthDashboard({
   const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [rootIdInput, setRootIdInput] = useState('');
-
   const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(offlineStartup.workspace);
   const hasRemoteWorkspace = workspace.rootFolderId !== 'local_offline_workspace';
   const needsDriveAuthorization = !driveAuthorized || driveRequestFailed;
@@ -452,7 +433,6 @@ export function HealthDashboard({
   const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(offlineStartup.profiles);
   const [localImportAvailable, setLocalImportAvailable] = useState(false);
   const [isImportingLocalData, setIsImportingLocalData] = useState(false);
-
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
   const [selectedMemberId, setSelectedMemberId] = useState<string>(
     findMemberForEmail(offlineStartup.workspace.family.members, userEmail)?.id ||
@@ -522,7 +502,6 @@ export function HealthDashboard({
   const [showAiResourcesModal, setShowAiResourcesModal] = useState(false);
   const memberMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -555,7 +534,6 @@ export function HealthDashboard({
       setQueueElapsedSeconds(0);
       return;
     }
-
     const startedAt = queueStartedAtRef.current ?? Date.now();
     queueStartedAtRef.current = startedAt;
     const updateElapsedTime = () => {
@@ -567,7 +545,6 @@ export function HealthDashboard({
   }, [queueStatus]);
   const [pendingLocalUploadCount, setPendingLocalUploadCount] = useState(0);
   const [ocrRecoveryJobs, setOcrRecoveryJobs] = useState<OcrRecoveryJob[]>([]);
-
   const workspaceRef = useRef<HealthDriveWorkspace | null>(null);
   const isCreatingWorkspaceRef = useRef(false);
   const isResettingRef = useRef(false);
@@ -588,7 +565,6 @@ export function HealthDashboard({
   authIdentityRef.current = { userEmail, driveAuthorized };
   const previousSelectedMemberIdRef = useRef(selectedMemberId);
   const previousWorkspaceRootRef = useRef(workspace?.rootFolderId);
-
   useEffect(() => {
     if (previousSelectedMemberIdRef.current !== selectedMemberId) {
       previousSelectedMemberIdRef.current = selectedMemberId;
@@ -598,7 +574,6 @@ export function HealthDashboard({
       setTimelineFilter('all');
     }
   }, [selectedMemberId]);
-
   useEffect(() => {
     if (previousWorkspaceRootRef.current !== workspace?.rootFolderId) {
       previousWorkspaceRootRef.current = workspace?.rootFolderId;
@@ -608,7 +583,6 @@ export function HealthDashboard({
       setTimelineFilter('all');
     }
   }, [workspace?.rootFolderId]);
-
   const normalizedUserEmail = userEmail?.trim().toLowerCase() || null;
   const previousUserEmailRef = useRef(normalizedUserEmail);
   useEffect(() => {
@@ -637,11 +611,9 @@ export function HealthDashboard({
     setEditingMember(null);
     setErrorMessage('');
   }, [normalizedUserEmail, userEmail]);
-
   useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
-
   useEffect(() => {
     if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
     try {
@@ -653,7 +625,6 @@ export function HealthDashboard({
       console.warn('[Offline cache] Could not persist native workspace.', error);
     }
   }, [normalizedUserEmail, userEmail, workspace]);
-
   useEffect(() => {
     if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
     const key = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
@@ -667,19 +638,15 @@ export function HealthDashboard({
       console.warn('[Offline cache] Could not persist native health profiles.', error);
     }
   }, [normalizedUserEmail, profiles, userEmail]);
-
   useEffect(() => {
     profilesRef.current = profiles;
   }, [profiles]);
-
   useEffect(() => {
     selectedMemberIdRef.current = selectedMemberId;
   }, [selectedMemberId]);
-
   useEffect(() => {
     uploadQueueRef.current = uploadQueue;
   }, [uploadQueue]);
-
   function persistOcrRecoveryJob(
     driveFileId: string,
     status: OcrRecoveryJob['status'],
@@ -700,7 +667,6 @@ export function HealthDashboard({
       showToast('Không lưu được trạng thái khôi phục OCR trên thiết bị này.', 'error');
     }
   }
-
   function forgetOcrRecoveryJob(driveFileId: string) {
     if (!workspace) return;
     try {
@@ -710,15 +676,12 @@ export function HealthDashboard({
       showToast('Không thể xóa trạng thái khôi phục OCR khỏi thiết bị.', 'error');
     }
   }
-
   async function runFamilyDoctorSummaryAfterQueue() {
     const targetMemberId = selectedMemberIdRef.current || selectedMemberId;
     const targetMember = workspaceRef.current?.family.members.find(m => m.id === targetMemberId) || selectedMember;
     if (!targetMember) return;
-
     let currentProfile = profilesRef.current[targetMember.id] || profiles[targetMember.id];
     if (!currentProfile || !currentProfile.timeline || currentProfile.timeline.length === 0) return;
-
     const pipelineTimer = digitizationLogger.startTimer();
     digitizationLogger.log(
       'info',
@@ -726,7 +689,6 @@ export function HealthDashboard({
       `Bắt đầu chuỗi phân tích tự động (Chuẩn hóa danh pháp + Phân tích 4 lớp y khoa) sau hàng đợi cho ${targetMember.name} (${currentProfile.timeline.length} sự kiện)`,
       { memberId: targetMember.id, memberName: targetMember.name, timelineCount: currentProfile.timeline.length }
     );
-
     showToast(
       `Đang tự động chuẩn hóa danh pháp & phân tích y khoa 4 lớp cho ${targetMember.name}...`,
       'info',
@@ -743,7 +705,6 @@ export function HealthDashboard({
         ...currentProfile,
         timeline: organizedTimeline,
       };
-
       // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-3.6-flash
       const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
       const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-3.6-flash');
@@ -761,7 +722,6 @@ export function HealthDashboard({
       const saveMs = saveTimer();
       profilesRef.current = { ...profilesRef.current, [targetMember.id]: saved };
       setProfiles((prev) => ({ ...prev, [targetMember.id]: saved }));
-
       const totalPipelineMs = pipelineTimer();
       digitizationLogger.log(
         'info',
@@ -770,7 +730,6 @@ export function HealthDashboard({
         { memberId: targetMember.id, totalPipelineMs, saveMs },
         totalPipelineMs
       );
-
       showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp AI lên trang chính của ${targetMember.name}!`, 'success');
     } catch (error) {
       const totalPipelineMs = pipelineTimer();
@@ -790,7 +749,6 @@ export function HealthDashboard({
       setIsSummarizing(false);
     }
   }
-
   function notifyBatchProgress(
     fileName: string,
     memberName: string | undefined,
@@ -808,11 +766,9 @@ export function HealthDashboard({
       progressPercent,
     });
   }
-
   function processNextInQueue() {
     const queue = uploadQueueRef.current.length > 0 ? uploadQueueRef.current : uploadQueue;
     const currentStatus = queueStatusRef.current;
-
     if (queue.length > 0 && currentStatus) {
       const nextFile = queue[0];
       const pendingUploadId = pendingUploadIdsRef.current.shift();
@@ -820,21 +776,17 @@ export function HealthDashboard({
       const remaining = queue.slice(1);
       uploadQueueRef.current = remaining;
       setUploadQueue(remaining);
-
       const nextCurrent = currentStatus.current + 1;
       const nextStatus = { current: nextCurrent, total: currentStatus.total };
       updateQueueStatus(nextStatus);
-
       digitizationLogger.log(
         'info',
         'queue_advance',
         `Hàng đợi chuyển sang tệp ${nextCurrent}/${currentStatus.total}: "${nextFile.name}" (${(nextFile.size / 1024).toFixed(0)} KB)`,
         { index: nextCurrent, total: currentStatus.total, fileName: nextFile.name, size: nextFile.size }
       );
-
       showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${currentStatus.total} (${nextFile.name})...`, 'info');
       notifyBatchProgress(nextFile.name, selectedMember?.name, 'Chuẩn bị');
-
       void beginDigitization(nextFile, {
         memberId: batchStagingMemberIdRef.current,
         pendingUploadId,
@@ -875,7 +827,6 @@ export function HealthDashboard({
       }
     }
   }
-
   async function stageFilesAndStart(
     files: File[],
     memberId?: string,
@@ -890,30 +841,24 @@ export function HealthDashboard({
       showToast('Chưa có hồ sơ đích để lưu tài liệu.', 'error');
       return;
     }
-
     // Tự động thiết lập Drive nếu đã đăng nhập nhưng vẫn ở chế độ Cục bộ
     if (driveAuthorized && initialWorkspace.rootFolderId === 'local_offline_workspace') {
       await handleManualSync({ autoCreate: true });
     }
-
     // Refresh workspace reference after sync / auto-creation
     let activeWorkspace = workspaceRef.current || initialWorkspace;
-
     // Nếu vẫn là local và không hỗ trợ hàng đợi ngoại tuyến, báo lỗi ngay
     if (activeWorkspace.rootFolderId === 'local_offline_workspace' && !supportsDurableOfflineQueue()) {
       showToast('Hãy kết nối Google Drive để tải tài liệu lên (Trình duyệt này không hỗ trợ hàng đợi ngoại tuyến).', 'error');
       return;
     }
-
     const isLocalOnlyWorkspace =
       activeWorkspace.rootFolderId === 'local_offline_workspace' &&
       supportsDurableOfflineQueue();
-
     let targetMember =
       activeWorkspace.family.members.find((member) => member.id === memberId) ||
       findMemberForEmail(activeWorkspace.family.members, userEmail) ||
       activeWorkspace.family.members[0];
-
     digitizationLogger.log(
       'info',
       'batch_start',
@@ -925,7 +870,6 @@ export function HealthDashboard({
         targetMemberId: memberId,
       }
     );
-
     if (!targetMember) {
       try {
         const newMemberId = `member_${crypto.randomUUID().slice(0, 12)}`;
@@ -984,15 +928,12 @@ export function HealthDashboard({
         return;
       }
     }
-
     if (!targetMember) {
       showToast('Không thể chuẩn bị hồ sơ nhận diện tài liệu. Hãy kết nối Drive hoặc thêm hồ sơ thành viên rồi thử lại.', 'error');
       return;
     }
     batchStagingMemberIdRef.current = targetMember.id;
-
     activeWorkspace = workspaceRef.current || activeWorkspace;
-
     const queuedIds: Array<string | undefined> = [];
     if (supportsDurableOfflineQueue() && offlineOwnerKey) {
       try {
@@ -1020,7 +961,6 @@ export function HealthDashboard({
     } else {
       queuedIds.push(...files.map(() => undefined));
     }
-
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
     if (!driveAuthorized || !isOnline || activeWorkspace.rootFolderId === 'local_offline_workspace') {
       if (supportsDurableOfflineQueue() && offlineOwnerKey) {
@@ -1035,7 +975,6 @@ export function HealthDashboard({
       }
       if (!isLocalOnlyWorkspace) return;
     }
-
     const firstPendingId = queuedIds[0];
     if (firstPendingId) processingPendingUploadIdsRef.current.add(firstPendingId);
     uploadQueueRef.current = files.slice(1);
@@ -1065,12 +1004,10 @@ export function HealthDashboard({
       pendingUploadId: firstPendingId,
     });
   }
-
   async function getPendingUpload(operationId: string): Promise<PendingUpload | undefined> {
     if (!supportsDurableOfflineQueue() || !offlineOwnerKey) return undefined;
     return localSyncOutbox.getUpload(offlineOwnerKey, operationId);
   }
-
   async function completePendingUpload(operationId?: string): Promise<void> {
     if (!operationId || !supportsDurableOfflineQueue() || !offlineOwnerKey) return;
     const pending = await getPendingUpload(operationId);
@@ -1078,25 +1015,21 @@ export function HealthDashboard({
     await localSyncOutbox.complete(offlineOwnerKey, operationId);
     setPendingLocalUploadCount((count) => Math.max(0, count - 1));
   }
-
   async function handleManualSync(options: { autoCreate?: boolean } = {}): Promise<boolean> {
     if (!driveAuthorized) {
       showToast('Đang mở trang đăng nhập Google Drive để kích hoạt đồng bộ 2 chiều...', 'info');
       onConnectDrive();
       return false;
     }
-
     const cleanEmail = userEmail ? userEmail.trim().toLowerCase() : null;
     const savedRootId = cleanEmail
       ? localStorage.getItem(`${PROFILE_ROOT_KEY}_${cleanEmail}`)
       : null;
-
     if (savedRootId) {
       const opened = await openWorkspace(savedRootId);
       if (opened) return true;
       // Stale savedRootId was cleaned up by openWorkspace; continue below to find or autoCreate!
     }
-
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') {
       setIsSyncing(true);
       showToast('Đang tự động quét và kết nối Thư mục Sức Khỏe trên Google Drive...', 'info');
@@ -1142,7 +1075,6 @@ export function HealthDashboard({
       }
       return false;
     }
-
     setIsLoading(true);
     showToast('Đang đồng bộ dữ liệu 2 chiều với Google Drive...', 'info');
     try {
@@ -1157,7 +1089,6 @@ export function HealthDashboard({
           console.warn('[Sync] Tự động đồng bộ quyền Drive thất bại:', err);
         });
       }
-
       showToast('Đã đồng bộ dữ liệu 2 chiều thành công!', 'success');
     } catch (error) {
       showToast(
@@ -1168,7 +1099,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   useEffect(() => {
     if (
       !driveAuthorized ||
@@ -1176,7 +1106,6 @@ export function HealthDashboard({
       !workspace ||
       workspace.rootFolderId === 'local_offline_workspace'
     ) return;
-
     let cancelled = false;
     const syncWhenAvailable = async () => {
       if (
@@ -1204,58 +1133,75 @@ export function HealthDashboard({
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [driveAuthorized, userEmail, workspace?.rootFolderId, isLoading, isUploading]);
-
   async function handleFactoryReset() {
     if (isLoading || isUploading || uploadQueueRef.current.length > 0) {
       showToast('Hãy đợi các thao tác tải lên hoặc đồng bộ hiện tại kết thúc rồi thử xóa lại.', 'info');
       return;
     }
-
+    const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || '';
+    const currentEmail = normalizeEmail(userEmail || getSignedInGoogleEmail());
     const isOnline = typeof navigator !== 'undefined' && navigator.onLine;
     const hasRemoteWorkspace = Boolean(
       workspace && workspace.rootFolderId !== 'local_offline_workspace',
     );
-    const canDeleteDrive = isOnline && driveAuthorized && hasRemoteWorkspace && isWorkspaceAdmin;
-    const confirmed = await confirm({
-      title: 'Xóa sạch toàn bộ dữ liệu?',
-      message: canDeleteDrive
-        ? 'Toàn bộ nội dung trong thư mục Workspace trên Google Drive và dữ liệu sức khỏe, cache, hàng đợi chưa đồng bộ trên thiết bị này sẽ bị xóa vĩnh viễn. Không thể hoàn tác.'
-        : 'Toàn bộ dữ liệu sức khỏe, cache và hàng đợi chưa đồng bộ trên thiết bị này sẽ bị xóa vĩnh viễn. Dữ liệu trên Google Drive không bị xóa' +
-          (hasRemoteWorkspace && !isOnline ? ' vì thiết bị đang offline.' : hasRemoteWorkspace ? ' vì Drive chưa được kết nối hoặc bạn không có quyền Admin.' : '.') +
-          ' Các thay đổi ngoại tuyến chưa đồng bộ cũng sẽ mất và không thể khôi phục.',
-      confirmLabel: 'Xóa sạch dữ liệu',
-    });
-
+    const selfMember = workspace?.family.members.find(
+      (m) => normalizeEmail(m.email) === currentEmail,
+    );
+    let confirmed = false;
+    let willDeleteEntireWorkspace = false;
+    let willDeleteSelfMember = false;
+    if (isWorkspaceAdmin) {
+      willDeleteEntireWorkspace = isOnline && driveAuthorized && hasRemoteWorkspace;
+      confirmed = await confirm({
+        title: 'Xóa toàn bộ kho dữ liệu gia đình?',
+        message: willDeleteEntireWorkspace
+          ? 'Toàn bộ nội dung trong thư mục Workspace "Suc khoe gia dinh" trên Google Drive và dữ liệu sức khỏe của mọi thành viên sẽ bị xóa vĩnh viễn. Không thể hoàn tác.'
+          : 'Toàn bộ dữ liệu sức khỏe, cache và hàng đợi chưa đồng bộ trên thiết bị này sẽ bị xóa vĩnh viễn. Dữ liệu trên Google Drive không bị xóa' +
+            (hasRemoteWorkspace && !isOnline ? ' vì thiết bị đang offline.' : hasRemoteWorkspace ? ' vì Drive chưa được kết nối.' : '.') +
+            ' Không thể khôi phục.',
+        confirmLabel: 'Xóa toàn bộ kho dữ liệu',
+      });
+    } else {
+      willDeleteSelfMember = isOnline && driveAuthorized && hasRemoteWorkspace && Boolean(selfMember);
+      confirmed = await confirm({
+        title: selfMember ? `Xóa dữ liệu hồ sơ của bạn (${selfMember.name})?` : 'Xóa dữ liệu trên thiết bị?',
+        message: willDeleteSelfMember && selfMember
+          ? `Thư mục tài liệu gốc (ảnh, PDF) và file hồ sơ JSON của riêng bạn sẽ bị xóa vĩnh viễn khỏi Google Drive. Bạn sẽ rời khỏi không gian gia đình này. Dữ liệu của các thành viên khác trong gia đình vẫn được giữ nguyên vẹn. Không thể hoàn tác.`
+          : 'Toàn bộ dữ liệu hồ sơ và bộ nhớ tạm (cache) trên thiết bị này sẽ được dọn sạch.',
+        confirmLabel: selfMember ? 'Xóa dữ liệu của tôi' : 'Xóa dữ liệu thiết bị',
+      });
+    }
     if (!confirmed) return;
-
-    if (canDeleteDrive) {
+    if (willDeleteEntireWorkspace) {
       onDriveWorkspaceReset();
     }
     
     setIsLoading(true);
     isResettingRef.current = true;
     discoveryAttemptedRef.current = true;
-
     // 1. Lưu lại các tham số cần thiết
     const oldRootFolderId = workspace?.rootFolderId;
     const oldUserEmail = userEmail;
-    const canDeleteRemote = canDeleteDrive;
-
     // 2. Tạo trạng thái mới sạch sẽ
     const freshWs = createDefaultLocalWorkspace(userEmail);
     const freshProf = {};
-
     try {
       // 3. Xóa dữ liệu Google Drive và Registry nếu có quyền
-      if (canDeleteRemote && oldRootFolderId) {
-        showToast('Đang xóa toàn bộ dữ liệu trên Google Drive...', 'info');
+      if (willDeleteEntireWorkspace && oldRootFolderId) {
+        showToast('Đang xóa toàn bộ thư mục Workspace trên Google Drive...', 'info');
         try {
           await deleteHealthWorkspaceFolder(oldRootFolderId);
         } catch (delError) {
           console.warn('[FactoryReset] Lỗi khi xóa trên Google Drive:', delError);
         }
+      } else if (willDeleteSelfMember && selfMember && workspace) {
+        showToast('Đang xóa tài liệu và hồ sơ cá nhân của bạn trên Google Drive...', 'info');
+        try {
+          await deleteDriveFamilyMember(workspace, selfMember.id);
+        } catch (delError) {
+          console.warn('[FactoryReset] Lỗi khi xóa hồ sơ thành viên trên Google Drive:', delError);
+        }
       }
-
       // 4. Xóa cache "Sổ đăng ký" (Registry) ngay lập tức để Sync/Discovery không tìm lại folder cũ
       if (oldUserEmail) {
         await clearWorkspaceCache(oldUserEmail).catch(() => {});
@@ -1273,14 +1219,12 @@ export function HealthDashboard({
         localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, oldUserEmail));
         localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, oldUserEmail));
       }
-
       // 6. Xóa Capacitor Filesystem (Offline outbox queue)
       if (supportsDurableOfflineQueue()) {
         try {
           await localSyncOutbox.clearAll();
         } catch (e) { /* ignore FS errors */ }
       }
-
       // 7. Quét và dọn dẹp sâu LocalStorage
       if (typeof localStorage !== 'undefined') {
         const exactKeys = new Set([
@@ -1310,7 +1254,6 @@ export function HealthDashboard({
           } catch (e) { /* ignore */ }
         }
       }
-
       // 8. Cập nhật UI sau khi xóa hoàn tất
       workspaceRef.current = freshWs;
       profilesRef.current = freshProf;
@@ -1343,11 +1286,9 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cleanupInFlight = useRef(false);
   const { confirm } = useConfirmDialog();
-
   const {
     updateInfo,
     isUpdateModalOpen,
@@ -1359,7 +1300,6 @@ export function HealthDashboard({
     updateServerUrl: UPDATE_SERVER_URL,
     onNotification: showToast,
   });
-
   const members = prioritizeMemberForEmail(workspace?.family.members || [], userEmail);
   const offlineOwnerKey =
     userEmail?.trim().toLowerCase() ||
@@ -1381,7 +1321,6 @@ export function HealthDashboard({
       setLocalImportAvailable(false);
       return;
     }
-
     const importMarker = `health_guest_imported_${encodeURIComponent(userEmail.trim().toLowerCase())}_${activeWorkspace.rootFolderId}`;
     if (localStorage.getItem(importMarker) === 'true') {
       setLocalImportAvailable(false);
@@ -1401,7 +1340,6 @@ export function HealthDashboard({
         console.error('[Local data import] Could not inspect stored documents.', error);
         if (!cancelled) setLocalImportAvailable(hasProfileData || hasMultipleMembers);
       });
-
     return () => {
       cancelled = true;
     };
@@ -1413,14 +1351,12 @@ export function HealthDashboard({
         workspace?.family.adminEmail &&
         userEmail.trim().toLowerCase() === workspace.family.adminEmail.trim().toLowerCase())
   );
-
   useEffect(() => {
     let active = true;
     const folderId =
       driveAuthorized && workspace && workspace.rootFolderId !== 'local_offline_workspace'
         ? workspace.rootFolderId
         : 'local_offline_workspace';
-
     const loading = loadSharedAiResources(folderId).then(({ keys }) => {
       if (active) setSharedGeminiKeys(keys);
     });
@@ -1437,17 +1373,14 @@ export function HealthDashboard({
         );
       }
     });
-
     return () => {
       active = false;
     };
   }, [driveAuthorized, showToast, workspace?.rootFolderId]);
-
   const selectedMember = members.find((m) => m.id === selectedMemberId) || members[0] || null;
   const selectedProfile = selectedMember ? profiles[selectedMember.id] : null;
   const trackerMember =
     members.find((member) => member.id === trackerState.memberId) || selectedMember;
-
   // Extract all available vital metrics from selected member's timeline
   const metricOptions = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
@@ -1463,19 +1396,16 @@ export function HealthDashboard({
       label: getHealthMetricDisplayName(key),
     }));
   }, [selectedProfile]);
-
   useEffect(() => {
     if (metricOptions.length > 0 && !metricOptions.some(({ key }) => key === selectedMetric)) {
       setSelectedMetric(metricOptions[0].key);
     }
   }, [metricOptions, selectedMetric]);
-
   // Chart data for chosen metric
   const chartData = useMemo(() => {
     if (!selectedProfile?.timeline || !selectedMetric) return [];
     return buildHealthMetricChartData(selectedProfile.timeline, selectedMetric);
   }, [selectedProfile, selectedMetric]);
-
   // Filtered timeline
   const filteredTimeline = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
@@ -1487,13 +1417,11 @@ export function HealthDashboard({
     if (timelineFilter === 'all') return list;
     return list.filter((event) => event.type === timelineFilter);
   }, [selectedProfile, timelineFilter]);
-
   // Follow-up reminders belong to the member profile linked to the signed-in account.
   const upcomingFollowUps = useMemo(
     () => getFollowUpRemindersForSignedInMember(members, profiles, userEmail),
     [members, profiles, userEmail],
   );
-
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     void scheduleFollowUpNotifications(
@@ -1505,11 +1433,9 @@ export function HealthDashboard({
       })),
     );
   }, [upcomingFollowUps]);
-
   const totalTimelineEvents = useMemo(() => {
     return Object.values(profiles).reduce((sum, p) => sum + (p?.timeline?.length || 0), 0);
   }, [profiles]);
-
   useEffect(() => {
     try {
       clearLegacyHealthDemoData(localStorage);
@@ -1517,7 +1443,6 @@ export function HealthDashboard({
       console.warn('Không thể dọn workspace mẫu cũ khỏi thiết bị.', error);
     }
   }, []);
-
   useEffect(() => {
     if (!workspace) {
       setOcrRecoveryJobs([]);
@@ -1530,7 +1455,6 @@ export function HealthDashboard({
       setErrorMessage(error instanceof Error ? error.message : 'Không thể khôi phục trạng thái OCR trên thiết bị.');
     }
   }, [workspace?.rootFolderId]);
-
   const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
     const authIdentity = authIdentityRef.current;
     if (nextWorkspace.rootFolderId === 'local_offline_workspace') {
@@ -1557,7 +1481,6 @@ export function HealthDashboard({
           operation.workspaceRootId !== activeWorkspace.rootFolderId &&
           (operation.workspaceRootId !== 'local_offline_workspace' || assignedRootId !== activeWorkspace.rootFolderId)
         ) continue;
-
         const existing = activeWorkspace.family.members.find((member) => member.id === operation.member.id) ||
           findMemberForEmail(activeWorkspace.family.members, operation.member.email);
         let updated: HealthDriveWorkspace;
@@ -1584,7 +1507,6 @@ export function HealthDashboard({
             ? await updateDriveFamilyMember(activeWorkspace, existing.id, memberUpdates)
             : activeWorkspace;
         }
-
         const savedMember = updated.family.members.find((member) => member.id === operation.member.id) ||
           findMemberForEmail(updated.family.members, operation.member.email);
         if (!savedMember) {
@@ -1604,7 +1526,6 @@ export function HealthDashboard({
         setWorkspace(activeWorkspace);
       }
     }
-
     let pendingSaves = supportsDurableOfflineQueue()
       ? await localSyncOutbox.listProfileSaves(authIdentity.userEmail)
       : [];
@@ -1618,7 +1539,6 @@ export function HealthDashboard({
         console.warn('[Drive sync] Pending profile changes remain on this device.', error);
       }
     }
-
     const entries = await Promise.all(
       activeWorkspace.family.members.map(async (member) => {
         const queuedForMember = (queued: PendingProfileSave) =>
@@ -1709,9 +1629,7 @@ export function HealthDashboard({
     );
     return nextProfiles;
   }, []);
-
   const [isSyncing, setIsSyncing] = useState(false);
-
   const openWorkspace = useCallback(
     async (id: string): Promise<boolean> => {
       const authIdentity = authIdentityRef.current;
@@ -1768,7 +1686,6 @@ export function HealthDashboard({
     },
     [reloadProfiles, showToast, userEmail]
   );
-
   useEffect(() => {
     if (!driveAuthorized || !userEmail) return;
     let disposed = false;
@@ -1780,7 +1697,6 @@ export function HealthDashboard({
         const key = `${assignment.rootFolderId}:${assignment.familyFileId}:${assignment.updatedAt}`;
         if (handledAssignmentKey === key) return;
         handledAssignmentKey = key;
-
         let startedSync = false;
         void (async () => {
           const current = workspaceRef.current;
@@ -1801,7 +1717,6 @@ export function HealthDashboard({
           ) {
             return;
           }
-
           setIsSyncing(true);
           startedSync = true;
           const loaded = await openAssignedHealthWorkspace(assignment, userEmail);
@@ -1811,7 +1726,6 @@ export function HealthDashboard({
             authIdentityRef.current.userEmail !== userEmail ||
             !authIdentityRef.current.driveAuthorized
           ) return;
-
           localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, opened.rootFolderId);
           localStorage.setItem(PROFILE_ROOT_KEY, opened.rootFolderId);
           workspaceRef.current = opened;
@@ -1848,7 +1762,6 @@ export function HealthDashboard({
       unsubscribe();
     };
   }, [confirm, driveAuthorized, reloadProfiles, showToast, userEmail]);
-
   const syncStatus = useMemo(() => {
     if (isSyncing) return 'syncing';
     if (isLoading || isUploading || isSummarizing || isRefining) return 'busy';
@@ -1861,10 +1774,8 @@ export function HealthDashboard({
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return 'unlinked';
     return 'online';
   }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace, userEmail]);
-
   // Auto-connect workspace on mount or Drive authorization change
   const discoveryAttemptedRef = useRef(false);
-
   // Auto-connect to Drive Workspace on login
   useEffect(() => {
     if (!driveAuthorized || !userEmail || isResettingRef.current) return;
@@ -1878,16 +1789,12 @@ export function HealthDashboard({
     ) return;
     
     if (!workspace && discoveryAttemptedRef.current && !shouldRefreshCachedWorkspace) return;
-
     shouldRefreshCachedWorkspaceRef.current = false;
-
     let cancelled = false;
     setIsSyncing(true);
-
     const savedRootId = localStorage.getItem(
       `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`
     );
-
     async function autoConnectDriveWorkspace() {
       try {
         if (savedRootId) {
@@ -1911,7 +1818,6 @@ export function HealthDashboard({
             console.warn('[Auto-Connect] Saved root folder failed, searching Drive...');
           }
         }
-
         const assignmentPromise = readHealthWorkspaceAssignment(userEmail).then(
           (value) => ({ value }),
           (error: unknown) => ({ error }),
@@ -1963,12 +1869,10 @@ export function HealthDashboard({
             return;
           }
         }
-
         if (discoveryAttemptedRef.current && !shouldRefreshCachedWorkspace) {
           setIsSyncing(false);
           return;
         }
-
         // Tự động tìm kiếm thư mục Sức khỏe Gia đình đã có trên Drive của tài khoản
         discoveryAttemptedRef.current = true;
         const loaded = await findExistingHealthWorkspace();
@@ -2025,14 +1929,12 @@ export function HealthDashboard({
         if (!cancelled) setIsSyncing(false);
       }
     }
-
     void autoConnectDriveWorkspace();
     return () => {
       cancelled = true;
       setIsSyncing(false);
     };
   }, [driveAuthorized, reloadProfiles, showToast, userEmail, workspace?.rootFolderId]);
-
   // Clean expired raw files (>3 years) automatically
   useEffect(() => {
     if (!workspace || !driveAuthorized || cleanupInFlight.current) return;
@@ -2055,7 +1957,6 @@ export function HealthDashboard({
         cleanupInFlight.current = false;
       });
   }, [driveAuthorized, reloadProfiles, showToast, workspace]);
-
   // Workspace assignments reload
   const workspaceRootFolderId = workspace?.rootFolderId;
   const workspaceFamilyFileId = workspace?.familyFileId;
@@ -2089,11 +1990,9 @@ export function HealthDashboard({
       setErrorMessage(error instanceof Error ? error.message : 'Không thể đồng bộ quyền chia sẻ Workspace.');
     }
   }, [driveAuthorized, isWorkspaceAdmin, userEmail, workspaceFamilyFileId, workspaceRootFolderId]);
-
   useEffect(() => {
     void reloadWorkspaceAssignments();
   }, [reloadWorkspaceAssignments]);
-
   async function recoverCommittedWorkspaceSharingError(error: unknown): Promise<string | null> {
     if (!(error instanceof WorkspaceSharingSyncError)) return null;
     const updatedWorkspace = error.workspace;
@@ -2115,7 +2014,6 @@ export function HealthDashboard({
       return `${error.message} Làm mới dữ liệu cũng thất bại: ${reason}`;
     }
   }
-
   async function importGuestLocalDataToDrive() {
     const sourceState = loadGuestLocalState();
     const destination = workspaceRef.current;
@@ -2124,7 +2022,6 @@ export function HealthDashboard({
       showToast('Hãy kết nối Google Drive và mở kho đích trước khi sao chép dữ liệu.', 'error');
       return;
     }
-
     const confirmed = await confirm({
       title: 'Sao chép dữ liệu trên thiết bị lên Drive?',
       message: `Hồ sơ và tài liệu cục bộ sẽ được sao chép vào kho Drive ${destination.rootFolderId} của ${userEmail}. Bản cục bộ vẫn được giữ trên thiết bị; dữ liệu y tế sẽ được tải lên Google Drive.`,
@@ -2132,7 +2029,6 @@ export function HealthDashboard({
       cancelLabel: 'Để sau',
     });
     if (!confirmed) return;
-
     setIsImportingLocalData(true);
     setErrorMessage('');
     try {
@@ -2140,7 +2036,6 @@ export function HealthDashboard({
       const uploads = await localSyncOutbox.listUploads(APK_LOCAL_OWNER_KEY);
       const uploadsById = new Map(uploads.map((operation) => [operation.id, operation]));
       const nextProfiles = { ...profilesRef.current };
-
       for (const localMember of sourceState.workspace.family.members) {
         const existingMember =
           nextWorkspace.family.members.find(
@@ -2171,7 +2066,6 @@ export function HealthDashboard({
           workspaceRef.current = nextWorkspace;
           setWorkspace(nextWorkspace);
         }
-
         const localProfile = sourceState.profiles[localMember.id] || createHealthProfile(localMember);
         const sourceIdMap = new Map<string, string>();
         const importedSources: HealthSource[] = [];
@@ -2204,7 +2098,6 @@ export function HealthDashboard({
             uploadedAt: uploaded.createdTime,
           });
         }
-
         const importedProfile: HealthProfile = {
           ...localProfile,
           member: targetMember,
@@ -2228,7 +2121,6 @@ export function HealthDashboard({
         profilesRef.current = nextProfiles;
         setProfiles({ ...nextProfiles });
       }
-
       workspaceRef.current = nextWorkspace;
       setWorkspace(nextWorkspace);
       localStorage.setItem(
@@ -2245,7 +2137,6 @@ export function HealthDashboard({
       setIsImportingLocalData(false);
     }
   }
-
   async function handleCreateWorkspace() {
     if (!driveAuthorized) {
       onConnectDrive();
@@ -2261,9 +2152,6 @@ export function HealthDashboard({
       let created = await createHealthWorkspace(userEmail || '', userName);
       const previousWorkspace = workspaceRef.current;
       const localProfiles = profilesRef.current;
-
-
-
       if (previousWorkspace?.rootFolderId === 'local_offline_workspace') {
         if (supportsDurableOfflineQueue() && offlineOwnerKey && userEmail) {
           for (const member of previousWorkspace.family.members) {
@@ -2311,7 +2199,6 @@ export function HealthDashboard({
           }
         }
       }
-
       localStorage.setItem(
         `${PROFILE_ROOT_KEY}_${userEmail?.trim().toLowerCase()}`,
         created.rootFolderId
@@ -2330,7 +2217,6 @@ export function HealthDashboard({
       isCreatingWorkspaceRef.current = false;
     }
   }
-
   async function handleAddMember(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!workspace || !newMemberName.trim()) return;
@@ -2349,7 +2235,6 @@ export function HealthDashboard({
           isoBirthDate = rawDate;
         }
       }
-
       const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
       const memberInput = {
         id: memberId,
@@ -2423,7 +2308,6 @@ export function HealthDashboard({
       setIsAddingMember(false);
     }
   }
-
   async function handleQuickAddMember(name: string): Promise<string> {
     if (!workspace || !name.trim()) throw new Error('Cần nhập tên thành viên.');
     setIsAddingMember(true);
@@ -2484,7 +2368,6 @@ export function HealthDashboard({
       setIsAddingMember(false);
     }
   }
-
   async function handleSaveMember(updates: EditableFamilyMember) {
     if (!workspace || !editingMember) return;
     if (!isWorkspaceAdmin) {
@@ -2513,7 +2396,6 @@ export function HealthDashboard({
         return;
       }
     }
-
     setIsSavingMember(true);
     setErrorMessage('');
     try {
@@ -2585,18 +2467,6 @@ export function HealthDashboard({
 
   async function handleDeleteFamilyMember(member: FamilyMember) {
     if (!workspace) return;
-    if (!isWorkspaceAdmin) {
-      showToast('Chỉ Quản trị viên mới có quyền xóa thành viên.', 'error');
-      return;
-    }
-    const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || '';
-    const adminEmail = normalizeEmail(workspace.family.adminEmail);
-    const memberEmail = normalizeEmail(member.email);
-    const isAdminProfile = Boolean(adminEmail && memberEmail === adminEmail);
-    if (isAdminProfile) {
-      showToast('Không thể xóa hồ sơ Admin khỏi Workspace.', 'error');
-      return;
-    }
     const isLocalWorkspace = workspace.rootFolderId === 'local_offline_workspace';
     const isUnsyncedMember =
       member.driveFolderId.startsWith('local_folder_') &&
@@ -2610,7 +2480,6 @@ export function HealthDashboard({
       confirmLabel: 'Xóa vĩnh viễn',
     });
     if (!confirmed) return;
-
     setIsLoading(true);
     setErrorMessage('');
     try {
@@ -2694,7 +2563,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   async function handleRecreateMemberProfile(memberId: string) {
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return;
     setIsLoading(true);
@@ -2716,7 +2584,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   async function handleCleanupDriveDuplicates() {
     if (!workspace || !driveAuthorized) return;
     const confirmed = await confirm({
@@ -2725,7 +2592,6 @@ export function HealthDashboard({
       confirmLabel: 'Quét & Dọn dẹp ngay',
     });
     if (!confirmed) return;
-
     setIsLoading(true);
     showToast('Đang quét và xóa các tệp trùng lặp trên Google Drive...', 'info');
     try {
@@ -2746,7 +2612,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   async function beginDigitization(
     file: File,
     options?: {
@@ -2766,7 +2631,6 @@ export function HealthDashboard({
     const isLocalOnlyWorkspace =
       currentWorkspace.rootFolderId === 'local_offline_workspace' &&
       supportsDurableOfflineQueue();
-
     if (!isLocalOnlyWorkspace) {
       try {
         const token = await getValidGoogleAccessToken();
@@ -2790,7 +2654,6 @@ export function HealthDashboard({
         return;
       }
     }
-
     // TỰ ĐỘNG KHỞI TẠO THÀNH VIÊN ĐẦU TIÊN NẾU CHƯA CÓ (Quick Start Flow)
     // SỬ DỤNG REF để lấy danh sách thành viên mới nhất
     if (currentWorkspace.rootFolderId === 'local_offline_workspace' && !isLocalOnlyWorkspace) {
@@ -2829,7 +2692,6 @@ export function HealthDashboard({
         return;
       }
     }
-
     // KIỂM TRA HỒ SƠ SẴN SÀNG (Robust Loading for Batch)
     let currentProfile = profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id];
     if (!currentProfile && isLocalOnlyWorkspace) {
@@ -2864,13 +2726,11 @@ export function HealthDashboard({
         }
       }
     }
-
     if (file.size > MAX_UPLOAD_BYTES) {
       showToast('Tệp vượt quá giới hạn cho phép 25 MB.', 'error');
       processNextInQueue();
       return;
     }
-
     // Kiểm tra trùng lặp tài liệu trước khi tải lên Drive
     let existingDriveFileId: string | undefined = options?.uploadedFile?.id;
     if (!options?.forceUpload) {
@@ -2880,7 +2740,6 @@ export function HealthDashboard({
         const fileDup = detectDuplicateFile({ name: file.name, size }, hash, activeProfile, effectiveMember);
         const crossDup = fileDup ? null : detectCrossMemberDuplicateFile({ name: file.name, size }, hash, profiles, effectiveMember.id);
         const match = fileDup || crossDup;
-
         if (match) {
           const sourceStatus = match.existingSource.status;
           // 1. Tự động BỎ QUA nếu tệp đã được tải lên và số hóa toàn bộ
@@ -2894,7 +2753,6 @@ export function HealthDashboard({
             processNextInQueue();
             return;
           }
-
           // 2. Tự động LÀM LẠI nếu tệp đã tải lên nhưng chưa số hóa hoàn tất: Tái sử dụng tệp đã có trên Drive, KHÔNG tải bản sao mới
           existingDriveFileId = match.existingSource.driveFileId;
           showToast(`Phát hiện tệp "${file.name}" đã có trên Drive nhưng chưa hoàn tất. Đang tự động quét lại dữ liệu...`, 'info');
@@ -2903,11 +2761,9 @@ export function HealthDashboard({
         console.warn('[Deduplication Pre-check Failed]:', err);
       }
     }
-
     setIsUploading(true);
     setDigitizationError('');
     setShowQuickActionModal(false);
-
     // Bắt đầu cập nhật tiến trình cho tệp hiện tại
     setTrackerState({
       isOpen: false,
@@ -2926,7 +2782,6 @@ export function HealthDashboard({
       processedPages: 0,
     });
     notifyBatchProgress(file.name, effectiveMember.name, 'Chuẩn bị', 10);
-
     // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload
     let processedFile: File = file;
     try {
@@ -2976,7 +2831,6 @@ export function HealthDashboard({
       // Giữ nguyên file gốc nếu nén bị gián đoạn
       processedFile = file;
     }
-
     try {
       if (isLocalOnlyWorkspace) {
         if (!pendingUploadId || !offlineOwnerKey) {
@@ -3087,11 +2941,9 @@ export function HealthDashboard({
           if (pending) await localSyncOutbox.setUploadedFile(pending, uploaded);
         }
         setTrackerState((prev) => ({ ...prev, driveFile: uploaded }));
-
         const { hash } = await computeFileFingerprint(processedFile);
         const isPdfDoc = processedFile.type.includes('pdf') || processedFile.name.toLowerCase().endsWith('.pdf');
         const realTotalPages = isPdfDoc ? await getPdfPageCount(await processedFile.arrayBuffer()) : 1;
-
         const source: HealthSource = {
           driveFileId: uploaded.id,
           fileName: uploaded.name,
@@ -3111,10 +2963,8 @@ export function HealthDashboard({
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
         await completePendingUpload(pendingUploadId);
-
         await runDocumentExtraction(processedFile, effectiveMember, uploaded.id);
       }
-
     } catch (error) {
       batchFailureCountRef.current += 1;
       const msg = error instanceof Error
@@ -3141,7 +2991,6 @@ export function HealthDashboard({
       if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
     }
   }
-
   useEffect(() => {
     if (
       !supportsDurableOfflineQueue() ||
@@ -3150,7 +2999,6 @@ export function HealthDashboard({
       !workspace ||
       workspace.rootFolderId === 'local_offline_workspace'
     ) return;
-
     let cancelled = false;
     const drainPendingUploads = async () => {
       if (
@@ -3176,12 +3024,10 @@ export function HealthDashboard({
             (operation.workspaceRootId !== 'local_offline_workspace' || assignedRootId !== workspace.rootFolderId)
           ) continue;
           if (processingPendingUploadIdsRef.current.has(operation.id)) continue;
-
           const targetMember =
             workspace.family.members.find((member) => member.id === operation.member.id) ||
             findMemberForEmail(workspace.family.members, operation.member.email);
           if (!targetMember) continue;
-
           processingPendingUploadIdsRef.current.add(operation.id);
           const file = await fileFromPendingUpload(operation);
           await beginDigitization(file, {
@@ -3200,7 +3046,6 @@ export function HealthDashboard({
         pendingUploadDrainInFlightRef.current = false;
       }
     };
-
     const onOnline = () => void drainPendingUploads();
     const onVisible = () => {
       if (document.visibilityState === 'visible') void drainPendingUploads();
@@ -3214,7 +3059,6 @@ export function HealthDashboard({
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [driveAuthorized, isUploading, uploadQueue.length, userEmail, workspace?.family.members, workspace?.rootFolderId, showToast]);
-
   function applyExtractionProgress(update: ExtractionProgressUpdate) {
     setTrackerState((prev) => {
       const nextStep: TrackerStep =
@@ -3225,7 +3069,6 @@ export function HealthDashboard({
           : update.stage === 'completed'
           ? 'completed'
           : 'reading_document';
-
       return {
         ...prev,
         step: nextStep,
@@ -3240,7 +3083,6 @@ export function HealthDashboard({
       };
     });
   }
-
   async function runDocumentExtraction(file: File, member: FamilyMember, driveFileId?: string) {
     let latestProgress = 45;
     try {
@@ -3258,7 +3100,6 @@ export function HealthDashboard({
       const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
       const result = await extractHealthEventWithProgress(file, member, reportProgress, { isAutoDetect });
       if (!driveFileId) throw new Error('Không xác định được mã tài liệu Drive để lưu kết quả OCR.');
-
       const source = Object.values(profilesRef.current)
         .flatMap((profile) => profile.sources)
         .find((item) => item.driveFileId === driveFileId);
@@ -3280,7 +3121,6 @@ export function HealthDashboard({
         modelUsed: result.modelUsed || previous.modelUsed,
         isOpen: false,
       }));
-
       const patientName = result.extracted.patientName?.trim();
       if (!isRecognizablePatientName(patientName)) {
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100, file.name);
@@ -3308,7 +3148,6 @@ export function HealthDashboard({
         );
         return;
       }
-
       const targetMember = await findOrCreateOcrMember(patientName, result.extracted);
       if (!targetMember) {
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'needs_review', 100, file.name);
@@ -3373,7 +3212,6 @@ export function HealthDashboard({
       processNextInQueue();
     }
   }
-
   async function findOrCreateOcrMember(
     patientName: string,
     extracted: Partial<HealthEvent>,
@@ -3381,7 +3219,6 @@ export function HealthDashboard({
     const currentWorkspace = workspaceRef.current;
     if (!currentWorkspace) throw new Error('Không tìm thấy Workspace để gán tài liệu OCR.');
     const currentMembers = currentWorkspace.family.members;
-
     const findEmptyPlaceholder = () => {
       return currentMembers.find((candidate) => {
         const profile = profilesRef.current[candidate.id] || profiles[candidate.id];
@@ -3399,7 +3236,6 @@ export function HealthDashboard({
       extracted.patientBirthDate,
       extracted.patientGender,
     );
-
     if (matched) {
       digitizationLogger.log(
         'info',
@@ -3407,7 +3243,6 @@ export function HealthDashboard({
         `Khớp chủ thể bệnh nhân "${patientName}" với thành viên gia đình: "${matched.name}" (${matched.id})`,
         { patientName, matchedMemberId: matched.id, matchedMemberName: matched.name }
       );
-
       // Nếu có thành viên rỗng 'Thành viên mới' thừa phát sinh trong quá trình chuẩn bị hàng đợi,
       // tự động dọn dẹp để không làm rác danh sách gia đình
       const emptyPlaceholder = findEmptyPlaceholder();
@@ -3420,7 +3255,6 @@ export function HealthDashboard({
           console.warn('[OCR Subject Match] Could not cleanup leftover placeholder member:', e);
         }
       }
-
       if (!profilesRef.current[matched.id]) {
         const reloaded = await reloadProfiles(workspaceRef.current || currentWorkspace);
         profilesRef.current = reloaded;
@@ -3428,7 +3262,6 @@ export function HealthDashboard({
       }
       return matched;
     }
-
     // Nếu không có ứng viên nào và tên là hợp lệ -> Tự động đổi tên thành viên rỗng hoặc tạo thành viên mới
     if (candidates.length === 0 && isRecognizablePatientName(patientName)) {
       digitizationLogger.log(
@@ -3441,10 +3274,8 @@ export function HealthDashboard({
       try {
         const normalizedName = normalizeVietnameseProperName(patientName);
         const emptyPlaceholder = findEmptyPlaceholder();
-
         let targetMember: FamilyMember;
         let updatedWorkspace: HealthDriveWorkspace;
-
         if (emptyPlaceholder) {
           // Ưu tiên CẬP NHẬT/ĐỔI TÊN thành viên rỗng 'Thành viên mới' sẵn có thành "Trương Anh Tuấn"
           if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
@@ -3514,7 +3345,6 @@ export function HealthDashboard({
             setProfiles((prev) => ({ ...prev, [targetMember.id]: localProfile }));
           }
         }
-
         workspaceRef.current = updatedWorkspace;
         setWorkspace(updatedWorkspace);
         
@@ -3531,7 +3361,6 @@ export function HealthDashboard({
         console.error('[OCR Auto-create] Failed to create or update member:', error);
       }
     }
-
     digitizationLogger.log(
       'warn',
       'subject_match_requires_confirmation',
@@ -3545,7 +3374,6 @@ export function HealthDashboard({
     );
     return undefined;
   }
-
   function genderFromOcr(
     value?: string,
     fallback: FamilyMember['gender'] = 'other',
@@ -3555,7 +3383,6 @@ export function HealthDashboard({
     if (gender === 'nữ' || gender === 'female') return 'female';
     return fallback;
   }
-
   async function saveExtractedDocumentAutomatically(
     draft: DigitizationDraft,
     member: FamilyMember,
@@ -3637,13 +3464,11 @@ export function HealthDashboard({
     }
     return saved;
   }
-
   async function createMemberForUnresolvedSubject(name: string) {
     const draft = identityResolutionDraft;
     if (!draft || isCreatingSubjectMember) return;
     setIsCreatingSubjectMember(true);
     setDigitizationError('');
-
     try {
       const currentWorkspace = workspaceRef.current;
       if (!currentWorkspace) throw new Error('Không tìm thấy Workspace hiện tại.');
@@ -3651,7 +3476,6 @@ export function HealthDashboard({
       if (!isRecognizablePatientName(cleanName)) {
         throw new Error('Vui lòng nhập họ tên hợp lệ cho hồ sơ thành viên mới.');
       }
-
       let targetMember = pendingSubjectMember &&
         pendingSubjectMember.name === cleanName &&
         currentWorkspace.family.members.some((member) => member.id === pendingSubjectMember.id)
@@ -3686,7 +3510,6 @@ export function HealthDashboard({
         if (!targetMember) throw new Error('Không tải được hồ sơ thành viên vừa tạo.');
         setPendingSubjectMember(targetMember);
       }
-
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
       const saved = await saveExtractedDocumentAutomatically(draft, targetMember, true);
@@ -3702,13 +3525,11 @@ export function HealthDashboard({
       setIsCreatingSubjectMember(false);
     }
   }
-
   async function assignUnresolvedSubjectToMember(targetMember: FamilyMember) {
     const draft = identityResolutionDraft;
     if (!draft || isCreatingSubjectMember) return;
     setIsCreatingSubjectMember(true);
     setDigitizationError('');
-
     try {
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
@@ -3726,7 +3547,6 @@ export function HealthDashboard({
       setIsCreatingSubjectMember(false);
     }
   }
-
   function handleCancelBatchQueue() {
     uploadQueueRef.current = [];
     pendingUploadIdsRef.current = [];
@@ -3738,7 +3558,6 @@ export function HealthDashboard({
     setPendingSubjectMember(null);
     showToast('Đã dừng toàn bộ hàng đợi xử lý.', 'info');
   }
-
   function deferUnresolvedSubject() {
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
@@ -3751,17 +3570,14 @@ export function HealthDashboard({
     );
     processNextInQueue();
   }
-
   async function retryDigitization() {
     const file = trackerState.file;
     const member = members.find((item) => item.id === trackerState.memberId);
     if (!file || !member) return;
-
     if (!trackerState.driveFile) {
       void beginDigitization(file, { forceUpload: true });
       return;
     }
-
     setIsUploading(true);
     setDigitizationError('');
     setTrackerState((prev) => ({
@@ -3809,7 +3625,6 @@ export function HealthDashboard({
       setIsUploading(false);
     }
   }
-
   async function resumeInterruptedOcr(job: OcrRecoveryJob) {
     const member = members.find((candidate) =>
       profiles[candidate.id]?.sources.some((source) => source.driveFileId === job.driveFileId),
@@ -3821,7 +3636,6 @@ export function HealthDashboard({
       showToast('Không tìm thấy nguồn tài liệu trong hồ sơ Drive. Hãy tải lại hồ sơ gia đình rồi thử lại.', 'error');
       return;
     }
-
     setIsUploading(true);
     try {
       const blob = job.driveFileId.startsWith('local_file_')
@@ -3860,7 +3674,6 @@ export function HealthDashboard({
       setIsUploading(false);
     }
   }
-
   function handleFileUploadTrigger() {
     if (pickedMemberIdForBatchRef.current !== undefined) {
       fileInputRef.current?.click();
@@ -3871,21 +3684,18 @@ export function HealthDashboard({
     setIsQuickActionTriggerActive(false);
     setShowUploadMemberPicker(true);
   }
-
   function handleQuickActionTrigger() {
     setIsQuickActionTriggerActive(true);
     setIsFileTriggerActive(false);
     setIsCameraTriggerActive(false);
     setShowUploadMemberPicker(true);
   }
-
   async function handleCameraCapture(skipMemberPicker = false) {
     if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
       setIsCameraTriggerActive(true);
       setShowUploadMemberPicker(true);
       return;
     }
-
     digitizationLogger.log('info', 'camera', 'Mở camera chụp ảnh hồ sơ y tế...');
     try {
       const photo = await CapacitorCamera.getPhoto({
@@ -3897,7 +3707,6 @@ export function HealthDashboard({
         digitizationLogger.log('warn', 'camera', 'Không nhận được đường dẫn ảnh từ camera');
         return;
       }
-
       const response = await fetch(photo.webPath);
       if (!response.ok) throw new Error('Không đọc được ảnh chụp từ camera.');
       const blob = await response.blob();
@@ -3906,7 +3715,6 @@ export function HealthDashboard({
         `kham-benh-${new Date().toISOString().slice(0, 10)}-${Date.now().toString().slice(-4)}.${photo.format || 'jpg'}`,
         { type: blob.type || 'image/jpeg' }
       );
-
       digitizationLogger.log(
         'info',
         'camera',
@@ -3939,7 +3747,6 @@ export function HealthDashboard({
       }
     }
   }
-
   async function handleSaveDigitization(
     submitEvent: React.FormEvent<HTMLFormElement> | FormData,
     options: {
@@ -3983,7 +3790,6 @@ export function HealthDashboard({
       | 'replace'
       | 'create_new';
     const matchedEventId = options.matchedEventId || String(form.get('matchedEventId') || '');
-
     const rawEvent: HealthEvent = options.event || {
       id: `event_${crypto.randomUUID()}`,
       sourceFileId: draft.source.id,
@@ -4012,10 +3818,8 @@ export function HealthDashboard({
         : undefined,
       recordedAt: new Date().toISOString(),
     };
-
     // Khử trùng lặp nội dung bên trong (chẩn đoán, thuốc, chỉ số đo)
     const nextEvent = options.event || cleanAndDeduplicateEventData(rawEvent);
-
     try {
       const currentProfiles = profilesRef.current;
       const sourceOwner = members.find((member) =>
@@ -4039,7 +3843,6 @@ export function HealthDashboard({
         subjectStatus: undefined,
         relocatedToMemberId: undefined,
       };
-
       if (sourceOwner?.id !== effectiveMember.id) {
        let driveFileMoved = false;
        try {
@@ -4050,7 +3853,6 @@ export function HealthDashboard({
          currentProfiles[effectiveMember.id] = effectiveProfile;
          profilesRef.current = currentProfiles;
          setProfiles((previous) => ({ ...previous, [effectiveMember.id]: effectiveProfile! }));
-
          if (sourceOwner) {
            const ownerProfile = currentProfiles[sourceOwner.id];
            if (ownerProfile) {
@@ -4091,11 +3893,9 @@ export function HealthDashboard({
         profilesRef.current = currentProfiles;
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: effectiveProfile! }));
       }
-
       const existingMatch = matchedEventId
         ? effectiveProfile.timeline.find((item) => item.id === matchedEventId)
         : null;
-
       const saveProfileTimer = digitizationLogger.startTimer();
       if (duplicateResolution === 'merge' && existingMatch) {
         // 1. Hợp nhất thông minh sự kiện cũ và mới (giữ lại chỉ số, thuốc, bổ sung cái mới)
@@ -4218,7 +4018,6 @@ export function HealthDashboard({
       return false;
     }
   }
-
   async function handleAskAssistant(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedMember || !selectedProfile || !chatInput.trim()) return;
@@ -4253,7 +4052,6 @@ export function HealthDashboard({
       setIsChatting(false);
     }
   }
-
   async function handleAiSummary(model: string = 'gemini-3.6-flash') {
     if (!selectedMember || !selectedProfile) return;
     setIsSummarizing(true);
@@ -4301,7 +4099,6 @@ export function HealthDashboard({
       setIsSummarizing(false);
     }
   }
-
   async function handleRefineAndOrganize() {
     if (!selectedMember || !selectedProfile) return;
     if (!selectedProfile.timeline || selectedProfile.timeline.length === 0) {
@@ -4323,7 +4120,6 @@ export function HealthDashboard({
       ) {
         throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc. Không có dữ liệu nào được thay đổi.');
       }
-
       const updatedProfile: HealthProfile = {
         ...selectedProfile,
         timeline: organizedTimeline,
@@ -4339,7 +4135,6 @@ export function HealthDashboard({
       setIsRefining(false);
     }
   }
-
   async function handleInviteWorkspaceMember(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!workspace || !userEmail || !isWorkspaceAdmin) return;
@@ -4383,7 +4178,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   async function handleRevokeWorkspaceMember(memberEmail: string) {
     if (!workspace || !isWorkspaceAdmin) return;
     setIsLoading(true);
@@ -4401,7 +4195,6 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
-
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
       {/* 1. TOP BAR CONTRACT: One row, clean zones, thumb-friendly safe area */}
@@ -4456,7 +4249,6 @@ export function HealthDashboard({
               </div>
             </div>
           </div>
-
           {/* Zone 2: Member & Menu Actions */}
           <div className="flex items-center gap-1.5 shrink-0">
             {members.length > 0 && (
@@ -4475,7 +4267,6 @@ export function HealthDashboard({
                   </span>
                   <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
                 </button>
-
                 {showMemberDropdown && (
                   <div className="absolute right-0 mt-2 w-60 bg-white border border-slate-200 rounded-2xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150">
                     <div className="px-3 py-1.5 text-[10px] font-black text-slate-400 uppercase tracking-wider">
@@ -4537,7 +4328,6 @@ export function HealthDashboard({
                 )}
               </div>
             )}
-
             {/* Menu / Settings Dropdown Trigger */}
             <div className="relative" ref={settingsMenuRef}>
               <button
@@ -4551,7 +4341,6 @@ export function HealthDashboard({
               >
                 <MoreVertical className="w-4 h-4" />
               </button>
-
               {showSettingsDropdown && (
                 <div className="absolute right-0 mt-2 w-64 bg-white border border-slate-200 rounded-2xl shadow-xl p-2.5 z-50 animate-in fade-in zoom-in-95 duration-150 space-y-1">
                   {userEmail && (
@@ -4560,7 +4349,6 @@ export function HealthDashboard({
                       <div className="text-xs font-bold text-slate-800 truncate">{userEmail}</div>
                     </div>
                   )}
-
                   {/* 1. Đồng bộ dữ liệu */}
                   <button
                     type="button"
@@ -4589,7 +4377,6 @@ export function HealthDashboard({
                       </div>
                     </div>
                   </button>
-
                   {/* 2. Xóa dữ liệu */}
                   <button
                     type="button"
@@ -4618,7 +4405,6 @@ export function HealthDashboard({
                       )}
                     </div>
                   </button>
-
                   {/* 3. Đăng nhập / Đăng xuất & Kết nối lại Drive */}
                   <div className="pt-0.5 pb-0.5 space-y-1">
                     {userEmail ? (
@@ -4647,7 +4433,6 @@ export function HealthDashboard({
                       </button>
                     )}
                   </div>
-
                   {/* 4. Xuất log file */}
                   <button
                     type="button"
@@ -4678,7 +4463,6 @@ export function HealthDashboard({
                     <Download className="w-4 h-4 text-teal-600 shrink-0" />
                     <span>Xuất log file</span>
                   </button>
-
                   {/* 5. Tài nguyên AI */}
                   <button
                     type="button"
@@ -4691,7 +4475,6 @@ export function HealthDashboard({
                     <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
                     <span>Tài nguyên AI</span>
                   </button>
-
                   {/* 6. Phiên bản */}
                   <button
                     type="button"
@@ -4714,7 +4497,6 @@ export function HealthDashboard({
           </div>
         </div>
       </header>
-
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-28">
         {errorMessage && (() => {
@@ -4728,7 +4510,6 @@ export function HealthDashboard({
           const consoleUrl =
             consoleUrlMatch?.[0] ||
             'https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=637661729068';
-
           return (
             <div
               role="alert"
@@ -4756,7 +4537,6 @@ export function HealthDashboard({
                   <X className="w-4 h-4" />
                 </button>
               </div>
-
               {isDriveApiDisabled && (
                 <div className="mt-2 pt-2 border-t border-rose-200/60 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
                   <span className="text-[11px] text-rose-700">
@@ -4812,7 +4592,6 @@ export function HealthDashboard({
             </div>
           </div>
         )}
-
         {localImportAvailable && workspace?.rootFolderId !== 'local_offline_workspace' && (
           <section className="mb-4 rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sky-950">
             <div className="flex items-start gap-3">
@@ -4837,7 +4616,6 @@ export function HealthDashboard({
             </div>
           </section>
         )}
-
         {/* Setup Screen if no workspace is opened */}
         {!workspace ? (
           <div className="max-w-xl mx-auto my-6 bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm">
@@ -4851,7 +4629,6 @@ export function HealthDashboard({
                 trực tiếp trên Google Drive của chính gia đình bạn.
               </p>
             </div>
-
             {needsDriveAuthorization ? (
               <div className="space-y-4">
                 {userEmail ? (
@@ -4900,7 +4677,6 @@ export function HealthDashboard({
                     </p>
                   </div>
                 </div>
-
                 <button
                   type="button"
                   disabled={isLoading}
@@ -4914,13 +4690,11 @@ export function HealthDashboard({
                   )}
                   <span>Khởi tạo Thư mục “Suc khoe gia dinh” mới</span>
                 </button>
-
                 <div className="flex items-center gap-3 text-xs text-slate-400">
                   <span className="h-px flex-1 bg-slate-200" />
                   <span className="uppercase font-semibold tracking-wider">HOẶC MỞ THƯ MỤC CÓ SẴN</span>
                   <span className="h-px flex-1 bg-slate-200" />
                 </div>
-
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
@@ -4971,7 +4745,6 @@ export function HealthDashboard({
                     <p className="mt-0.5 text-xs text-slate-500 max-w-xs mx-auto">
                       Hồ sơ và tài liệu lưu riêng trên thiết bị; Gemini cần Internet để số hóa và phân tích.
                     </p>
-
                     {/* Compact 3-Step Chips */}
                     <div className="grid grid-cols-3 gap-2 my-3 text-left">
                       <button
@@ -4983,7 +4756,6 @@ export function HealthDashboard({
                         <h4 className="font-bold text-[11px] text-slate-900 group-hover:text-emerald-700 leading-tight">1. Tạo hồ sơ</h4>
                         <p className="text-[10px] text-slate-500 mt-0.5 truncate">Thành viên</p>
                       </button>
-
                       <button
                         type="button"
                         onClick={handleFileUploadTrigger}
@@ -4993,14 +4765,12 @@ export function HealthDashboard({
                         <h4 className="font-bold text-[11px] text-slate-900 group-hover:text-emerald-700 leading-tight">2. Tải tài liệu</h4>
                         <p className="text-[10px] text-slate-500 mt-0.5 truncate">Tải ảnh/PDF</p>
                       </button>
-
                       <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100 text-left">
                         <span className="w-5 h-5 rounded-lg bg-emerald-600 text-white font-extrabold text-[10px] flex items-center justify-center mb-1">3</span>
                         <h4 className="font-bold text-[11px] text-slate-900 leading-tight">3. Phân tích</h4>
                         <p className="text-[10px] text-slate-500 mt-0.5 truncate">AI Y khoa</p>
                       </div>
                     </div>
-
                     {/* Action Bar */}
                     <div className="flex flex-col sm:flex-row gap-2">
                       <button
@@ -5090,11 +4860,8 @@ export function HealthDashboard({
                     </div>
                   </div>
                 )}
-
                 {selectedProfile && (
                   <div className="space-y-5">
-
-
                     <AiDeepAnalysisCard
                       analysis={selectedProfile.aiDeepAnalysis}
                       aiAnalysis={selectedProfile.aiAnalysis}
@@ -5106,7 +4873,6 @@ export function HealthDashboard({
                       isRefining={isRefining}
                       error={analysisError}
                     />
-
                     {metricOptions.length > 0 && (() => {
                       const metricInfo = getHealthMetricInfo(selectedMetric);
                       return (
@@ -5138,7 +4904,6 @@ export function HealthDashboard({
                               ))}
                             </div>
                           </div>
-
                           {/* Metric Explanation & Normal Range Banner (2-line layout) */}
                           <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 shadow-xs space-y-1 text-xs">
                             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -5155,7 +4920,6 @@ export function HealthDashboard({
                               {metricInfo.description}
                             </p>
                           </div>
-
                           <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
                             <HealthMetricsChart
                               data={chartData}
@@ -5169,7 +4933,6 @@ export function HealthDashboard({
                     })()}
                   </div>
                 )}
-
                 {/* Compact Family Members List */}
                 <div>
                   <div className="flex items-center justify-between mb-2.5">
@@ -5186,7 +4949,6 @@ export function HealthDashboard({
                       <ArrowRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
-
                   {!members.length ? (
                     <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-4 text-center">
                       <p className="text-xs text-slate-500">Chưa có hồ sơ thành viên nào</p>
@@ -5251,7 +5013,6 @@ export function HealthDashboard({
                 </div>
               </div>
             )}
-
             {/* VIEW 2: HỒ SƠ Y TẾ (TIMELINE & VITALS) */}
             {activeTab === 'timeline' && (
               <div className="space-y-6 animate-in fade-in duration-150">
@@ -5297,7 +5058,6 @@ export function HealthDashboard({
                     </button>
                   </div>
                 </div>
-
                 {/* Timeline Filter Tabs */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
                   <button
@@ -5331,7 +5091,6 @@ export function HealthDashboard({
                     );
                   })}
                 </div>
-
                 {/* Health Events List */}
                 <div className="space-y-4">
                   {filteredTimeline.length === 0 ? (
@@ -5354,7 +5113,6 @@ export function HealthDashboard({
                         EVENT_TYPE_OPTIONS.find((t) => t.value === event.type) ||
                         EVENT_TYPE_OPTIONS[EVENT_TYPE_OPTIONS.length - 1];
                       const IconComp = opt.icon;
-
                       return (
                         <div
                           key={event.id}
@@ -5377,7 +5135,6 @@ export function HealthDashboard({
                                 <span className="font-mono tabular-nums text-slate-500">{formatDateVN(event.date) || 'Chưa rõ ngày'}</span>
                               </div>
                             </div>
-
                             {/* View original file(s) on Drive */}
                             {event.additionalSources && event.additionalSources.length > 1 ? (
                               <div className="flex flex-wrap items-center gap-1.5 shrink-0">
@@ -5412,13 +5169,11 @@ export function HealthDashboard({
                               </a>
                             )}
                           </div>
-
                           {/* Event Title & Metadata Block (Full Width Edge-to-Edge) */}
                           <div className="w-full space-y-2">
                             <h4 className="text-base font-extrabold text-slate-900 leading-snug break-words w-full">
                               {event.title}
                             </h4>
-
                             {(event.facility || event.doctorName) && (
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-x-4 gap-y-1.5 pt-1 text-xs text-slate-600 w-full">
                                 {event.facility && (
@@ -5440,7 +5195,6 @@ export function HealthDashboard({
                               </div>
                             )}
                           </div>
-
                           {/* Diagnoses List */}
                           {event.diagnoses.length > 0 && (
                             <div className="text-xs bg-slate-50 rounded-xl p-2.5 border border-slate-100">
@@ -5448,7 +5202,6 @@ export function HealthDashboard({
                               <span className="text-slate-800">{event.diagnoses.join('; ')}</span>
                             </div>
                           )}
-
                           {/* Medications table/list */}
                           {event.medications.length > 0 && (
                             <div className="space-y-1.5">
@@ -5489,7 +5242,6 @@ export function HealthDashboard({
                               </div>
                             </div>
                           )}
-
                           {/* Vaccination Records */}
                           {event.vaccinations && event.vaccinations.length > 0 && (
                             <div className="space-y-1.5 pt-1">
@@ -5536,7 +5288,6 @@ export function HealthDashboard({
                               </div>
                             </div>
                           )}
-
                           {/* Hospitalization Record */}
                           {event.hospitalization && (
                             <div className="p-3 rounded-2xl bg-indigo-50/70 border border-indigo-200 text-xs space-y-1.5">
@@ -5567,7 +5318,6 @@ export function HealthDashboard({
                               )}
                             </div>
                           )}
-
                           {/* Metrics chips */}
                           {event.metrics.length > 0 && (
                             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -5601,7 +5351,6 @@ export function HealthDashboard({
                               ))}
                             </div>
                           )}
-
                           {/* Imaging Results */}
                           {event.imagingResults && event.imagingResults.length > 0 && (
                             <div className="space-y-1.5 pt-1.5">
@@ -5627,7 +5376,6 @@ export function HealthDashboard({
                               </div>
                             </div>
                           )}
-
                           {/* Dynamic Extracted Data for Other Documents */}
                           {event.extractedData && Object.keys(event.extractedData).length > 0 && (
                             <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
@@ -5646,7 +5394,6 @@ export function HealthDashboard({
                               </div>
                             </div>
                           )}
-
                           {/* Doctor's Advice & Next Follow-up */}
                           {(event.advice || event.nextFollowUp) && (
                             <div className="pt-2 border-t border-slate-100 text-xs space-y-1">
@@ -5670,7 +5417,6 @@ export function HealthDashboard({
                 </div>
               </div>
             )}
-
             {/* VIEW 3: TRỢ LÝ AI (HEALTH CHAT ASSISTANT) */}
             {activeTab === 'assistant' && (
               <div className="max-w-2xl mx-auto space-y-4 animate-in fade-in duration-150">
@@ -5691,7 +5437,6 @@ export function HealthDashboard({
                     </div>
                   </div>
                 </div>
-
                 {/* Quick Prompts */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 text-xs">
                   {[
@@ -5710,7 +5455,6 @@ export function HealthDashboard({
                     </button>
                   ))}
                 </div>
-
                 {/* Chat Container */}
                 <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs flex flex-col h-[520px] overflow-hidden">
                   <div
@@ -5761,7 +5505,6 @@ export function HealthDashboard({
                       </div>
                     )}
                   </div>
-
                   {/* Chat Input Bar */}
                   <form
                     onSubmit={(e) => void handleAskAssistant(e)}
@@ -5786,7 +5529,6 @@ export function HealthDashboard({
                 </div>
               </div>
             )}
-
             {/* VIEW 4: GIA ĐÌNH (FAMILY MEMBERS) */}
             {activeTab === 'family' && (
               <div className="max-w-3xl mx-auto space-y-4 animate-in fade-in duration-150">
@@ -5847,7 +5589,6 @@ export function HealthDashboard({
                       </button>
                     )}
                   </div>
-
                   <div className="divide-y divide-slate-100">
                     {members.map((m) => {
                       const prof = profiles[m.id];
@@ -5859,7 +5600,6 @@ export function HealthDashboard({
                         birthDateStr ? `Sinh ${birthDateStr}${age !== null ? ` (${age} tuổi)` : ''}` : '',
                         `${prof?.timeline?.length || 0} hồ sơ`,
                       ].filter(Boolean).join(' · ');
-
                       return (
                         <div
                           key={m.id}
@@ -5935,7 +5675,6 @@ export function HealthDashboard({
                       );
                     })}
                   </div>
-
                   {/* Add Member Form */}
                   <form
                     onSubmit={(e) => void handleAddMember(e)}
@@ -6002,7 +5741,6 @@ export function HealthDashboard({
                         />
                       </div>
                     </div>
-
                     {/* Nút Tạo hồ sơ */}
                     <button
                       type="submit"
@@ -6022,7 +5760,6 @@ export function HealthDashboard({
             )}
           </>
         )}
-
         {/* Hidden File Input for Image/PDF Document Upload */}
         <input
           ref={fileInputRef}
@@ -6037,7 +5774,6 @@ export function HealthDashboard({
             event.currentTarget.value = '';
           }}
         />
-
         {queueStatus && (
           <div className="fixed bottom-20 left-4 right-4 z-50 max-w-lg mx-auto bg-white/95 backdrop-blur-xl shadow-2xl rounded-3xl border border-emerald-100 overflow-hidden animate-in slide-in-from-bottom-4 transition-all">
             <div className="p-4 flex flex-col gap-3">
@@ -6064,7 +5800,6 @@ export function HealthDashboard({
                   Dừng xử lý
                 </button>
               </div>
-
               {/* Status Details Row */}
               <div className="grid grid-cols-2 gap-2 py-1.5 px-3 bg-slate-50 rounded-2xl border border-slate-200 text-[11px]">
                 <div className="text-slate-600 font-medium truncate">
@@ -6080,7 +5815,6 @@ export function HealthDashboard({
                   </span>
                 </div>
               </div>
-
               {/* Progress Bar Section */}
               <div className="space-y-1.5 pt-0.5">
                 <div className="flex items-center justify-between gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 px-0.5">
@@ -6103,7 +5837,6 @@ export function HealthDashboard({
                     const isDone = i < queueStatus.current - 1;
                     const isCurrent = i === queueStatus.current - 1;
                     const currentProgress = trackerState.progressPercent || 20;
-
                     return (
                       <div key={i} className="h-full flex-1 bg-slate-200 rounded-full overflow-hidden relative">
                         {isDone && <div className="h-full w-full bg-emerald-500 rounded-full" />}
@@ -6119,7 +5852,6 @@ export function HealthDashboard({
                 </div>
               </div>
             </div>
-
             <div className="bg-slate-50 px-4 py-2 border-t border-slate-100">
               <p className="text-[10px] text-slate-500 italic text-center font-medium">
                 AI xử lý tự động; kết quả sẽ xuất hiện trong Dòng thời gian sau khi hoàn tất.
@@ -6185,7 +5917,6 @@ export function HealthDashboard({
           </div>
         )}
       </main>
-
       {/* 2. FIXED BOTTOM TAB BAR (Thumb navigation, Mobile Pattern 1) */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 safe-area-bottom shadow-lg">
         <div className="max-w-md mx-auto grid grid-cols-5 items-center h-16 px-2">
@@ -6201,7 +5932,6 @@ export function HealthDashboard({
             <LayoutGrid className="w-5 h-5" />
             <span className="text-[10px] mt-1 tracking-tight">Tổng quan</span>
           </button>
-
           <button
             type="button"
             onClick={() => setActiveTab('timeline')}
@@ -6214,7 +5944,6 @@ export function HealthDashboard({
             <FolderHeart className="w-5 h-5" />
             <span className="text-[10px] mt-1 tracking-tight">Hồ sơ</span>
           </button>
-
           {/* Center Upload Button (+) */}
           <div className="flex items-center justify-center">
             <button
@@ -6226,7 +5955,6 @@ export function HealthDashboard({
               <Plus className="w-6 h-6 stroke-[2.5]" />
             </button>
           </div>
-
           <button
             type="button"
             onClick={() => setActiveTab('assistant')}
@@ -6239,7 +5967,6 @@ export function HealthDashboard({
             <Sparkles className="w-5 h-5" />
             <span className="text-[10px] mt-1 tracking-tight">Trợ lý AI</span>
           </button>
-
           <button
             type="button"
             onClick={() => setActiveTab('family')}
@@ -6254,9 +5981,6 @@ export function HealthDashboard({
           </button>
         </div>
       </nav>
-
-
-
       {/* Quick Action Sheet Modal */}
       {showQuickActionModal && (
         <div
@@ -6277,7 +6001,6 @@ export function HealthDashboard({
             <p className="text-xs text-slate-500 text-center">
               Đang thêm cho: <strong>{selectedMember?.name || 'Thành viên'}</strong>
             </p>
-
             <div className="grid gap-2.5 pt-2">
               <button
                 type="button"
@@ -6297,7 +6020,6 @@ export function HealthDashboard({
                   </div>
                 </div>
               </button>
-
               <button
                 type="button"
                 onClick={() => {
@@ -6319,7 +6041,6 @@ export function HealthDashboard({
                 </div>
               </button>
             </div>
-
             <button
               type="button"
               onClick={() => setShowQuickActionModal(false)}
@@ -6330,7 +6051,6 @@ export function HealthDashboard({
           </div>
         </div>
       )}
-
       {/* Digitization Progress Tracker Modal */}
       {trackerMember && (
         <DigitizationProgressTrackerModal
@@ -6380,7 +6100,6 @@ export function HealthDashboard({
           }}
         />
       )}
-
       {/* Digitization Review Modal */}
       {identityResolutionDraft && (
         <UnresolvedSubjectModal
@@ -6398,7 +6117,6 @@ export function HealthDashboard({
           onCancelQueue={handleCancelBatchQueue}
         />
       )}
-
       {digitizationDraft && (
         <DigitizationReviewModal
           draft={digitizationDraft}
@@ -6415,7 +6133,6 @@ export function HealthDashboard({
           }
         />
       )}
-
       {/* App Update Modal */}
       <AppUpdateModal
         isOpen={isUpdateModalOpen}
@@ -6423,7 +6140,6 @@ export function HealthDashboard({
         updateInfo={updateInfo}
         onClose={() => setIsUpdateModalOpen(false)}
       />
-
       {/* Raw Files Manager Modal */}
       <RawFilesManagerModal
         isOpen={showRawFilesModal}
@@ -6454,7 +6170,6 @@ export function HealthDashboard({
           const blob = await response.blob();
           file = new File([blob], source.fileName, { type: source.mimeType });
           }
-
           setTrackerState({
             isOpen: true,
             file,
@@ -6472,7 +6187,6 @@ export function HealthDashboard({
             partialExtracted: {},
             error: null,
           });
-
           await runDocumentExtraction(file, member, source.driveFileId);
         }}
         showToast={showToast}
@@ -6508,25 +6222,21 @@ export function HealthDashboard({
           setShowUploadMemberPicker(false);
           pickedMemberIdForBatchRef.current = memberId;
           if (memberId) setSelectedMemberId(memberId);
-
           if (isCameraTriggerActive) {
             setIsCameraTriggerActive(false);
             void handleCameraCapture(true);
             return;
           }
-
           if (isFileTriggerActive) {
             setIsFileTriggerActive(false);
             fileInputRef.current?.click();
             return;
           }
-
           if (isQuickActionTriggerActive) {
             setIsQuickActionTriggerActive(false);
             setShowQuickActionModal(true);
             return;
           }
-
           const files = pendingUploadFiles;
           setPendingUploadFiles([]);
           if (files.length === 0) return;
@@ -6538,25 +6248,21 @@ export function HealthDashboard({
             setShowUploadMemberPicker(false);
             pickedMemberIdForBatchRef.current = newId;
             setSelectedMemberId(newId);
-
             if (isCameraTriggerActive) {
               setIsCameraTriggerActive(false);
               void handleCameraCapture(true);
               return;
             }
-
             if (isFileTriggerActive) {
               setIsFileTriggerActive(false);
               fileInputRef.current?.click();
               return;
             }
-
             if (isQuickActionTriggerActive) {
               setIsQuickActionTriggerActive(false);
               setShowQuickActionModal(true);
               return;
             }
-
             const files = pendingUploadFiles;
             setPendingUploadFiles([]);
             if (files.length === 0) return;
@@ -6577,7 +6283,6 @@ export function HealthDashboard({
     </div>
   );
 }
-
 // -------------------------------------------------------------
 // DIGITIZATION REVIEW MODAL (Clean, accessible, touch-friendly)
 // -------------------------------------------------------------
@@ -6590,7 +6295,6 @@ interface DigitizationModalProps {
   onClose: () => void;
   onSave: (event: React.FormEvent<HTMLFormElement>, targetMemberId: string) => void;
 }
-
 function findBestMemberMatch(
   extracted: Partial<HealthEvent>,
   members: FamilyMember[],
@@ -6608,7 +6312,6 @@ function findBestMemberMatch(
   if (result?.matched) return result.matched.id;
   return currentSelectedId || members[0]?.id || '';
 }
-
 function DigitizationReviewModal({
   draft,
   error,
@@ -6623,7 +6326,6 @@ function DigitizationReviewModal({
     findBestMemberMatch(extracted, members, selectedMemberId)
   );
   const [duplicateResolution, setDuplicateResolution] = useState<'merge' | 'replace' | 'create_new'>('merge');
-
   // Kiểm tra trùng lặp sự kiện trong timeline của thành viên mục tiêu
   const targetTimeline = profiles[targetMemberId]?.timeline || [];
   const duplicateMatch = useMemo(() => {
@@ -6640,7 +6342,6 @@ function DigitizationReviewModal({
     extracted.patientBirthDate,
     extracted.patientGender,
   ));
-
   const [metricsText, setMetricsText] = useState(
     (extracted.metrics || [])
       .map((metric) => `${metric.name} | ${metric.value} | ${metric.unit}`)
@@ -6663,7 +6364,6 @@ function DigitizationReviewModal({
       )
       .join('\n')
   );
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-3 overflow-y-auto animate-in fade-in"
@@ -6692,17 +6392,14 @@ function DigitizationReviewModal({
             <X className="w-5 h-5" />
           </button>
         </div>
-
         {error && (
           <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs">
             {error}
           </div>
         )}
-
         <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-100 text-[11px] text-emerald-900">
           AI đã tự động trích xuất thông tin từ tài liệu. Bạn có thể kiểm tra họ tên, ngày sinh, giới tính đối chiếu với thành viên gia đình trước khi lưu.
         </div>
-
         {/* Đối chiếu & Ghép thông tin bệnh nhân với thành viên gia đình */}
         <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
           <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -6727,7 +6424,6 @@ function DigitizationReviewModal({
                 : 'Tên hoặc thông tin nhận dạng OCR không khớp hồ sơ đã chọn. Không thể lưu tài liệu.'}
             </p>
           )}
-
           <div className="grid grid-cols-3 gap-2 text-xs">
             <div className="bg-white p-2 rounded-xl border border-slate-200">
               <span className="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Họ tên trên hồ sơ</span>
@@ -6748,7 +6444,6 @@ function DigitizationReviewModal({
               </span>
             </div>
           </div>
-
           <div className="flex items-center gap-2 pt-1">
             <label htmlFor="target-member-select" className="text-xs font-bold text-slate-700 shrink-0">
               Gán vào hồ sơ của:
@@ -6770,7 +6465,6 @@ function DigitizationReviewModal({
             </select>
           </div>
         </div>
-
         {/* Cảnh báo sự kiện tương tự / Trùng lặp & Lựa chọn giải pháp thông minh */}
         {duplicateMatch && (
           <div className="p-3.5 rounded-2xl bg-amber-50/90 border-2 border-amber-300 space-y-3 animate-in fade-in">
@@ -6793,7 +6487,6 @@ function DigitizationReviewModal({
                 </div>
               </div>
             </div>
-
             <div className="pt-2 border-t border-amber-200/80 space-y-2">
               <span className="text-[11px] font-bold text-slate-800 block">
                 Chọn phương án lưu để tránh trùng lặp dòng thời gian:
@@ -6820,7 +6513,6 @@ function DigitizationReviewModal({
                     </span>
                   </div>
                 </label>
-
                 <label
                   className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
                     duplicateResolution === 'replace'
@@ -6842,7 +6534,6 @@ function DigitizationReviewModal({
                     </span>
                   </div>
                 </label>
-
                 <label
                   className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
                     duplicateResolution === 'create_new'
@@ -6868,7 +6559,6 @@ function DigitizationReviewModal({
             </div>
           </div>
         )}
-
         <form onSubmit={(e) => onSave(e, targetMemberId)} className="grid gap-3.5 sm:grid-cols-2 text-xs">
           <input type="hidden" name="duplicateResolution" value={duplicateResolution} />
           <input type="hidden" name="matchedEventId" value={duplicateMatch?.matchedEvent.id || ''} />
@@ -6881,7 +6571,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <label className="font-bold text-slate-700">
             Ngày khám / kết quả *
             <input
@@ -6892,7 +6581,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <label className="font-bold text-slate-700">
             Loại hồ sơ y tế
             <select
@@ -6907,7 +6595,6 @@ function DigitizationReviewModal({
               ))}
             </select>
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Cơ sở y tế / Bác sĩ
             <input
@@ -6917,7 +6604,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Chẩn đoán & Bệnh lý (mỗi dòng một chẩn đoán)
             <textarea
@@ -6928,7 +6614,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900 font-sans"
             />
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Đơn thuốc (Mỗi dòng: Tên thuốc | liều dùng | tần suất | thời gian)
             <textarea
@@ -6940,7 +6625,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900 font-mono text-xs"
             />
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Chỉ số đo (Mỗi dòng: Tên chỉ số | Giá trị | Đơn vị)
             <textarea
@@ -6952,7 +6636,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900 font-mono text-xs"
             />
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Lời dặn của Bác sĩ
             <textarea
@@ -6963,7 +6646,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <label className="font-bold text-slate-700">
             Ngày tái khám dự kiến (nếu có)
             <input
@@ -6973,7 +6655,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <label className="font-bold text-slate-700 sm:col-span-2">
             Ghi chú thêm
             <textarea
@@ -6983,7 +6664,6 @@ function DigitizationReviewModal({
               className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 font-normal text-slate-900"
             />
           </label>
-
           <div className="flex items-center justify-end gap-2 pt-3 sm:col-span-2 border-t border-slate-100">
             <button
               type="button"
@@ -7005,7 +6685,6 @@ function DigitizationReviewModal({
     </div>
   );
 }
-
 // -------------------------------------------------------------
 // HELPER UTILITIES
 // -------------------------------------------------------------
@@ -7015,7 +6694,6 @@ function splitLines(value: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
-
 function parseMedicationLines(value: string): HealthEvent['medications'] {
   return value
     .split(/\r?\n/)
@@ -7031,7 +6709,6 @@ function parseMedicationLines(value: string): HealthEvent['medications'] {
       instructions: instructions || undefined,
     }));
 }
-
 function parseMetricLines(value: string): HealthEvent['metrics'] {
   return value
     .split(/\r?\n/)
@@ -7042,21 +6719,17 @@ function parseMetricLines(value: string): HealthEvent['metrics'] {
       return [{ name: sanitizeMetricName(name), value: metricValue, unit: unit || '' }];
     });
 }
-
 function validDateOrEmpty(value?: string): string {
   return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
 }
-
 function validEventType(value?: string): HealthEvent['type'] {
   return HEALTH_EVENT_TYPES.includes(value as HealthEvent['type'])
     ? (value as HealthEvent['type'])
     : 'other';
 }
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
-
 function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableSerialize).join(',')}]`;
@@ -7086,9 +6759,7 @@ function UploadMemberPickerModal({
 }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState('');
-
   if (!isOpen) return null;
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
@@ -7104,7 +6775,6 @@ function UploadMemberPickerModal({
             <X className="w-5 h-5" />
           </button>
         </div>
-
         <div className="p-4 space-y-2 max-h-[60vh] overflow-y-auto">
           {/* Members List */}
           <div className="grid grid-cols-1 gap-2">
@@ -7139,7 +6809,6 @@ function UploadMemberPickerModal({
               );
             })}
           </div>
-
           <div className="pt-2 space-y-2 border-t border-slate-100 mt-2">
             {/* Auto detect option */}
             <button
@@ -7154,7 +6823,6 @@ function UploadMemberPickerModal({
                 <div className="text-[9px] font-normal text-emerald-600/70">AI sẽ tự tìm chủ thể trong tài liệu</div>
               </div>
             </button>
-
             {/* Add new member trigger */}
             {!showAddForm ? (
               <button
@@ -7201,7 +6869,6 @@ function UploadMemberPickerModal({
             )}
           </div>
         </div>
-
         <div className="p-4 bg-slate-50 flex justify-end border-t border-slate-100">
           <button
             onClick={onClose}

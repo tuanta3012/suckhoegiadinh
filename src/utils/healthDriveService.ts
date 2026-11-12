@@ -1352,13 +1352,23 @@ export async function deleteDriveFamilyMember(
   workspace: HealthDriveWorkspace,
   memberId: string,
 ): Promise<{ workspace: HealthDriveWorkspace }> {
-  assertWorkspaceAdmin(workspace, 'xóa thành viên');
   const member = workspace.family.members.find((item) => item.id === memberId);
   if (!member) throw new Error('Không tìm thấy thành viên cần xóa trong Workspace hiện tại.');
+
   const adminEmail = normalizedEmail(workspace.family.adminEmail);
-  if (adminEmail && normalizedEmail(member.email) === adminEmail) {
+  const currentEmail = normalizedEmail(getSignedInGoogleEmail());
+  const memberEmail = normalizedEmail(member.email);
+  const isWorkspaceAdmin = Boolean(adminEmail && currentEmail === adminEmail);
+  const isSelf = Boolean(currentEmail && memberEmail === currentEmail);
+
+  if (adminEmail && memberEmail === adminEmail) {
     throw new Error('Không thể xóa hồ sơ của Admin Workspace.');
   }
+
+  if (!isWorkspaceAdmin && !isSelf) {
+    throw new Error('Chỉ Admin của Workspace mới được xóa thành viên.');
+  }
+
   if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
     return {
       workspace: {
@@ -1385,13 +1395,16 @@ export async function deleteDriveFamilyMember(
     ),
   };
   const updatedWorkspace = await removeFamilyMemberFromManifest(workspace, familyWithoutMember, memberId);
-  const memberEmail = normalizedEmail(member.email);
   let sharingError: unknown;
   try {
-    await syncHealthWorkspaceMemberAssignments(
-      updatedWorkspace,
-      memberEmail ? [memberEmail] : [],
-    );
+    if (isWorkspaceAdmin) {
+      await syncHealthWorkspaceMemberAssignments(
+        updatedWorkspace,
+        memberEmail ? [memberEmail] : [],
+      );
+    } else if (memberEmail) {
+      await removeHealthWorkspaceAssignment(workspace.rootFolderId, memberEmail).catch(() => {});
+    }
   } catch (error) {
     sharingError = error;
   }

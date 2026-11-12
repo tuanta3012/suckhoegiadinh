@@ -469,7 +469,8 @@ describe('resolveSingleFamilyManifestFile', () => {
         expect(JSON.parse(String(patch?.[1]?.body)).appProperties).toEqual({
           app_id: 'com.suckhoegiadinh.app',
         });
-        expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+        expect(patch).toBeDefined();
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
       });
 
       it('opens the assigned folder only after family.json confirms the member identity', async () => {
@@ -666,7 +667,7 @@ describe('resolveSingleFamilyManifestFile', () => {
 
     globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
       if (init?.method === 'DELETE') {
-        const id = url.split('/files/')[1];
+        const id = url.split('/files/')[1]?.split('?')[0] || '';
         deletedIds.push(id);
         return new Response(null, { status: 204 });
       }

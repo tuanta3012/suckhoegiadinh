@@ -27,7 +27,8 @@ export function getSignedInGoogleEmail(): string | null {
 }
 const isNative = Capacitor.isNativePlatform();
 const provider = new GoogleAuthProvider();
-provider.addScope('https://www.googleapis.com/auth/drive.file');
+provider.addScope('https://www.googleapis.com/auth/drive');
+provider.setCustomParameters({ prompt: 'select_account' });
 
 const ACCESS_TOKEN_KEY = 'health_google_drive_access_token';
 const ACCESS_TOKEN_EXPIRY_KEY = 'health_google_drive_access_token_expiry';
@@ -143,7 +144,7 @@ export async function ensureGoogleAuthInitialized(): Promise<void> {
 
   googleAuthInitialization = GoogleAuth.initialize({
     clientId: firebaseConfig.oAuthClientId,
-    scopes: ['profile', 'email', 'openid', 'https://www.googleapis.com/auth/drive.file'],
+    scopes: ['profile', 'email', 'openid', 'https://www.googleapis.com/auth/drive'],
     grantOfflineAccess: false,
   }).finally(() => {
     googleAuthInitialization = null;
@@ -259,9 +260,26 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
     const credential = GoogleAuthProvider.credential(result.authentication.idToken);
     user = (await signInWithCredential(auth, credential)).user;
   } else {
-    const result = await signInWithPopup(auth, provider);
-    user = result.user;
-    accessToken = GoogleAuthProvider.credentialFromResult(result)?.accessToken || null;
+    try {
+      const result = await signInWithPopup(auth, provider);
+      user = result.user;
+      accessToken = GoogleAuthProvider.credentialFromResult(result)?.accessToken || null;
+    } catch (popupError: unknown) {
+      const errorCode = (popupError as { code?: string })?.code || '';
+      if (errorCode === 'auth/popup-closed-by-user') {
+        throw new Error('Cửa sổ đăng nhập Google đã bị đóng trước khi hoàn tất cấp quyền. Đối với tài khoản thành viên lần đầu đăng nhập, vui lòng bấm "Đăng nhập Google" lại, chọn tài khoản thành viên và nhấn "Tiếp tục / Cho phép" (hoặc mở app trên tab Chrome trực tiếp để không bị ngắt cửa sổ).');
+      }
+      if (errorCode === 'auth/popup-blocked') {
+        throw new Error('Trình duyệt Chrome đã chặn cửa sổ đăng nhập (Pop-up). Vui lòng nhấn vào biểu tượng cửa sổ bị chặn trên thanh địa chỉ và chọn "Luôn cho phép" (Always allow).');
+      }
+      if (errorCode === 'auth/cancelled-popup-request') {
+        throw new Error('Yêu cầu đăng nhập trước đó đã bị hủy. Vui lòng thử lại.');
+      }
+      if (errorCode === 'auth/network-request-failed') {
+        throw new Error('Lỗi kết nối mạng khi mở cửa sổ đăng nhập Google. Vui lòng kiểm tra lại đường truyền mạng.');
+      }
+      throw popupError;
+    }
   }
 
   if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');

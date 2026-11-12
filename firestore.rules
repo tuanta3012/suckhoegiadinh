@@ -64,8 +64,8 @@ service cloud.firestore {
             )
           );
         allow delete: if signedIn() &&
-          resource.data.adminUid == request.auth.uid &&
-          resource.data.role != "ADMIN";
+          resource.data.role != "ADMIN" &&
+          (resource.data.adminUid == request.auth.uid || authenticatedEmail() == email);
     }
 
     match /families/{familyId} {
