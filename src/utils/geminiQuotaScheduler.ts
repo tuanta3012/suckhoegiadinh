@@ -121,6 +121,53 @@ export class GeminiQuotaScheduler {
       }
       await new Promise((resolve) => setTimeout(resolve, Math.min(nextWaitMs, 1_000)));
     }
+
+    // Fallback: If timeout elapsed but there are viable candidates with remaining daily quota,
+    // available RPM capacity, and available concurrency that were only held back by a software cooldown,
+    // bypass the cooldown on the best candidate (lowest remaining cooldown wait) and proceed.
+    const finalCandidates = this.getOrderedCandidates(queueKey).filter((project) =>
+      (!preferredProjectId || project.id === preferredProjectId) &&
+      !excludedProjectIds.has(project.id) &&
+      !this.disabledProjects.has(project.id) &&
+      !this.disabledProjectModels.has(`${project.id}:${model}`),
+    );
+    const viableCandidates = finalCandidates.filter((project) => {
+      const usage = this.getUsage(project.id, model);
+      const now = Date.now();
+      usage.minuteRequests = usage.minuteRequests.filter((timestamp) => now - timestamp < 60_000);
+      return (
+        usage.dayRequests < quota.rpd &&
+        usage.active < quota.maxConcurrent &&
+        usage.minuteRequests.length < quota.rpm
+      );
+    });
+
+    if (viableCandidates.length > 0) {
+      viableCandidates.sort((a, b) => {
+        const usageA = this.getUsage(a.id, model);
+        const usageB = this.getUsage(b.id, model);
+        const cdA = Math.max(usageA.cooldownUntil, this.projectCooldownUntil.get(a.id) || 0);
+        const cdB = Math.max(usageB.cooldownUntil, this.projectCooldownUntil.get(b.id) || 0);
+        return cdA - cdB;
+      });
+
+      const selected = viableCandidates[0];
+      const usage = this.getUsage(selected.id, model);
+      usage.cooldownUntil = 0;
+      this.projectCooldownUntil.delete(selected.id);
+
+      const now = Date.now();
+      usage.minuteRequests.push(now);
+      usage.dayRequests++;
+      usage.active++;
+      return {
+        project: selected,
+        release: () => {
+          usage.active = Math.max(0, usage.active - 1);
+        },
+      };
+    }
+
     throw new Error(`Timed out waiting for an available ${task} Gemini quota slot.`);
   }
 

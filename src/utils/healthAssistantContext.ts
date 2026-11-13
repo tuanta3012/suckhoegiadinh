@@ -45,7 +45,58 @@ export function normalizeHealthAssistantHistory(value: unknown): HealthAssistant
     .slice(-MAX_HISTORY_MESSAGES);
 }
 
+export function isPersonalHealthHistoryQuery(question: string): boolean {
+  if (!question || !question.trim()) return false;
+  const normalized = question
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const timelinePatterns = [
+    /lan gan nhat/,
+    /moi nhat/,
+    /gan day nhat/,
+    /vua roi/,
+    /truoc day/,
+    /lan truoc/,
+    /khi nao/,
+    /ngay nao/,
+    /hom nao/,
+    /o dau/,
+    /vien nao/,
+    /phong kham nao/,
+    /bac si nao/,
+    /khoa nao/,
+    /may lan/,
+    /bao nhieu lan/,
+    /lich su/,
+    /tien su/,
+    /ho so/,
+    /don thuoc/,
+    /uong thuoc gi/,
+    /thuoc dang uong/,
+    /thuoc da ke/,
+    /ket qua xet nghiem/,
+    /chi so/,
+    /bac si dan/,
+    /dan do/,
+    /chuan doan/,
+    /kham o dau/,
+    /kham khi nao/,
+    /kham ngay/,
+    /co ket qua gi/,
+    /co benh gi/,
+    /bi benh gi/,
+  ];
+
+  return timelinePatterns.some((pattern) => pattern.test(normalized));
+}
+
 export function createMedicalSearchQuery(question: string, memberName?: string): string {
+  if (!question || !question.trim() || isPersonalHealthHistoryQuery(question)) {
+    return '';
+  }
+
   let query = question;
   if (memberName?.trim()) {
     const escapedName = memberName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

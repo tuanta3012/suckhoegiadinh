@@ -29,7 +29,7 @@ export const GEMINI_TIMEOUTS = {
   digitizationAttemptMs: 300_000,
   analysisTotalMs: 300_000,
   ocrTotalMs: 600_000,
-  projectCooldownMs: 10_000,
+  projectCooldownMs: 3_000,
 } as const;
 
 export function getAttemptTimeout(task: GeminiTask): number {
@@ -70,10 +70,16 @@ export function cleanErrorMessage(rawMessage?: string): string {
     } else break;
   }
 
+  if (/Timed out waiting for an available.*quota slot/i.test(msg)) {
+    return 'Hệ thống AI đang bận điều phối tài nguyên, vui lòng thử lại sau ít giây.';
+  }
+  if (/No available projects remain/i.test(msg)) {
+    return 'Chưa có API key nào khả dụng. Vui lòng kiểm tra cấu hình Gemini API trong Tài nguyên AI.';
+  }
   if (/DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(msg)) {
     return 'Yêu cầu AI xử lý bị quá thời gian chờ từ máy chủ Google (504 Deadline Exceeded). Vui lòng thử lại.';
   }
-  if (/RESOURCE_EXHAUSTED|429|quota/i.test(msg)) {
+  if (/RESOURCE_EXHAUSTED|429/i.test(msg)) {
     return 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau ít phút.';
   }
   if (/503|UNAVAILABLE|high demand|overloaded/i.test(msg)) {
@@ -155,18 +161,29 @@ export function describeGeminiError(error: unknown): {
     statusCode = 0;
   }
 
+  const isInternalSchedulerMessage =
+    /Timed out waiting for an available.*quota slot|No daily.*quota remains|No RPM capacity remains|No available projects remain/i.test(
+      candidateMessage,
+    );
+
   const isDeadline =
-    statusCode === 504 ||
-    statusValue === 'DEADLINE_EXCEEDED' ||
-    /DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(candidateMessage);
+    !isInternalSchedulerMessage && (
+      statusCode === 504 ||
+      statusValue === 'DEADLINE_EXCEEDED' ||
+      /DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(candidateMessage)
+    );
   const isOverloaded =
-    statusCode === 503 ||
-    statusValue === 'UNAVAILABLE' ||
-    /503|UNAVAILABLE|high demand|overloaded|temporarily unavailable/i.test(candidateMessage);
+    !isInternalSchedulerMessage && (
+      statusCode === 503 ||
+      statusValue === 'UNAVAILABLE' ||
+      /503|UNAVAILABLE|high demand|overloaded|temporarily unavailable/i.test(candidateMessage)
+    );
   const isRateLimit =
-    statusCode === 429 ||
-    statusValue === 'RESOURCE_EXHAUSTED' ||
-    /429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(candidateMessage);
+    !isInternalSchedulerMessage && (
+      statusCode === 429 ||
+      statusValue === 'RESOURCE_EXHAUSTED' ||
+      /429|RESOURCE_EXHAUSTED|(?<!\w)quota(?!\s*slot)|rate limit/i.test(candidateMessage)
+    );
   const isInvalidKey =
     statusCode === 401 ||
     statusCode === 403 ||
@@ -175,12 +192,14 @@ export function describeGeminiError(error: unknown): {
     isRateLimit &&
     /per.?day|daily|requests per day|quota.*day|exhausted|quota exceeded/i.test(candidateMessage);
   const isTransient =
-    isDeadline ||
-    isOverloaded ||
-    statusCode === 500 ||
-    statusCode === 502 ||
-    /502|500|timeout|timed out|failed to fetch|networkerror|load failed|network request failed|empty response|empty stream/i.test(
-      candidateMessage,
+    !isInternalSchedulerMessage && (
+      isDeadline ||
+      isOverloaded ||
+      statusCode === 500 ||
+      statusCode === 502 ||
+      /502|500|timeout|timed out|failed to fetch|networkerror|load failed|network request failed|empty response|empty stream/i.test(
+        candidateMessage,
+      )
     );
 
   if (isDeadline) {
@@ -240,7 +259,7 @@ export function describeGeminiError(error: unknown): {
 export function parseRetryAfterMs(error: unknown): number {
   const raw = error instanceof Error ? error.message : String(error ?? '');
   const seconds = raw.match(/retry(?:\s+in)?\s+(\d+(?:\.\d+)?)\s*s/i);
-  return seconds ? Math.min(60_000, Math.max(1_000, Number(seconds[1]) * 1_000)) : 45_000;
+  return seconds ? Math.min(60_000, Math.max(1_000, Number(seconds[1]) * 1_000)) : 5_000;
 }
 
 export function isDailyQuotaError(error: unknown): boolean {
@@ -305,6 +324,7 @@ export interface UnifiedExecuteOptions {
   onGroundingChunks?: (chunks: unknown) => void;
   maxPoolPasses?: number;
   shouldStopRetrying?: (error: unknown) => boolean;
+  skipFailurePenalties?: boolean;
 }
 
 async function callGeminiSingleAttempt(
@@ -399,7 +419,7 @@ export async function executeGeminiWithPool(
       if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
 
       const remainingAcquireMs = Math.max(1_000, deadline - Date.now() - 30_000);
-      const acquireTimeoutMs = Math.min(options.task === 'digitization' ? 5_000 : 10_000, remainingAcquireMs);
+      const acquireTimeoutMs = Math.min(30_000, remainingAcquireMs);
 
       let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
       try {
@@ -447,7 +467,7 @@ export async function executeGeminiWithPool(
         const stopForFallback = options.shouldStopRetrying?.(error) === true;
         if (stopForFallback) {
           sawAbortForFallback = true;
-        } else {
+        } else if (!options.skipFailurePenalties) {
           const shouldRetry = recordProjectFailure(
             scheduler,
             project.id,
@@ -513,6 +533,9 @@ export async function executeGeminiStreamWithPool(
   while (attemptedProjectIds.size < projects.length && Date.now() < deadline - 30_000) {
     if (options.signal?.aborted) throw new Error('Gemini stream was cancelled.');
 
+    const remainingAcquireMs = Math.max(1_000, deadline - Date.now() - 30_000);
+    const streamAcquireTimeoutMs = Math.min(30_000, remainingAcquireMs);
+
     let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
     try {
       lease = await scheduler.acquire(
@@ -520,7 +543,7 @@ export async function executeGeminiStreamWithPool(
         targetModel,
         quota,
         attemptedProjectIds,
-        15_000,
+        streamAcquireTimeoutMs,
       );
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -616,6 +639,9 @@ export async function researchHealthQuestionWithPool(
       requestContext: options.requestContext,
       signal: options.signal,
       maxPoolPasses: 1,
+      timeoutMs: 12_000,
+      attemptTimeoutMs: 10_000,
+      skipFailurePenalties: true,
       onGroundingChunks: (chunks) => {
         groundingChunks = chunks;
       },
