@@ -1004,7 +1004,8 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
   },
   "advice": "Lời dặn của bác sĩ hoặc hướng dẫn điều trị",
   "nextFollowUp": "YYYY-MM-DD",
-  "notes": "Ghi chú bổ sung quan trọng"
+  "notes": "Ghi chú bổ sung quan trọng",
+  "pageTexts": ["Văn bản đọc được trên trang thứ nhất"]
 }`;
 
       const extractDocument = async (
@@ -1031,8 +1032,8 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
           const maxBatchRetries = 3;
           let lastBatchError: any;
           const promptText = pageBatches.length === 1
-            ? `Đọc toàn bộ tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ, chính xác, chi tiết tất cả các thông tin y tế gồm: Khám thể lực (physicalExam), Các chẩn đoán (diagnoses), Toàn bộ kết quả xét nghiệm (kèm standardKey, khoảng tham chiếu refRange), Toàn bộ kết quả chẩn đoán hình ảnh (siêu âm, X-quang, ECG...), Đơn thuốc và Lời dặn của bác sĩ. Trả về DUY NHẤT một JSON object chuẩn.`
-            : `Đọc các trang ${batch.firstPage}-${batch.lastPage} trong tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ nội dung có trên các trang này (Khám thể lực, chẩn đoán, xét nghiệm kèm standardKey & refRange, chẩn đoán hình ảnh, đơn thuốc, lời dặn). Trả về DUY NHẤT một JSON object chuẩn.`;
+            ? `Đọc toàn bộ tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ, chính xác, chi tiết tất cả các thông tin y tế gồm: Khám thể lực (physicalExam), Các chẩn đoán (diagnoses), Toàn bộ kết quả xét nghiệm (kèm standardKey, khoảng tham chiếu refRange), Toàn bộ kết quả chẩn đoán hình ảnh (siêu âm, X-quang, ECG...), Đơn thuốc và Lời dặn của bác sĩ. Ngoài JSON y tế, trả thêm "pageTexts": một mảng chuỗi, mỗi phần tử là văn bản có thể đọc được trên đúng một trang theo thứ tự, không suy đoán phần không đọc được. Nếu trang không có văn bản y tế hoặc không đọc được, ghi chuỗi rỗng. Trả về DUY NHẤT một JSON object chuẩn.`
+            : `Đọc các trang ${batch.firstPage}-${batch.lastPage} trong tài liệu này của hồ sơ ${memberName}. Trích xuất đầy đủ nội dung y tế có trên các trang này (Khám thể lực, chẩn đoán, xét nghiệm kèm standardKey & refRange, chẩn đoán hình ảnh, đơn thuốc, lời dặn). Ngoài JSON y tế, trả thêm "pageTexts": một mảng chuỗi, mỗi phần tử là văn bản có thể đọc được trên đúng một trang theo thứ tự tương ứng từ trang ${batch.firstPage} đến ${batch.lastPage}, không suy đoán phần không đọc được. Nếu trang không có văn bản y tế hoặc không đọc được, ghi chuỗi rỗng. Trả về DUY NHẤT một JSON object chuẩn.`;
 
           for (let attempt = 0; attempt < maxBatchRetries; attempt++) {
             if (signal?.aborted) throw new Error('OCR was cancelled.');

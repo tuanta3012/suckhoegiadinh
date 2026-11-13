@@ -70,7 +70,9 @@ export async function auditWorkspaceFolder(
       totalRawFiles += rawFiles.length;
 
       for (const file of rawFiles) {
-        const key = `${file.name.trim().toLowerCase()}_${file.size || 0}`;
+        const checksum = file.md5Checksum?.toLowerCase();
+        if (!checksum || !/^[a-f0-9]{32}$/.test(checksum)) continue;
+        const key = checksum;
         const existing = rawFileMap.get(key) || [];
         existing.push({ id: file.id, name: file.name, memberName: member.name, createdTime: file.createdTime });
         rawFileMap.set(key, existing);
@@ -145,6 +147,7 @@ export async function cleanupWorkspaceDuplicates(
   saveProfileFn: (fileId: string, profile: HealthProfile) => Promise<HealthProfile>,
   listRawFilesFn: (member: FamilyMember) => Promise<DriveFile[]>,
   deleteFileFn: (fileId: string) => Promise<void>,
+  restoreFileFn?: (fileId: string) => Promise<void>,
   onProgress?: (progress: { percent: number; message: string }) => void
 ): Promise<{ deletedRawFiles: number; mergedEvents: number }> {
   const members = workspace.family.members || [];
@@ -158,19 +161,126 @@ export async function cleanupWorkspaceDuplicates(
     const member = members[i];
     try {
       const rawFiles = await listRawFilesFn(member);
-      const seenNames = new Map<string, DriveFile>();
+      let profile = parseHealthProfile(await loadProfileFn(member.profileFileId), member);
+      if (profile.syncPending) continue;
+      const hashGroups = new Map<string, DriveFile[]>();
+      for (const file of rawFiles) {
+        const checksum = file.md5Checksum?.toLowerCase();
+        if (!checksum || !/^[a-f0-9]{32}$/.test(checksum)) continue;
+        const group = hashGroups.get(checksum) || [];
+        group.push(file);
+        hashGroups.set(checksum, group);
+      }
 
-      // Sắp xếp theo createdTime cũ nhất lên đầu (giữ bản đầu tiên, xóa bản sau)
-      const sortedFiles = [...rawFiles].sort((a, b) => (a.createdTime || '').localeCompare(b.createdTime || ''));
+      for (const [checksum, files] of hashGroups) {
+        if (files.length < 2) continue;
+        const sortedFiles = [...files].sort((a, b) =>
+          (a.createdTime || '').localeCompare(b.createdTime || ''),
+        );
+        const canonical = sortedFiles.find((file) => {
+          const source = profile.sources.find((item) => item.driveFileId === file.id);
+          return source?.status === 'processed' &&
+            Boolean(source.digitizedAt) &&
+            profile.timeline.some((event) =>
+              event.sourceFileId === file.id ||
+              event.additionalSources?.some((item) => item.driveFileId === file.id),
+            );
+        });
+        if (!canonical) continue;
 
-      for (const file of sortedFiles) {
-        const key = `${file.name.trim().toLowerCase()}_${file.size || '0'}`;
-        if (seenNames.has(key)) {
-          // Trùng lặp! Xóa tệp thừa trên Drive
-          await deleteFileFn(file.id);
-          deletedRawFiles++;
-        } else {
-          seenNames.set(key, file);
+        const duplicateFiles = sortedFiles.filter((file) => file.id !== canonical.id);
+        const now = new Date().toISOString();
+        const duplicateSourceIds = new Set(duplicateFiles.map((file) => file.id));
+        const canonicalSource = profile.sources.find((source) => source.driveFileId === canonical.id);
+        if (!canonicalSource) continue;
+        const sourceContributions = [
+          ...(canonicalSource.sourceContributions || []),
+          ...duplicateFiles.map((file) => ({
+            fileName: file.name,
+            fileHash: file.md5Checksum || checksum,
+            hashAlgorithm: 'md5' as const,
+            uploadedAt: file.createdTime || now,
+            disposition: 'duplicate' as const,
+          })),
+        ].filter((item, index, list) =>
+          list.findIndex((candidate) =>
+            candidate.fileHash === item.fileHash &&
+            candidate.hashAlgorithm === item.hashAlgorithm &&
+            candidate.fileName === item.fileName,
+          ) === index,
+        );
+        const remappedTimeline = profile.timeline.map((event) => {
+          if (!duplicateSourceIds.has(event.sourceFileId)) return event;
+          const duplicate = duplicateFiles.find((file) => file.id === event.sourceFileId);
+          const additionalSources = new Map(
+            (event.additionalSources || []).map((source) => [source.driveFileId, source]),
+          );
+          additionalSources.set(event.sourceFileId, {
+            driveFileId: event.sourceFileId,
+            fileName: duplicate?.name || event.sourceFileName,
+          });
+          return {
+            ...event,
+            sourceFileId: canonical.id,
+            sourceFileName: canonical.name,
+            additionalSources: Array.from(additionalSources.values()),
+          };
+        });
+        const preparedProfile: HealthProfile = {
+          ...profile,
+          timeline: remappedTimeline,
+          sources: profile.sources.map((source) =>
+            source.driveFileId === canonical.id
+              ? { ...source, sourceContributions }
+              : source,
+          ),
+          updatedAt: now,
+        };
+        let prepared = await saveProfileFn(member.profileFileId, preparedProfile);
+        if (prepared.syncPending) continue;
+        profile = prepared;
+
+        for (const duplicate of duplicateFiles) {
+          const deleteTime = new Date().toISOString();
+          try {
+            await deleteFileFn(duplicate.id);
+            const markedProfile: HealthProfile = {
+              ...prepared,
+              sources: prepared.sources.map((source) =>
+                source.driveFileId === duplicate.id
+                  ? {
+                      ...source,
+                      status: 'processed' as const,
+                      digitizedAt: source.digitizedAt || canonicalSource.digitizedAt,
+                      rawDeletedAt: deleteTime,
+                    }
+                  : source,
+              ),
+              updatedAt: deleteTime,
+            };
+            const saved = await saveProfileFn(member.profileFileId, markedProfile);
+            if (saved.syncPending) {
+              prepared = saved;
+              profile = saved;
+              deletedRawFiles++;
+              continue;
+            }
+            prepared = saved;
+            profile = saved;
+            deletedRawFiles++;
+          } catch (error) {
+            if (restoreFileFn) {
+              try {
+                await restoreFileFn(duplicate.id);
+              } catch (restoreError) {
+                console.error(
+                  `[Cleanup Raw] Không thể khôi phục raw ${duplicate.id} sau lỗi lưu hồ sơ.`,
+                  restoreError,
+                );
+              }
+            }
+            console.warn(`[Cleanup Raw] Không thể hoàn tất dọn raw ${duplicate.id}:`, error);
+          }
         }
       }
     } catch (err) {

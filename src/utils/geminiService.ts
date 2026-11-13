@@ -121,7 +121,14 @@ async function extractClientSideHealthEvent(
   mimeType: string,
   base64Data: string,
   onProgress?: (update: ExtractionProgressUpdate) => void,
-): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+): Promise<{
+  extracted: Partial<HealthEvent>;
+  modelUsed?: string;
+  totalPages?: number;
+  processedPages?: number;
+  contentIndexPages: string[];
+  contentIndexComplete: boolean;
+}> {
   const keys = await getSharedGeminiKeysForRequest();
   if (keys.length === 0) {
     throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI".');
@@ -142,7 +149,7 @@ async function extractClientSideHealthEvent(
         },
       },
       {
-        text: `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam. Trích xuất thông tin y tế thành JSON bao gồm: title, date, type, facility, doctorName, physicalExam, diagnoses, medications, metrics, imagingResults, vaccinations, hospitalization, advice, nextFollowUp, notes, patientName, patientBirthDate, patientGender.`,
+        text: `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam. Trích xuất thông tin y tế thành JSON bao gồm: title, date, type, facility, doctorName, physicalExam, diagnoses, medications, metrics, imagingResults, vaccinations, hospitalization, advice, nextFollowUp, notes, patientName, patientBirthDate, patientGender và pageTexts (mỗi phần tử là văn bản đọc được của một trang theo thứ tự). Không suy đoán văn bản không đọc được.`,
       },
     ],
     config: { responseMimeType: 'application/json' },
@@ -158,7 +165,20 @@ async function extractClientSideHealthEvent(
 
   const extracted = normalizeExtractedEvent(parsed, file.name);
   onProgress?.({ stage: 'completed', progressPercent: 100, message: 'Hoàn tất số hóa tài liệu y tế!', modelUsed, partialEvent: extracted });
-  return { extracted, modelUsed, totalPages: 1, processedPages: 1 };
+  const contentIndexPages = Array.isArray(parsed.pageTexts) &&
+    parsed.pageTexts.length === 1 &&
+    typeof parsed.pageTexts[0] === 'string' &&
+    parsed.pageTexts[0].trim()
+    ? [parsed.pageTexts[0].trim()]
+    : [];
+  return {
+    extracted,
+    modelUsed,
+    totalPages: 1,
+    processedPages: 1,
+    contentIndexPages,
+    contentIndexComplete: contentIndexPages.length === 1,
+  };
 }
 
 async function callGeminiStreamClientSide(
@@ -425,7 +445,14 @@ async function extractServerHealthEvent(
   onProgress: ((update: ExtractionProgressUpdate) => void) | undefined,
   getDuration: () => number,
   options?: { isAutoDetect?: boolean },
-): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+): Promise<{
+  extracted: Partial<HealthEvent>;
+  modelUsed?: string;
+  totalPages?: number;
+  processedPages?: number;
+  contentIndexPages: string[];
+  contentIndexComplete: boolean;
+}> {
   const url = buildApiUrl('/api/gemini/extract-health-event');
 
   let headers: Record<string, string> = {
@@ -480,7 +507,14 @@ async function extractServerHealthEvent(
 
   const decoder = new TextDecoder();
   let buffer = '';
-  let finalResult: { extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number } | null = null;
+  let finalResult: {
+    extracted: Partial<HealthEvent>;
+    modelUsed?: string;
+    totalPages?: number;
+    processedPages?: number;
+    contentIndexPages: string[];
+    contentIndexComplete: boolean;
+  } | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -505,11 +539,17 @@ async function extractServerHealthEvent(
             partialEvent: json.extracted ? normalizeExtractedEvent(json.extracted, file.name) : undefined,
           });
         } else if (json.type === 'complete') {
+          const extractedPayload = isRecord(json.extracted) ? json.extracted : {};
           finalResult = {
-            extracted: normalizeExtractedEvent(json.extracted, file.name),
+            extracted: normalizeExtractedEvent(extractedPayload, file.name),
             modelUsed: json.modelUsed,
             totalPages: json.totalPages,
             processedPages: json.processedPages,
+            contentIndexPages: Array.isArray(extractedPayload.contentIndexPages) &&
+              extractedPayload.contentIndexPages.every((page: unknown) => typeof page === 'string')
+              ? extractedPayload.contentIndexPages as string[]
+              : [],
+            contentIndexComplete: extractedPayload.contentIndexComplete === true,
           };
         } else if (json.type === 'error') {
           throw new Error(json.error || 'Lỗi xử lý từ server AI.');
@@ -552,7 +592,14 @@ export async function extractHealthEventWithProgress(
   member: FamilyMember,
   onProgress?: (update: ExtractionProgressUpdate) => void,
   options?: { isAutoDetect?: boolean },
-): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+): Promise<{
+  extracted: Partial<HealthEvent>;
+  modelUsed?: string;
+  totalPages?: number;
+  processedPages?: number;
+  contentIndexPages: string[];
+  contentIndexComplete: boolean;
+}> {
   const getDuration = digitizationLogger.startTimer();
   const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
   digitizationLogger.log(

@@ -92,6 +92,8 @@ import {
   recreateDriveMemberProfile,
   revokeDriveFolderAccess,
   saveHealthProfile,
+  trashDriveFile,
+  restoreTrashedDriveFile,
   updateDriveFamilyMember,
   uploadRawHealthFile,
   type DriveFile,
@@ -157,6 +159,7 @@ import {
   type FileDuplicateMatch,
   type EventDuplicateMatch,
 } from '../utils/deduplicationService';
+import { compareDocumentContainment, createDocumentContentIndex } from '../utils/documentContainment';
 import {
   readOcrRecoveryJobs,
   removeOcrRecoveryJob,
@@ -215,6 +218,9 @@ interface HealthDashboardProps {
 interface DigitizationDraft {
   source: DriveFile;
   extracted: Partial<HealthEvent>;
+  contentIndexPages: string[];
+  contentIndexComplete: boolean;
+  sourceContributions?: NonNullable<HealthSource['sourceContributions']>;
 }
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -2778,36 +2784,7 @@ export function HealthDashboard({
       processNextInQueue();
       return;
     }
-    // Kiểm tra trùng lặp tài liệu trước khi tải lên Drive
     let existingDriveFileId: string | undefined = options?.uploadedFile?.id;
-    if (!options?.forceUpload) {
-      try {
-        const { hash, size } = await computeFileFingerprint(file);
-        const activeProfile = profiles[effectiveMember.id] || createHealthProfile(effectiveMember);
-        const fileDup = detectDuplicateFile({ name: file.name, size }, hash, activeProfile, effectiveMember);
-        const crossDup = fileDup ? null : detectCrossMemberDuplicateFile({ name: file.name, size }, hash, profiles, effectiveMember.id);
-        const match = fileDup || crossDup;
-        if (match) {
-          const sourceStatus = match.existingSource.status;
-          // 1. Tự động BỎ QUA nếu tệp đã được tải lên và số hóa toàn bộ
-          if (sourceStatus === 'processed') {
-            const memberMsg = match.memberName && match.memberName !== effectiveMember.name
-              ? `trong hồ sơ của ${match.memberName}`
-              : `trong hồ sơ của ${effectiveMember.name}`;
-            showToast(`Tệp "${file.name}" đã được số hóa hoàn tất trước đó (${memberMsg}). Tự động bỏ qua.`, 'info');
-            await completePendingUpload(pendingUploadId);
-            processingPendingUploadIdsRef.current.delete(pendingUploadId || '');
-            processNextInQueue();
-            return;
-          }
-          // 2. Tự động LÀM LẠI nếu tệp đã tải lên nhưng chưa số hóa hoàn tất: Tái sử dụng tệp đã có trên Drive, KHÔNG tải bản sao mới
-          existingDriveFileId = match.existingSource.driveFileId;
-          showToast(`Phát hiện tệp "${file.name}" đã có trên Drive nhưng chưa hoàn tất. Đang tự động quét lại dữ liệu...`, 'info');
-        }
-      } catch (err) {
-        console.warn('[Deduplication Pre-check Failed]:', err);
-      }
-    }
     setIsUploading(true);
     setDigitizationError('');
     setShowQuickActionModal(false);
@@ -2878,6 +2855,107 @@ export function HealthDashboard({
       // Giữ nguyên file gốc nếu nén bị gián đoạn
       processedFile = file;
     }
+    if (!options?.forceUpload) {
+      try {
+        const { hash, size } = await computeFileFingerprint(processedFile);
+        const activeProfile = profilesRef.current[effectiveMember.id] ||
+          profiles[effectiveMember.id] ||
+          createHealthProfile(effectiveMember);
+        const sameMemberMatch = detectDuplicateFile(
+          { name: processedFile.name, size },
+          hash,
+          activeProfile,
+          effectiveMember,
+        );
+        const match = sameMemberMatch || detectCrossMemberDuplicateFile(
+          { name: processedFile.name, size },
+          hash,
+          profilesRef.current,
+          effectiveMember.id,
+        );
+        if (match) {
+          existingDriveFileId = match.existingSource.driveFileId;
+          if (options?.uploadedFile && options.uploadedFile.id !== existingDriveFileId) {
+            try {
+              await trashDriveFile(options.uploadedFile.id);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
+              showToast(`Đã nhận diện tệp trùng chính xác nhưng chưa dọn được bản Drive thừa: ${message}`, 'error');
+            }
+          }
+
+          const eventIsSaved = Boolean(match.linkedEvent);
+          if (match.existingSource.status === 'processed' && eventIsSaved) {
+            const memberMsg = match.memberName && match.memberName !== effectiveMember.name
+              ? `trong hồ sơ của ${match.memberName}`
+              : `trong hồ sơ của ${effectiveMember.name}`;
+            showToast(`Tệp "${file.name}" trùng nội dung đã OCR và lưu JSON ${memberMsg}; bỏ qua bản lặp.`, 'info');
+            await completePendingUpload(pendingUploadId);
+            processingPendingUploadIdsRef.current.delete(pendingUploadId || '');
+            setIsUploading(false);
+            processNextInQueue();
+            return;
+          }
+          showToast(`Tệp "${file.name}" trùng chính xác nguồn đã có; sẽ tiếp tục OCR từ bản hiện có.`, 'info');
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
+        digitizationLogger.log('warn', 'dedup_check', `Không thể hoàn tất kiểm tra hash trước upload: ${message}`);
+      }
+    }
+    let preExtractedResult: Awaited<ReturnType<typeof extractHealthEventWithProgress>> | undefined;
+    const activeProfileForContainment = profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id];
+    const canPreflightContainment = !options?.forceUpload &&
+      !existingDriveFileId &&
+      Boolean(activeProfileForContainment?.sources.some((source) =>
+        source.status === 'processed' &&
+        !source.rawDeletedAt &&
+        source.contentIndexComplete &&
+        source.contentIndexPages?.length,
+      ));
+    if (canPreflightContainment) {
+      try {
+        notifyBatchProgress(file.name, effectiveMember.name, 'Đang đối chiếu OCR trước khi lưu raw', 30);
+        preExtractedResult = await extractHealthEventWithProgress(
+          processedFile,
+          effectiveMember,
+          (update) => {
+            applyExtractionProgress(update);
+            notifyBatchProgress(
+              file.name,
+              effectiveMember.name,
+              EXTRACTION_NOTIFICATION_PHASES[update.stage],
+              update.progressPercent,
+            );
+          },
+          { isAutoDetect: pickedMemberIdForBatchRef.current === undefined },
+        );
+        const { hash } = await computeFileFingerprint(processedFile);
+        const integrated = await tryIntegrateContainedDocument(
+          effectiveMember,
+          processedFile,
+          hash,
+          preExtractedResult,
+        );
+        if (integrated) {
+          await completePendingUpload(pendingUploadId);
+          setIsUploading(false);
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Lỗi OCR không xác định.';
+        digitizationLogger.log(
+          'warn',
+          'content_dedup_preflight',
+          `Không thể kết luận tài liệu có bị bao trùm trước upload; giữ raw và tiếp tục lưu an toàn: ${message}`,
+          { fileName: file.name, memberId: effectiveMember.id },
+        );
+        showToast(
+          `Chưa thể xác minh nội dung trùng của "${file.name}". Ứng dụng sẽ giữ raw và tiếp tục xử lý để tránh mất dữ liệu.`,
+          'info',
+        );
+      }
+    }
     try {
       if (isLocalOnlyWorkspace) {
         if (!pendingUploadId || !offlineOwnerKey) {
@@ -2917,7 +2995,7 @@ export function HealthDashboard({
           progressPercent: 35,
           progressMessage: 'Tài liệu đã lưu an toàn trên thiết bị. Đang số hóa bằng Gemini...',
         }));
-        await runDocumentExtraction(processedFile, effectiveMember, localFile.id);
+        await runDocumentExtraction(processedFile, effectiveMember, localFile.id, preExtractedResult);
       } else if (existingDriveFileId) {
         // Tệp đã có trên Google Drive: Tái sử dụng tệp gốc, KHÔNG tạo bản sao trùng lặp trên Drive
         digitizationLogger.log(
@@ -2957,7 +3035,7 @@ export function HealthDashboard({
         } else if (pendingUploadId) {
           await completePendingUpload(pendingUploadId);
         }
-        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId);
+        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId, preExtractedResult);
         const reusedUploaded: DriveFile = {
           ...(options?.uploadedFile || {}),
           id: existingDriveFileId,
@@ -3010,7 +3088,7 @@ export function HealthDashboard({
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
         await completePendingUpload(pendingUploadId);
-        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id);
+        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id, preExtractedResult);
       }
     } catch (error) {
       batchFailureCountRef.current += 1;
@@ -3130,7 +3208,12 @@ export function HealthDashboard({
       };
     });
   }
-  async function runDocumentExtraction(file: File, member: FamilyMember, driveFileId?: string) {
+  async function runDocumentExtraction(
+    file: File,
+    member: FamilyMember,
+    driveFileId?: string,
+    preExtractedResult?: Awaited<ReturnType<typeof extractHealthEventWithProgress>>,
+  ) {
     let latestProgress = 45;
     try {
       const reportProgress = (update: ExtractionProgressUpdate) => {
@@ -3145,7 +3228,12 @@ export function HealthDashboard({
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress, file.name);
       };
       const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
-      const result = await extractHealthEventWithProgress(file, member, reportProgress, { isAutoDetect });
+      const result = preExtractedResult || await extractHealthEventWithProgress(
+        file,
+        member,
+        reportProgress,
+        { isAutoDetect },
+      );
       if (!driveFileId) throw new Error('Không xác định được mã tài liệu Drive để lưu kết quả OCR.');
       const source = Object.values(profilesRef.current)
         .flatMap((profile) => profile.sources)
@@ -3158,6 +3246,8 @@ export function HealthDashboard({
           createdTime: source?.uploadedAt || new Date().toISOString(),
         },
         extracted: result.extracted,
+        contentIndexPages: result.contentIndexPages,
+        contentIndexComplete: result.contentIndexComplete,
       };
       setTrackerState((previous) => ({
         ...previous,
@@ -3430,6 +3520,255 @@ export function HealthDashboard({
     if (gender === 'nữ' || gender === 'female') return 'female';
     return fallback;
   }
+
+  async function cleanupContainedRawDocuments(member: FamilyMember, incomingSourceId: string): Promise<void> {
+    if (workspaceRef.current?.rootFolderId === 'local_offline_workspace') return;
+
+    let profile = profilesRef.current[member.id] || profiles[member.id];
+    if (!profile || profile.syncPending) return;
+    const incoming = profile.sources.find((source) => source.driveFileId === incomingSourceId);
+    if (
+      !incoming ||
+      incoming.status !== 'processed' ||
+      incoming.rawDeletedAt ||
+      !incoming.contentIndexComplete ||
+      !incoming.contentIndexPages?.length ||
+      !incoming.digitizedAt
+    ) return;
+
+    for (const existing of profile.sources) {
+      if (
+        existing.driveFileId === incoming.driveFileId ||
+        existing.status !== 'processed' ||
+        existing.rawDeletedAt ||
+        !existing.contentIndexComplete ||
+        !existing.contentIndexPages?.length ||
+        !existing.digitizedAt
+      ) continue;
+
+      const comparison = compareDocumentContainment(
+        { pages: existing.contentIndexPages, complete: true },
+        { pages: incoming.contentIndexPages, complete: true },
+      );
+      const incomingContainsExisting = comparison.relation === 'right_contains_left';
+      const existingContainsIncoming = comparison.relation === 'left_contains_right';
+      if (!incomingContainsExisting && !existingContainsIncoming) continue;
+
+      const canonical = incomingContainsExisting ? incoming : existing;
+      const redundant = incomingContainsExisting ? existing : incoming;
+      const linkedEvents = profile.timeline.filter((event) =>
+        event.sourceFileId === redundant.driveFileId ||
+        event.additionalSources?.some((source) => source.driveFileId === redundant.driveFileId),
+      );
+      if (linkedEvents.length === 0) continue;
+
+      const contribution = {
+        fileName: redundant.fileName,
+        fileHash: redundant.fileHash || '',
+        hashAlgorithm: 'sha256' as const,
+        uploadedAt: redundant.uploadedAt,
+        disposition: 'included' as const,
+      };
+      const canonicalContributions = [
+        ...(canonical.sourceContributions || []),
+        ...(redundant.sourceContributions || []),
+        contribution,
+      ].filter((item, index, list) =>
+        list.findIndex((candidate) =>
+          candidate.fileHash === item.fileHash &&
+          candidate.hashAlgorithm === item.hashAlgorithm &&
+          candidate.fileName === item.fileName,
+        ) === index,
+      );
+      const canonicalSources = new Map(
+        (canonical.driveFileId === redundant.driveFileId
+          ? []
+          : [{ driveFileId: canonical.driveFileId, fileName: canonical.fileName }])
+          .map((source) => [source.driveFileId, source]),
+      );
+      for (const event of linkedEvents) {
+        for (const source of [
+          ...(event.additionalSources || []),
+          { driveFileId: event.sourceFileId, fileName: event.sourceFileName },
+          { driveFileId: redundant.driveFileId, fileName: redundant.fileName },
+        ]) {
+          if (source.driveFileId && source.driveFileId !== canonical.driveFileId) {
+            canonicalSources.set(source.driveFileId, source);
+          }
+        }
+      }
+
+      const remappedTimeline = profile.timeline.map((event) =>
+        event.sourceFileId === redundant.driveFileId
+          ? {
+              ...event,
+              sourceFileId: canonical.driveFileId,
+              sourceFileName: canonical.fileName,
+              additionalSources: Array.from(canonicalSources.values()),
+            }
+          : event,
+      );
+      const linkedSourceIds = new Set(
+        remappedTimeline.flatMap((event) => [
+          event.sourceFileId,
+          ...(event.additionalSources || []).map((source) => source.driveFileId),
+        ]),
+      );
+      if (!linkedSourceIds.has(canonical.driveFileId)) continue;
+
+      const updatedProfile: HealthProfile = {
+        ...profile,
+        timeline: remappedTimeline,
+        sources: profile.sources.map((source) =>
+          source.driveFileId === canonical.driveFileId
+            ? { ...source, sourceContributions: canonicalContributions }
+            : source,
+        ),
+        updatedAt: new Date().toISOString(),
+      };
+      let savedBeforeTrash: HealthProfile;
+      try {
+        savedBeforeTrash = await saveHealthProfile(member.profileFileId, updatedProfile);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
+        showToast(`Đã lưu dữ liệu OCR, nhưng giữ lại raw do không lưu được liên kết nguồn: ${message}`, 'error');
+        return;
+      }
+      if (savedBeforeTrash.syncPending) {
+        showToast(
+          `Đã hợp nhất dữ liệu OCR của "${redundant.fileName}", nhưng chưa xóa raw vì JSON chưa đồng bộ Drive.`,
+          'info',
+        );
+        return;
+      }
+      profilesRef.current = { ...profilesRef.current, [member.id]: savedBeforeTrash };
+      setProfiles((previous) => ({ ...previous, [member.id]: savedBeforeTrash }));
+
+      try {
+        await trashDriveFile(redundant.driveFileId);
+        const deletionTime = new Date().toISOString();
+        const markedProfile: HealthProfile = {
+          ...savedBeforeTrash,
+          sources: savedBeforeTrash.sources.map((source) =>
+            source.driveFileId === redundant.driveFileId
+              ? { ...source, rawDeletedAt: deletionTime }
+              : source,
+          ),
+          updatedAt: deletionTime,
+        };
+        const savedAfterTrash = await saveHealthProfile(member.profileFileId, markedProfile);
+        profilesRef.current = { ...profilesRef.current, [member.id]: savedAfterTrash };
+        setProfiles((previous) => ({ ...previous, [member.id]: savedAfterTrash }));
+        profile = savedAfterTrash;
+        if (savedAfterTrash.syncPending) {
+          showToast(
+            `Raw "${redundant.fileName}" đã chuyển vào Thùng rác; trạng thái xóa sẽ đồng bộ khi Drive kết nối lại.`,
+            'info',
+          );
+        } else {
+          showToast(
+            `Đã gộp OCR và tự động chuyển raw "${redundant.fileName}" vào Thùng rác; giữ lại "${canonical.fileName}".`,
+            'success',
+          );
+        }
+        if (redundant.driveFileId === incomingSourceId) return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
+        try {
+          await restoreTrashedDriveFile(redundant.driveFileId);
+        } catch (restoreError) {
+          const restoreMessage = restoreError instanceof Error ? restoreError.message : 'Lỗi không xác định.';
+          showToast(
+            `Không thể hoàn tất dọn raw "${redundant.fileName}" (${message}) hoặc khôi phục từ Thùng rác (${restoreMessage}).`,
+            'error',
+          );
+          return;
+        }
+        showToast(`Đã giữ lại raw "${redundant.fileName}" vì không lưu được trạng thái sau dọn dẹp: ${message}`, 'error');
+        return;
+      }
+    }
+  }
+
+  async function tryIntegrateContainedDocument(
+    member: FamilyMember,
+    file: File,
+    fileHash: string,
+    result: Awaited<ReturnType<typeof extractHealthEventWithProgress>>,
+  ): Promise<boolean> {
+    if (
+      !/^[a-f0-9]{64}$/i.test(fileHash) ||
+      !result.contentIndexComplete ||
+      !isRecognizablePatientName(result.extracted.patientName) ||
+      !isOcrSubjectMatchedToMember(
+        result.extracted.patientName,
+        member,
+        workspaceRef.current?.family.members || members,
+        result.extracted.patientBirthDate,
+        result.extracted.patientGender,
+      )
+    ) return false;
+
+    const profile = profilesRef.current[member.id] || profiles[member.id];
+    if (!profile || profile.syncPending) return false;
+    const incomingIndex = createDocumentContentIndex(result.contentIndexPages);
+    if (!incomingIndex.complete) return false;
+
+    const candidates = profile.sources
+      .filter((source) =>
+        source.status === 'processed' &&
+        !source.rawDeletedAt &&
+        source.digitizedAt &&
+        source.contentIndexComplete &&
+        source.contentIndexPages?.length &&
+        profile.timeline.some((event) =>
+          event.sourceFileId === source.driveFileId ||
+          event.additionalSources?.some((item) => item.driveFileId === source.driveFileId),
+        ),
+      )
+      .map((source) => ({
+        source,
+        comparison: compareDocumentContainment(
+          { pages: source.contentIndexPages || [], complete: true },
+          incomingIndex,
+        ),
+      }))
+      .filter(({ comparison }) => comparison.relation === 'left_contains_right')
+      .sort((left, right) => right.comparison.rightCoverage - left.comparison.rightCoverage);
+
+    const canonical = candidates[0]?.source;
+    if (!canonical) return false;
+
+    const draft: DigitizationDraft = {
+      source: {
+        id: canonical.driveFileId,
+        name: canonical.fileName,
+        mimeType: canonical.mimeType,
+        createdTime: canonical.uploadedAt,
+        size: canonical.fileSize === undefined ? undefined : String(canonical.fileSize),
+      },
+      extracted: result.extracted,
+      contentIndexPages: canonical.contentIndexPages || [],
+      contentIndexComplete: true,
+      sourceContributions: [{
+        fileName: file.name,
+        fileHash,
+        hashAlgorithm: 'sha256',
+        uploadedAt: new Date().toISOString(),
+        disposition: 'included',
+      }],
+    };
+
+    const saved = await saveExtractedDocumentAutomatically(draft, member, true);
+    if (saved) {
+      showToast(
+        `Tài liệu "${file.name}" đã được OCR, gộp vào JSON của "${canonical.fileName}" và không tải raw trùng lên Drive.`,
+        'success',
+      );
+    }
+    return saved;
+  }
+
   async function saveExtractedDocumentAutomatically(
     draft: DigitizationDraft,
     member: FamilyMember,
@@ -3884,11 +4223,28 @@ export function HealthDashboard({
         uploadedAt: draft.source.createdTime || new Date().toISOString(),
         status: 'pending' as const,
       };
+      const contentIndex = createDocumentContentIndex(draft.contentIndexPages);
+      const sourceContributions = [
+        ...(sourceBase.sourceContributions || []),
+        ...(draft.sourceContributions || []),
+      ].filter((item, index, list) =>
+        list.findIndex((candidate) =>
+          candidate.fileHash === item.fileHash &&
+          candidate.hashAlgorithm === item.hashAlgorithm &&
+          candidate.fileName === item.fileName,
+        ) === index,
+      );
       const targetSource: HealthSource = {
         ...sourceBase,
         status: priorSource?.status || 'pending',
         subjectStatus: undefined,
         relocatedToMemberId: undefined,
+        contentIndexPages: sourceBase.contentIndexComplete
+          ? sourceBase.contentIndexPages
+          : contentIndex.pages,
+        contentIndexComplete: sourceBase.contentIndexComplete ||
+          (draft.contentIndexComplete && contentIndex.complete),
+        sourceContributions: sourceContributions.length ? sourceContributions : undefined,
       };
       if (sourceOwner?.id !== effectiveMember.id) {
        let driveFileMoved = false;
@@ -3967,6 +4323,7 @@ export function HealthDashboard({
         currentProfiles[effectiveMember.id] = saved;
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: saved };
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        await cleanupContainedRawDocuments(effectiveMember, draft.source.id);
         forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
         selectedMemberIdRef.current = effectiveMember.id;
@@ -4013,6 +4370,7 @@ export function HealthDashboard({
         currentProfiles[effectiveMember.id] = saved;
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: saved };
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
+        await cleanupContainedRawDocuments(effectiveMember, draft.source.id);
         forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
         selectedMemberIdRef.current = effectiveMember.id;
@@ -4040,6 +4398,7 @@ export function HealthDashboard({
         currentProfiles[effectiveMember.id] = merged;
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: merged };
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: merged }));
+        await cleanupContainedRawDocuments(effectiveMember, draft.source.id);
         forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
         selectedMemberIdRef.current = effectiveMember.id;
@@ -6148,6 +6507,8 @@ export function HealthDashboard({
               setDigitizationDraft({
                 source: trackerState.driveFile,
                 extracted: trackerState.partialExtracted,
+                contentIndexPages: [],
+                contentIndexComplete: false,
               });
             }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
@@ -6160,6 +6521,8 @@ export function HealthDashboard({
               setDigitizationDraft({
                 source: trackerState.driveFile,
                 extracted: trackerState.partialExtracted,
+                contentIndexPages: [],
+                contentIndexComplete: false,
               });
             }
             setTrackerState((prev) => ({ ...prev, isOpen: false }));

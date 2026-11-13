@@ -58,6 +58,24 @@ describe('mergeExtractedBatches', () => {
     expect(merged.advice).toBe('Tái khám sau một tuần.\nUống đủ nước.');
   });
 
+  it('keeps an OCR text index only when every page is represented', () => {
+    const complete = mergeExtractedBatches([{
+      firstPage: 3,
+      lastPage: 4,
+      extracted: { pageTexts: ['Trang ba có nội dung', 'Trang bốn có nội dung'] },
+    }]);
+    expect(complete.contentIndexComplete).toBe(true);
+    expect(complete.contentIndexPages).toEqual(['Trang ba có nội dung', 'Trang bốn có nội dung']);
+
+    const incomplete = mergeExtractedBatches([{
+      firstPage: 1,
+      lastPage: 2,
+      extracted: { pageTexts: ['Chỉ trang một có nội dung'] },
+    }]);
+    expect(incomplete.contentIndexComplete).toBe(false);
+    expect(incomplete.contentIndexPages).toEqual([]);
+  });
+
   it('uses the document title and filename to correct a conflicting model type', () => {
     const merged = mergeExtractedBatches([{
       firstPage: 1,

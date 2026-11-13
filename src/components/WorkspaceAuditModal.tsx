@@ -12,7 +12,13 @@ import {
 import type { HealthDriveWorkspace } from '../utils/healthDriveService';
 import type { HealthProfile } from '../types';
 import { cleanupWorkspaceDuplicates } from '../utils/workspaceAuditService';
-import { loadHealthProfile, saveHealthProfile, listRawFiles, deleteDriveFile } from '../utils/healthDriveService';
+import {
+  loadHealthProfile,
+  saveHealthProfile,
+  listRawFiles,
+  restoreTrashedDriveFile,
+  trashDriveFile,
+} from '../utils/healthDriveService';
 
 interface WorkspaceAuditModalProps {
   isOpen: boolean;
@@ -56,7 +62,8 @@ export function WorkspaceAuditModal({
         async (fileId) => loadHealthProfile(fileId),
         async (fileId, prof) => saveHealthProfile(fileId, prof),
         async (member) => listRawFiles(member),
-        async (fileId) => deleteDriveFile(fileId),
+        async (fileId) => trashDriveFile(fileId),
+        async (fileId) => restoreTrashedDriveFile(fileId),
         (prog) => {
           setProgressPercent(prog.percent);
           setProgressMsg(prog.message);

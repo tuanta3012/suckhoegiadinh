@@ -94,7 +94,7 @@ describe('Deduplication Service', () => {
           driveFileId: 'file_drive_1',
           fileName: 'don-thuoc-tai-mui-hong.pdf',
           fileSize: 102400,
-          fileHash: 'abcdef1234567890abcdef1234567890',
+          fileHash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
           mimeType: 'application/pdf',
           uploadedAt: '2026-03-10T08:00:00Z',
           status: 'processed',
@@ -108,7 +108,7 @@ describe('Deduplication Service', () => {
     it('detects duplicate file by matching hash and size', () => {
       const match = detectDuplicateFile(
         { name: 'don-thuoc-tai-mui-hong.pdf', size: 102400 },
-        'abcdef1234567890abcdef1234567890',
+        'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
         mockProfile
       );
       expect(match).not.toBeNull();
@@ -121,6 +121,15 @@ describe('Deduplication Service', () => {
         { name: 'xet-nghiem-mau.pdf', size: 204800 },
         'different_hash_987654321',
         mockProfile
+      );
+      expect(match).toBeNull();
+    });
+
+    it('does not treat a matching filename as proof of duplicate content', () => {
+      const match = detectDuplicateFile(
+        { name: 'don-thuoc-tai-mui-hong.pdf', size: 102400 },
+        '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        mockProfile,
       );
       expect(match).toBeNull();
     });

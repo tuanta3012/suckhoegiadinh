@@ -8,6 +8,7 @@ export interface ExtractedPageBatch {
   firstPage: number;
   lastPage: number;
   extracted: JsonRecord;
+  modelUsed?: string;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -316,6 +317,23 @@ export function mergeExtractedBatches(
 ): JsonRecord {
   const values = batches.map(({ extracted }) => cleanExtractedJson(extracted));
   const merged: JsonRecord = {};
+  const contentPages: string[] = [];
+  let contentIndexComplete = batches.length > 0;
+  for (const [index, batch] of batches.entries()) {
+    const extractedPages = values[index].pageTexts;
+    const expectedPages = batch.lastPage - batch.firstPage + 1;
+    if (
+      !Array.isArray(extractedPages) ||
+      extractedPages.length !== expectedPages ||
+      extractedPages.some((page) => typeof page !== 'string' || !page.trim())
+    ) {
+      contentIndexComplete = false;
+      continue;
+    }
+    contentPages.push(...extractedPages.map((page) => (page as string).trim()));
+  }
+  merged.contentIndexPages = contentIndexComplete ? contentPages : [];
+  merged.contentIndexComplete = contentIndexComplete;
   for (const key of [
     'title',
     'type',

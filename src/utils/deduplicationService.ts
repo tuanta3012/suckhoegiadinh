@@ -243,25 +243,14 @@ export function detectDuplicateFile(
   if (!profile.sources || profile.sources.length === 0) return null;
 
   for (const source of profile.sources) {
-    // 1. Khớp chính xác mã băm SHA-256
     const hashMatch = Boolean(
       source.fileHash &&
       fileHash &&
-      !fileHash.startsWith('fallback_') &&
+      /^[a-f0-9]{64}$/i.test(fileHash) &&
+      /^[a-f0-9]{64}$/i.test(source.fileHash) &&
       source.fileHash === fileHash
     );
-
-    // 2. Khớp cùng tên tệp và cùng kích thước byte
-    const nameAndSizeMatch = Boolean(
-      source.fileName.trim().toLowerCase() === file.name.trim().toLowerCase() &&
-      source.fileSize &&
-      source.fileSize === file.size
-    );
-
-    // 3. Khớp tên tệp giống hệt (nếu kích thước chưa được lưu ở phiên bản cũ)
-    const nameMatch = source.fileName.trim().toLowerCase() === file.name.trim().toLowerCase();
-
-    if (hashMatch || nameAndSizeMatch || nameMatch) {
+    if (hashMatch) {
       const linkedEvent = profile.timeline.find(
         (ev) => ev.sourceFileId === source.driveFileId || ev.sourceFileName === source.fileName
       );
@@ -269,7 +258,7 @@ export function detectDuplicateFile(
       return {
         existingSource: source,
         linkedEvent,
-        isExactContentMatch: hashMatch || nameAndSizeMatch,
+        isExactContentMatch: true,
         memberId: member?.id || profile.member.id,
         memberName: member?.name || profile.member.name,
       };

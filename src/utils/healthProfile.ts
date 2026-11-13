@@ -83,7 +83,19 @@ function isHealthSource(value: unknown): value is HealthSource {
         (typeof value.fileSize === 'number' && Number.isFinite(value.fileSize))) &&
       (value.fileHash === undefined || typeof value.fileHash === 'string') &&
       (value.totalPages === undefined || typeof value.totalPages === 'number') &&
-      (value.processedPages === undefined || typeof value.processedPages === 'number'),
+      (value.processedPages === undefined || typeof value.processedPages === 'number') &&
+      (value.contentIndexPages === undefined ||
+        (Array.isArray(value.contentIndexPages) && value.contentIndexPages.every((page) => typeof page === 'string'))) &&
+      (value.contentIndexComplete === undefined || typeof value.contentIndexComplete === 'boolean') &&
+      (value.sourceContributions === undefined ||
+        (Array.isArray(value.sourceContributions) &&
+          value.sourceContributions.every((contribution) =>
+            isJsonRecord(contribution) &&
+            typeof contribution.fileName === 'string' &&
+            typeof contribution.fileHash === 'string' &&
+            (contribution.hashAlgorithm === 'sha256' || contribution.hashAlgorithm === 'md5') &&
+            typeof contribution.uploadedAt === 'string' &&
+            (contribution.disposition === 'included' || contribution.disposition === 'duplicate')))),
   );
 }
 
@@ -426,6 +438,20 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
     fileHash: raw.fileHash ? String(raw.fileHash) : undefined,
     totalPages: typeof raw.totalPages === 'number' ? raw.totalPages : undefined,
     processedPages: typeof raw.processedPages === 'number' ? raw.processedPages : undefined,
+    contentIndexPages: Array.isArray(raw.contentIndexPages)
+      ? raw.contentIndexPages.filter((page: unknown): page is string => typeof page === 'string')
+      : undefined,
+    contentIndexComplete: typeof raw.contentIndexComplete === 'boolean' ? raw.contentIndexComplete : undefined,
+    sourceContributions: Array.isArray(raw.sourceContributions)
+      ? raw.sourceContributions.filter((contribution: unknown) =>
+          isJsonRecord(contribution) &&
+          typeof contribution.fileName === 'string' &&
+          typeof contribution.fileHash === 'string' &&
+          (contribution.hashAlgorithm === 'sha256' || contribution.hashAlgorithm === 'md5') &&
+          typeof contribution.uploadedAt === 'string' &&
+          (contribution.disposition === 'included' || contribution.disposition === 'duplicate'),
+        ) as HealthSource['sourceContributions']
+      : undefined,
   };
 }
 

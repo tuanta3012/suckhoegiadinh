@@ -33,7 +33,7 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JSON_MIME = 'application/json';
-const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size';
+const FILE_FIELDS = 'id,name,mimeType,createdTime,modifiedTime,webViewLink,size,md5Checksum,trashed';
 const LOCAL_WORKSPACE_ID = 'local_offline_workspace';
 const AI_RESOURCES_FILE_NAME = 'ai-resources.json';
 const HEALTH_APP_ID = 'com.suckhoegiadinh.app';
@@ -72,6 +72,7 @@ export interface DriveFile {
   modifiedTime?: string;
   webViewLink?: string;
   size?: string;
+  md5Checksum?: string;
   parents?: string[];
   trashed?: boolean;
   appProperties?: Record<string, string>;
@@ -1784,6 +1785,38 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
   if (response.ok || response.status === 404) return;
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
   throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi xóa tệp.`);
+}
+
+export async function trashDriveFile(fileId: string): Promise<void> {
+  const response = await authenticatedDriveFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+    },
+    false,
+    [404],
+  );
+  if (response.ok || response.status === 404) return;
+  const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+  throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi chuyển tệp vào Thùng rác.`);
+}
+
+export async function restoreTrashedDriveFile(fileId: string): Promise<void> {
+  const response = await authenticatedDriveFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: false }),
+    },
+    false,
+    [404],
+  );
+  if (response.ok || response.status === 404) return;
+  const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+  throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi khôi phục tệp.`);
 }
 
 interface DriveFolderPermission {

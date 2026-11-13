@@ -112,6 +112,15 @@ export interface HealthSource {
   fileHash?: string;
   totalPages?: number;
   processedPages?: number;
+  contentIndexPages?: string[];
+  contentIndexComplete?: boolean;
+  sourceContributions?: Array<{
+    fileName: string;
+    fileHash: string;
+    hashAlgorithm: 'sha256' | 'md5';
+    uploadedAt: string;
+    disposition: 'included' | 'duplicate';
+  }>;
 }
 
 export interface HealthSummary {

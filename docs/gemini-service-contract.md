@@ -34,10 +34,18 @@ The assistant is limited to health topics, must not make definitive diagnoses or
 
 ## OCR and multi-page PDFs
 
-The client saves the original document to the connected workspace (or to app-private storage in offline-first native mode), then calls Gemini directly. PDFs are split locally into sequential batches of up to five pages; a PDF may contain up to 60 pages. Batch results are merged in page order with de-duplicated diagnoses, medications, and metrics. The merged result is stored as one timeline event per source file.
+The client saves the original document to the connected workspace (or to app-private storage in offline-first native mode), then sends OCR requests through the shared backend gateway. PDFs are split locally into sequential batches of up to five pages; a PDF may contain up to 60 pages. Batch results are merged in page order with de-duplicated diagnoses, medications, metrics, and page-level text indexes. The merged result is stored as one timeline event per source file.
 
 If OCR identifies a subject, the client performs the configured member-matching flow before saving. If the subject name is missing or does not match, the user can manually select an existing member or create a new member. The original remains unresolved until saving succeeds. A batch failure is surfaced explicitly and the original remains available for retry/manual entry.
 
 Native builds retain local workspace/profile metadata and original document bytes in app-private storage. Local-only data is not uploaded or merged automatically; after connecting Drive, the user can explicitly confirm a one-way copy. Browser-selected files still waiting in the upload queue are not persisted.
 
 OCR and analysis output is model-generated and may be inaccurate; it is not a diagnosis or substitute for clinical judgment. Missing or invalid analysis data must remain an explicit error/unknown state, never a success-shaped “healthy” default.
+
+## Raw-document deduplication and retention
+
+The app treats matching SHA-256 fingerprints of the processed upload bytes as exact duplicates; a matching filename or file size alone is never sufficient. For later uploads, it may compare complete page-level OCR text indexes when both sources are processed, linked to timeline data, within the 120,000-character index limit, and tied to the same recognized member. Containment requires at least 98% document shingle coverage and 94% coverage on every page; incomplete, short, ambiguous, or partially overlapping documents are retained.
+
+When an incoming document is confidently contained by an existing source, its OCR-derived event data and provenance are merged into the health-profile JSON before the incoming raw is skipped. When the incoming document contains an existing source, the more complete incoming raw is retained and old subset raws are eligible for cleanup only after profile persistence succeeds. Exact duplicate cleanup follows the same persistence gate. Cleanup moves redundant Drive files to the recoverable Trash, records source contributions and `rawDeletedAt`, and attempts restoration if saving the post-trash metadata fails. A pending/offline profile save prevents cleanup. No raw file is permanently deleted by this workflow.
+
+Page indexes are generated from Gemini's returned page transcription and stored in profile JSON; they are not independently verified OCR. They contain sensitive document text, so shared-folder access also exposes that text to folder readers. Index size limits and conservative matching intentionally prefer retaining an uncertain raw over discarding source material.
