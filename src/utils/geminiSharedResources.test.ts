@@ -22,6 +22,10 @@ vi.mock('@google/genai', async (importOriginal) => {
   };
 });
 
+vi.mock('./googleDriveService', () => ({
+  getFirebaseIdToken: vi.fn().mockResolvedValue(null),
+}));
+
 import {
   getSharedGeminiKeys,
   getSharedGeminiKeysForRequest,

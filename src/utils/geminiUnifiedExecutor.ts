@@ -15,14 +15,9 @@ import {
   type HealthAssistantResearch,
 } from './healthAiPrompts';
 import { createMedicalSearchQuery } from './healthAssistantContext';
+import { TASK_MODELS } from './geminiModels';
 
-// Valid modern Gemini models (single authoritative model per task)
-export const TASK_MODELS = {
-  digitization: ['gemini-3.5-flash-lite'],
-  analysis: ['gemini-4-hydrogen'],
-  assistant: ['gemini-3.5-flash-lite'],
-  refinement: ['gemini-3.5-flash-lite'],
-} as const;
+export { TASK_MODELS } from './geminiModels';
 
 export const GEMINI_TIMEOUTS = {
   analysisAttemptMs: 180_000,
@@ -38,58 +33,19 @@ export function getAttemptTimeout(task: GeminiTask): number {
     : GEMINI_TIMEOUTS.analysisAttemptMs;
 }
 
+function getMinimumAttemptDuration(task: GeminiTask, attemptTimeoutMs?: number): number {
+  return Math.min(30_000, attemptTimeoutMs || getAttemptTimeout(task));
+}
+
 export function getModelQuota(model: string): GeminiQuota {
-  if (model.includes('4-hydrogen') || model.includes('3.8-flash') || model.includes('3.6-flash')) {
-    return { rpm: 10, rpd: 50, maxConcurrent: 4 };
+  if (model === 'gemini-4-hydrogen') {
+    return { rpm: 5 };
   }
-  return { rpm: 30, rpd: 500, maxConcurrent: 10 };
+  return { rpm: 15 };
 }
 
 export function getTaskQuota(task: GeminiTask): GeminiQuota {
-  if (task === 'analysis') return { rpm: 10, rpd: 50, maxConcurrent: 4 };
-  return { rpm: 30, rpd: 500, maxConcurrent: 10 };
-}
-
-export function cleanErrorMessage(rawMessage?: string): string {
-  if (!rawMessage) return 'Có lỗi xảy ra khi xử lý dịch vụ AI.';
-  let msg = typeof rawMessage === 'string' ? rawMessage.trim() : String(rawMessage);
-
-  for (let depth = 0; depth < 3; depth++) {
-    if ((msg.startsWith('{') && msg.endsWith('}')) || (msg.startsWith('[') && msg.endsWith(']'))) {
-      try {
-        const parsed = JSON.parse(msg);
-        if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.error === 'string') msg = parsed.error;
-          else if (typeof parsed.error?.message === 'string') msg = parsed.error.message;
-          else if (typeof parsed.message === 'string') msg = parsed.message;
-          else break;
-        } else break;
-      } catch {
-        break;
-      }
-    } else break;
-  }
-
-  if (/Timed out waiting for an available.*quota slot/i.test(msg)) {
-    return 'Hệ thống AI đang bận điều phối tài nguyên, vui lòng thử lại sau ít giây.';
-  }
-  if (/No available projects remain/i.test(msg)) {
-    return 'Chưa có API key nào khả dụng. Vui lòng kiểm tra cấu hình Gemini API trong Tài nguyên AI.';
-  }
-  if (/DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(msg)) {
-    return 'Yêu cầu AI xử lý bị quá thời gian chờ từ máy chủ Google (504 Deadline Exceeded). Vui lòng thử lại.';
-  }
-  if (/RESOURCE_EXHAUSTED|429/i.test(msg)) {
-    return 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau ít phút.';
-  }
-  if (/503|UNAVAILABLE|high demand|overloaded/i.test(msg)) {
-    return 'Máy chủ AI Google hiện đang bận hoặc quá tải (503 Service Unavailable). Vui lòng thử lại sau ít giây.';
-  }
-  if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg)) {
-    return 'Không thể kết nối đến máy chủ AI (Lỗi mạng hoặc kết nối). Vui lòng kiểm tra đường truyền và thử lại.';
-  }
-
-  return msg;
+  return getModelQuota(TASK_MODELS[task][0]);
 }
 
 export function describeGeminiError(error: unknown): {
@@ -161,10 +117,33 @@ export function describeGeminiError(error: unknown): {
     statusCode = 0;
   }
 
+  const isAllKeysDailyQuotaMessage =
+    /All configured Gemini API keys have exhausted daily quota/i.test(candidateMessage);
+  if (isAllKeysDailyQuotaMessage) {
+    return {
+      status: 429,
+      message: 'Tất cả API key trong Tài nguyên AI đều đã hết quota RPD cho mô hình này. Vui lòng kiểm tra quota Gemini hoặc bổ sung key khác.',
+      isInvalidKey: false,
+      isDailyQuota: true,
+      isRateLimit: true,
+      isTransient: false,
+    };
+  }
+
   const isInternalSchedulerMessage =
-    /Timed out waiting for an available.*quota slot|No daily.*quota remains|No RPM capacity remains|No available projects remain/i.test(
+    /Timed out waiting for an available.*quota slot|No RPM capacity remains|No available projects remain/i.test(
       candidateMessage,
     );
+  if (/Timed out waiting for an available.*quota slot/i.test(candidateMessage)) {
+    return {
+      status: 503,
+      message: 'Bộ điều phối AI đang bận và chưa cấp được lượt gọi Gemini. Đây chưa phải xác nhận Google đã hết quota; vui lòng thử lại sau.',
+      isInvalidKey: false,
+      isDailyQuota: false,
+      isRateLimit: false,
+      isTransient: true,
+    };
+  }
 
   const isDeadline =
     !isInternalSchedulerMessage && (
@@ -190,7 +169,9 @@ export function describeGeminiError(error: unknown): {
     /API_KEY_INVALID|PERMISSION_DENIED|unauthorized|invalid api key|api key not valid/i.test(candidateMessage);
   const isDailyQuota =
     isRateLimit &&
-    /per.?day|daily|requests per day|quota.*day|exhausted|quota exceeded/i.test(candidateMessage);
+    /(?:\brpd\b|per[\s_-]*day|daily|requests?[\s_-]*per[\s_-]*day|quota[^.\n]{0,80}(?:day|daily)|generate.*requests.*per.*day)/i.test(
+      candidateMessage,
+    );
   const isTransient =
     !isInternalSchedulerMessage && (
       isDeadline ||
@@ -227,7 +208,7 @@ export function describeGeminiError(error: unknown): {
   if (isRateLimit) {
     return {
       status: 429,
-      message: 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau ít phút.',
+      message: 'Gemini đang giới hạn tần suất gọi (429). Vui lòng thử lại sau ít phút.',
       isInvalidKey: false,
       isDailyQuota,
       isRateLimit: true,
@@ -276,8 +257,9 @@ export function recordProjectFailure(
 ): boolean {
   const details = describeGeminiError(error);
   if (details.isRateLimit || details.status === 429) {
-    if (details.isDailyQuota) scheduler.markDailyQuotaExhausted(projectId, model);
-    else scheduler.markRateLimited(projectId, model, parseRetryAfterMs(error));
+    if (!details.isDailyQuota) {
+      scheduler.markRateLimited(projectId, model, parseRetryAfterMs(error));
+    }
     return true;
   }
   if (details.isInvalidKey) {
@@ -337,16 +319,14 @@ async function callGeminiSingleAttempt(
   if (signal?.aborted) throw new Error('Gemini request was cancelled.');
 
   const remainingTime = deadline - Date.now();
-  if (remainingTime < 30_000) {
+  const requestedAttemptTimeout = options.attemptTimeoutMs || getAttemptTimeout(options.task);
+  if (remainingTime < getMinimumAttemptDuration(options.task, options.attemptTimeoutMs)) {
     throw new Error(
-      `Thời gian xử lý còn lại (${Math.round(remainingTime / 1000)}s) không đủ tối thiểu 30s để gửi request tới Gemini API.`,
+      `Thời gian xử lý còn lại (${Math.round(remainingTime / 1000)}s) không đủ để gửi request tới Gemini API.`,
     );
   }
 
-  const calculatedTimeoutMs = Math.min(
-    options.attemptTimeoutMs || getAttemptTimeout(options.task),
-    Math.max(30_000, remainingTime),
-  );
+  const calculatedTimeoutMs = Math.min(requestedAttemptTimeout, remainingTime);
 
   const attemptController = new AbortController();
   const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
@@ -389,7 +369,7 @@ async function callGeminiSingleAttempt(
 /**
  * Single unified Gemini orchestrator shared identically by Server (/server.ts)
  * and Standalone APK Client (geminiService.ts).
- * Uses GeminiQuotaScheduler for RPM/RPD quota tracking, concurrency control,
+ * Uses GeminiQuotaScheduler for RPM queueing and provider-confirmed RPD failover,
  * multi-key rotation, cooldowns, invalid-key exclusion, and pool-pass retries.
  */
 export async function executeGeminiWithPool(
@@ -404,22 +384,28 @@ export async function executeGeminiWithPool(
   const totalBudgetMs = options.timeoutMs
     || (options.task === 'digitization' ? GEMINI_TIMEOUTS.ocrTotalMs : GEMINI_TIMEOUTS.analysisTotalMs);
   const deadline = Date.now() + totalBudgetMs;
+  const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs);
   const maxPoolPasses = options.maxPoolPasses ?? (options.task === 'digitization' ? 3 : 2);
+  const dailyQuotaExhaustedProjectIds = new Set<string>();
   let lastError: Error | null = null;
 
   for (let pass = 0; pass < maxPoolPasses; pass++) {
     if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
-    if (Date.now() >= deadline - 30_000) break;
+    if (Date.now() >= deadline - minimumAttemptMs) break;
 
     const attemptedProjectIds = new Set<string>();
     let sawRetryableFailureInPass = false;
     let sawAbortForFallback = false;
 
-    while (attemptedProjectIds.size < projects.length && Date.now() < deadline - 30_000) {
+    while (
+      new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]).size < projects.length &&
+      Date.now() < deadline - minimumAttemptMs
+    ) {
       if (options.signal?.aborted) throw new Error('Gemini request was cancelled.');
 
-      const remainingAcquireMs = Math.max(1_000, deadline - Date.now() - 30_000);
-      const acquireTimeoutMs = Math.min(30_000, remainingAcquireMs);
+      const remainingAcquireMs = Math.max(1, deadline - Date.now() - minimumAttemptMs);
+      const acquireTimeoutMs = remainingAcquireMs;
+      const excludedProjectIds = new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]);
 
       let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
       try {
@@ -427,11 +413,12 @@ export async function executeGeminiWithPool(
           options.task,
           targetModel,
           quota,
-          attemptedProjectIds,
+          excludedProjectIds,
           acquireTimeoutMs,
           options.preferredProjectId && !attemptedProjectIds.has(options.preferredProjectId)
             ? options.preferredProjectId
             : undefined,
+          options.signal,
         );
       } catch (err) {
         if (!lastError) {
@@ -465,7 +452,10 @@ export async function executeGeminiWithPool(
               });
 
         const stopForFallback = options.shouldStopRetrying?.(error) === true;
-        if (stopForFallback) {
+        if (details.isDailyQuota) {
+          dailyQuotaExhaustedProjectIds.add(project.id);
+        }
+        if (stopForFallback && !details.isDailyQuota) {
           sawAbortForFallback = true;
         } else if (!options.skipFailurePenalties) {
           const shouldRetry = recordProjectFailure(
@@ -503,16 +493,22 @@ export async function executeGeminiWithPool(
       sawAbortForFallback ||
       !sawRetryableFailureInPass ||
       pass >= maxPoolPasses - 1 ||
-      Date.now() >= deadline - 35_000
+      Date.now() >= deadline - minimumAttemptMs
     ) {
       break;
     }
 
-    const backoffMs = Math.min(Math.pow(2, pass + 1) * 1_500, Math.max(1_000, deadline - Date.now() - 32_000));
+    const backoffMs = Math.min(
+      Math.pow(2, pass + 1) * 1_500,
+      Math.max(1_000, deadline - Date.now() - minimumAttemptMs),
+    );
     options.onProgress?.(`Tất cả API key đều đang bận; thử lại lượt ${pass + 2}/${maxPoolPasses} sau ${Math.ceil(backoffMs / 1000)}s...`);
     await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
 
+  if (projects.length > 0 && dailyQuotaExhaustedProjectIds.size === projects.length) {
+    throw new Error(`All configured Gemini API keys have exhausted daily quota for ${targetModel}.`);
+  }
   throw lastError || new Error(`Đã hết quota hoặc thời gian chờ cho mô hình ${targetModel}.`);
 }
 
@@ -528,13 +524,18 @@ export async function executeGeminiStreamWithPool(
   const quota = getModelQuota(targetModel);
   const deadline = Date.now() + (options.timeoutMs || GEMINI_TIMEOUTS.analysisTotalMs);
   const attemptedProjectIds = new Set<string>();
+  const dailyQuotaExhaustedProjectIds = new Set<string>();
   let lastError: Error | null = null;
 
-  while (attemptedProjectIds.size < projects.length && Date.now() < deadline - 30_000) {
+  while (
+    new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]).size < projects.length &&
+    Date.now() < deadline - 30_000
+  ) {
     if (options.signal?.aborted) throw new Error('Gemini stream was cancelled.');
 
-    const remainingAcquireMs = Math.max(1_000, deadline - Date.now() - 30_000);
-    const streamAcquireTimeoutMs = Math.min(30_000, remainingAcquireMs);
+    const remainingAcquireMs = Math.max(1, deadline - Date.now() - 30_000);
+    const streamAcquireTimeoutMs = remainingAcquireMs;
+    const excludedProjectIds = new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]);
 
     let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
     try {
@@ -542,8 +543,10 @@ export async function executeGeminiStreamWithPool(
         options.task,
         targetModel,
         quota,
-        attemptedProjectIds,
+        excludedProjectIds,
         streamAcquireTimeoutMs,
+        undefined,
+        options.signal,
       );
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -598,6 +601,7 @@ export async function executeGeminiStreamWithPool(
               cause: error,
             });
       const shouldRetry = recordProjectFailure(scheduler, lease.project.id, targetModel, error);
+      if (details.isDailyQuota) dailyQuotaExhaustedProjectIds.add(lease.project.id);
       if (hasOutput || options.signal?.aborted) throw lastError;
       if (!shouldRetry) throw lastError;
     } finally {
@@ -607,6 +611,9 @@ export async function executeGeminiStreamWithPool(
     }
   }
 
+  if (projects.length > 0 && dailyQuotaExhaustedProjectIds.size === projects.length) {
+    throw new Error(`All configured Gemini API keys have exhausted daily quota for ${targetModel}.`);
+  }
   throw lastError || new Error('Không còn quota khả dụng cho trợ lý Gemini.');
 }
 

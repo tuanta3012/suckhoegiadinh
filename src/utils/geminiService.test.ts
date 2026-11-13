@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Capacitor } from '@capacitor/core';
-import { PDFDocument } from 'pdf-lib';
 import type { FamilyMember, HealthProfile } from '../types';
 
 const { generateContentMock, generateContentStreamMock } = vi.hoisted(() => ({
@@ -37,7 +36,7 @@ vi.mock('./digitizationLogger', () => ({
 }));
 
 vi.mock('./googleDriveService', () => ({
-  getValidGoogleAccessToken: vi.fn().mockResolvedValue(null),
+  getFirebaseIdToken: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('./geminiSharedResources', () => ({
@@ -48,25 +47,36 @@ import {
   analyzeComprehensiveHealth,
   askHealthAssistant,
   extractHealthEventWithProgress,
-  resetClientGeminiKeyStateForTests,
   streamHealthAssistant,
 } from './geminiService';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
+import { getFirebaseIdToken } from './googleDriveService';
 
-describe('askHealthAssistant API routing', () => {
+const member = { id: 'm1', name: 'Truong Anh Tuan' } as FamilyMember;
+const profile = { timeline: [], metrics: [] } as unknown as HealthProfile;
+
+function sseResponse(events: unknown[]): Response {
+  const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+describe('Gemini service backend routing', () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    resetClientGeminiKeyStateForTests();
     generateContentMock.mockReset();
     generateContentStreamMock.mockReset();
     vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue([]);
+    vi.mocked(getFirebaseIdToken).mockResolvedValue(null);
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 
-  it('uses the configured backend and explains HTML fallback responses', async () => {
+  it('uses the configured backend and explains HTML responses instead of parsing them as JSON', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
     vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com/');
     globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html>', {
@@ -74,311 +84,161 @@ describe('askHealthAssistant API routing', () => {
       status: 200,
     }));
 
-    await expect(askHealthAssistant(
-      'Question',
-      {} as FamilyMember,
-      {} as HealthProfile,
-    )).rejects.toThrow('trả về HTML thay vì JSON (HTTP 200)');
+    await expect(askHealthAssistant('Question', member, profile))
+      .rejects.toThrow('trả về HTML thay vì JSON (HTTP 200)');
 
-    expect(globalThis.fetch).toHaveBeenCalledOnce();
-    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe(
-      'https://api.example.com/api/gemini/ask-assistant',
-    );
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0])
+      .toBe('https://api.example.com/api/gemini/ask-assistant');
   });
 
-  it('fails before fetching when an APK has no configured backend URL and no client keys', async () => {
+  it('does not execute Gemini on the device when an APK has no configured backend URL', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
     vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue([]);
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-device-key']);
     globalThis.fetch = vi.fn();
 
-    await expect(askHealthAssistant(
-      'Question',
-      {} as FamilyMember,
-      {} as HealthProfile,
-    )).rejects.toThrow('Chưa cấu hình máy chủ AI');
+    await expect(askHealthAssistant('Question', member, profile))
+      .rejects.toThrow('Chưa cấu hình máy chủ AI');
 
     expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(generateContentMock).not.toHaveBeenCalled();
   });
 
-  it('sends chat history and exposes only approved citation links', async () => {
-    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
-    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com/');
+  it('routes APK chat and its AI-resource keys through the shared backend', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-workspace-key']);
+    vi.mocked(getFirebaseIdToken).mockResolvedValue('firebase-id-token');
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       success: true,
       answer: 'Thông tin tham khảo [1].',
-      citations: [
-        { title: 'WHO', url: 'https://www.who.int/health-topics/example' },
-        { title: 'Untrusted', url: 'https://example.com/health' },
-      ],
+      citations: [{ title: 'WHO', url: 'https://www.who.int/health-topics/example' }],
     }), {
       headers: { 'Content-Type': 'application/json' },
       status: 200,
     }));
 
-    await expect(askHealthAssistant(
-      'Question',
-      {} as FamilyMember,
-      {} as HealthProfile,
-      [{ role: 'user', text: 'Previous question' }],
-    )).resolves.toEqual({
-      answer: 'Thông tin tham khảo [1].',
-      citations: [{ title: 'WHO', url: 'https://www.who.int/health-topics/example' }],
-    });
-
-    const requestBody = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
-    expect(requestBody.history).toEqual([{ role: 'user', text: 'Previous question' }]);
-  });
-
-  it('falls back to client-side GoogleGenAI with Google Search citations and key failover on APK when backend URL is not configured', async () => {
-    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', '');
-    vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-key-1', 'AIzaSy-key-2']);
-    globalThis.fetch = vi.fn();
-
-    // 1. Research step (AIzaSy-key-1): returns Google Search grounding from approved medical domain
-    // 2. Answer step (AIzaSy-key-2 via round-robin): hits 503, fails back to AIzaSy-key-1
-    generateContentMock
-      .mockResolvedValueOnce({
-        text: 'Tăng huyết áp là tình trạng áp lực máu lên thành động mạch tăng cao.',
-        candidates: [
-          {
-            groundingMetadata: {
-              groundingChunks: [
-                { web: { title: 'WHO Hypertension', uri: 'https://www.who.int/news-room/fact-sheets/detail/hypertension' } },
-              ],
-            },
-          },
-        ],
-      })
-      .mockRejectedValueOnce({ status: 503, message: '503 Service Unavailable' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({
-          success: true,
-          answer: 'Khám gần nhất tại BV Đại học Y [1].',
-          citations: [],
-        }),
-      });
-
     const result = await askHealthAssistant(
-      'Tăng huyết áp là gì và lần gần nhất khám ở đâu?',
-      { id: 'm1', name: 'Vũ Thị Tú Anh' } as FamilyMember,
-      { timeline: [] } as unknown as HealthProfile,
+      'Question',
+      member,
+      profile,
+      [{ role: 'user', text: 'Previous question' }],
     );
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(generateContentMock).toHaveBeenCalledTimes(3);
-    expect(generateContentMock.mock.calls[0][0]).toBe('AIzaSy-key-1');
-    expect(generateContentMock.mock.calls[1][0]).toBe('AIzaSy-key-2');
-    expect(generateContentMock.mock.calls[2][0]).toBe('AIzaSy-key-1');
-    expect(result.answer).toBe('Khám gần nhất tại BV Đại học Y [1].');
+    expect(result.answer).toBe('Thông tin tham khảo [1].');
     expect(result.citations).toEqual([
-      {
-        title: 'WHO Hypertension',
-        url: 'https://www.who.int/news-room/fact-sheets/detail/hypertension',
-      },
+      { title: 'WHO', url: 'https://www.who.int/health-topics/example' },
     ]);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0])
+      .toBe('https://api.example.com/api/gemini/ask-assistant');
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][1]?.headers)
+      .toMatchObject({ Authorization: 'Bearer firebase-id-token' });
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.clientGeminiKeys).toEqual(['AIzaSy-workspace-key']);
+    expect(body.history).toEqual([{ role: 'user', text: 'Previous question' }]);
+    expect(generateContentMock).not.toHaveBeenCalled();
   });
 
-  it('streams chunks and emits trusted citations via Google Search on APK standalone streamHealthAssistant', async () => {
+  it('routes APK assistant streaming through the backend and forwards trusted citations', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-stream-1', 'AIzaSy-stream-2']);
-    globalThis.fetch = vi.fn();
-
-    generateContentMock.mockResolvedValueOnce({
-      text: 'Hướng dẫn từ Bộ Y tế và WHO về kiểm soát đường huyết.',
-      candidates: [
-        {
-          groundingMetadata: {
-            groundingChunks: [
-              { web: { title: 'CDC Diabetes', uri: 'https://www.cdc.gov/diabetes/basics/diabetes.html' } },
-            ],
-          },
-        },
-      ],
-    });
-
-    generateContentStreamMock.mockResolvedValueOnce((async function* () {
-      yield { text: 'Đường huyết ' };
-      yield { text: 'bình thường [1].' };
-    })());
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-stream-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(sseResponse([
+      { type: 'sources', citations: [{ title: 'CDC', url: 'https://www.cdc.gov/diabetes/basics/index.html' }] },
+      { text: 'Câu trả lời từ backend.' },
+      { type: 'done' },
+    ]));
 
     const chunks: string[] = [];
-    const emittedSources: Array<{ title: string; url: string }> = [];
+    const sources: Array<{ title: string; url: string }> = [];
     const result = await streamHealthAssistant(
-      'Đường huyết bao nhiêu là bình thường?',
-      { id: 'm1', name: 'Trương Anh Tuấn' } as FamilyMember,
-      { timeline: [] } as unknown as HealthProfile,
+      'Câu hỏi y tế',
+      member,
+      profile,
       (chunk) => chunks.push(chunk),
       [],
-      (sources) => emittedSources.push(...sources),
+      (citations) => sources.push(...citations),
     );
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(chunks.join('')).toBe('Đường huyết bình thường [1].');
-    expect(result.answer).toBe('Đường huyết bình thường [1].');
-    expect(emittedSources).toEqual([
-      { title: 'CDC Diabetes', url: 'https://www.cdc.gov/diabetes/basics/diabetes.html' },
+    expect(result.answer).toBe('Câu trả lời từ backend.');
+    expect(chunks.join('')).toBe(result.answer);
+    expect(sources).toEqual([
+      { title: 'CDC', url: 'https://www.cdc.gov/diabetes/basics/index.html' },
     ]);
-    expect(result.citations).toEqual(emittedSources);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0])
+      .toBe('https://api.example.com/api/gemini/ask-assistant');
+    expect(generateContentStreamMock).not.toHaveBeenCalled();
   });
 
-  it('sends multi-page PDFs as a whole file first with key failover on APK client OCR', async () => {
+  it('routes APK OCR through the backend with the same workspace keys', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-ocr-key-1', 'AIzaSy-ocr-key-2']);
-
-    const doc = await PDFDocument.create();
-    for (let i = 0; i < 6; i++) doc.addPage();
-    const pdfBytes = await doc.save();
-    const file = new File([pdfBytes], 'tuanta 2026.pdf', { type: 'application/pdf' });
-
-    // Whole-file 1-pass: key-1 hits 429, key-2 succeeds for all 6 pages at once
-    generateContentMock
-      .mockRejectedValueOnce({ status: 429, message: 'RESOURCE_EXHAUSTED quota' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({
-          title: 'Khám sức khỏe tổng quát 2026',
-          date: '2026-06-15',
-          type: 'comprehensive_exam',
-          patientName: 'Trương Anh Tuấn',
-          diagnoses: ['Gan nhiễm mỡ nhẹ', 'Rối loạn lipid máu'],
-          metrics: [
-            { name: 'Creatinin', standardKey: 'CREATININ', value: 84, unit: 'umol/L' },
-            { name: 'eGFR', standardKey: 'EGFR', value: 92, unit: 'mL/min' },
-          ],
-          pageTexts: ['Trang 1', 'Trang 2', 'Trang 3', 'Trang 4', 'Trang 5', 'Trang 6'],
-        }),
-      });
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-ocr-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(sseResponse([{
+      type: 'complete',
+      extracted: {
+        title: 'Kết quả khám',
+        type: 'test_result',
+        contentIndexPages: ['Nội dung trang 1'],
+        contentIndexComplete: true,
+      },
+      modelUsed: 'gemini-3.5-flash-lite',
+      totalPages: 1,
+      processedPages: 1,
+    }]));
 
     const result = await extractHealthEventWithProgress(
-      file,
-      { id: 'm1', name: 'Staging' } as FamilyMember,
-      undefined,
-      { isAutoDetect: true },
+      new File(['image'], 'report.jpg', { type: 'image/jpeg' }),
+      member,
     );
 
-    expect(generateContentMock).toHaveBeenCalledTimes(2);
-    expect(result.totalPages).toBe(6);
-    expect(result.processedPages).toBe(6);
+    expect(result.extracted.title).toBe('Kết quả khám');
     expect(result.contentIndexComplete).toBe(true);
-    expect(result.contentIndexPages).toHaveLength(6);
-    expect(result.extracted.patientName).toBe('Trương Anh Tuấn');
-    expect(result.extracted.metrics?.length).toBeGreaterThanOrEqual(2);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0])
+      .toBe('https://api.example.com/api/gemini/extract-health-event');
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.clientGeminiKeys).toEqual(['AIzaSy-ocr-key']);
+    expect(generateContentMock).not.toHaveBeenCalled();
   });
 
-  it('automatically falls back to context-preserving PDF chunks when whole-PDF OCR fails with timeout/504', async () => {
+  it('forwards OCR cancellation to the backend request', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-chunk-key-1', 'AIzaSy-chunk-key-2']);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-ocr-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(sseResponse([{
+      type: 'complete',
+      extracted: { title: 'Kết quả khám' },
+      modelUsed: 'gemini-3.5-flash-lite',
+      totalPages: 1,
+      processedPages: 1,
+    }]));
+    const controller = new AbortController();
 
-    const doc = await PDFDocument.create();
-    for (let i = 0; i < 6; i++) doc.addPage();
-    const pdfBytes = await doc.save();
-    const file = new File([pdfBytes], 'tuanta-large-2026.pdf', { type: 'application/pdf' });
-
-    // Whole-file attempt hits 504 on both keys -> triggers fallback into 2 chunks (pages 1-4 & 5-6)
-    generateContentMock
-      .mockRejectedValueOnce({ status: 504, message: '504 Gateway Timeout' })
-      .mockRejectedValueOnce({ status: 504, message: '504 Gateway Timeout' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({
-          title: 'Khám sức khỏe tổng quát 2026',
-          date: '2026-06-15',
-          type: 'comprehensive_exam',
-          patientName: 'Trương Anh Tuấn',
-          diagnoses: ['Gan nhiễm mỡ nhẹ'],
-          metrics: [{ name: 'Creatinin', standardKey: 'CREATININ', value: 84, unit: 'umol/L' }],
-          pageTexts: ['Trang 1', 'Trang 2', 'Trang 3', 'Trang 4'],
-        }),
-      })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({
-          title: 'Khám sức khỏe tổng quát 2026',
-          date: '2026-06-15',
-          type: 'comprehensive_exam',
-          patientName: 'Trương Anh Tuấn',
-          diagnoses: ['Rối loạn lipid máu'],
-          metrics: [{ name: 'eGFR', standardKey: 'EGFR', value: 92, unit: 'mL/min' }],
-          pageTexts: ['Trang 5', 'Trang 6'],
-        }),
-      });
-
-    const result = await extractHealthEventWithProgress(
-      file,
-      { id: 'm1', name: 'Staging' } as FamilyMember,
+    await extractHealthEventWithProgress(
+      new File(['image'], 'report.jpg', { type: 'image/jpeg' }),
+      member,
       undefined,
-      { isAutoDetect: true },
+      { signal: controller.signal },
     );
 
-    expect(generateContentMock).toHaveBeenCalledTimes(4);
-    expect(result.totalPages).toBe(6);
-    expect(result.processedPages).toBe(6);
-    expect(result.contentIndexComplete).toBe(true);
-    expect(result.contentIndexPages).toHaveLength(6);
-    expect(result.extracted.patientName).toBe('Trương Anh Tuấn');
-    expect(result.extracted.metrics?.length).toBeGreaterThanOrEqual(2);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][1]?.signal).toBe(controller.signal);
   });
 
-  it('persists shared GeminiQuotaScheduler state across sequential APK requests so invalid keys are skipped immediately', async () => {
+  it('routes comprehensive analysis to the backend with the selected model', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-bad-key-1', 'AIzaSy-good-key-2']);
-    globalThis.fetch = vi.fn();
-
-    // Ask 1: research tries bad-key-1 (400 API_KEY_INVALID -> excluded permanently), falls back to good-key-2,
-    // then answer skips bad-key-1 and runs directly on good-key-2.
-    // Ask 2: both research and answer skip bad-key-1 immediately and run on good-key-2.
-    generateContentMock
-      .mockRejectedValueOnce({ status: 400, message: 'API_KEY_INVALID: bad key' })
-      .mockResolvedValueOnce({ text: 'Tóm tắt tham khảo 1' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({ success: true, answer: 'Trả lời 1', citations: [] }),
-      })
-      .mockResolvedValueOnce({ text: 'Tóm tắt tham khảo 2' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({ success: true, answer: 'Trả lời 2', citations: [] }),
-      });
-
-    const first = await askHealthAssistant(
-      'Câu hỏi 1',
-      { id: 'm1', name: 'Vũ Thị Tú Anh' } as FamilyMember,
-      { timeline: [] } as unknown as HealthProfile,
-    );
-    const second = await askHealthAssistant(
-      'Câu hỏi 2',
-      { id: 'm1', name: 'Vũ Thị Tú Anh' } as FamilyMember,
-      { timeline: [] } as unknown as HealthProfile,
-    );
-
-    expect(first.answer).toBe('Trả lời 1');
-    expect(second.answer).toBe('Trả lời 2');
-    expect(generateContentMock).toHaveBeenCalledTimes(5);
-    expect(generateContentMock.mock.calls[0][0]).toBe('AIzaSy-bad-key-1');
-    expect(generateContentMock.mock.calls[1][0]).toBe('AIzaSy-good-key-2');
-    expect(generateContentMock.mock.calls[2][0]).toBe('AIzaSy-good-key-2');
-    expect(generateContentMock.mock.calls[3][0]).toBe('AIzaSy-good-key-2');
-    expect(generateContentMock.mock.calls[4][0]).toBe('AIzaSy-good-key-2');
-  });
-
-  it('uses gemini-4-hydrogen directly on APK when client keys exist even if VITE_BACKEND_URL is baked in', async () => {
-    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
-    vi.stubEnv('VITE_BACKEND_URL', 'https://baked-backend.example.com');
-    vi.stubEnv('VITE_APP_MODE', 'apk');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-apk-4h-key']);
-    globalThis.fetch = vi.fn();
-
-    generateContentMock.mockResolvedValueOnce({
-      text: JSON.stringify({
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-analysis-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      result: {
         healthScore: 88,
-        overallAssessment: 'Tổng quan ổn định.',
+        overallAssessment: 'Đánh giá tổng quát.',
         crossCorrelations: [],
         velocityTrends: [],
         chronicSurveillance: [],
@@ -387,49 +247,39 @@ describe('askHealthAssistant API routing', () => {
           specialistReferrals: [],
           timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] },
         },
-      }),
-    });
+      },
+      modelUsed: 'gemini-4-hydrogen',
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 200,
+    }));
 
-    const analysis = await analyzeComprehensiveHealth(
-      { id: 'm1', name: 'Trương Anh Tuấn' } as FamilyMember,
-      { timeline: [], metrics: [] } as unknown as HealthProfile,
-    );
+    const analysis = await analyzeComprehensiveHealth(member, profile);
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(generateContentMock).toHaveBeenCalledTimes(1);
-    const callArgs = generateContentMock.mock.calls[0][1] as { model: string };
-    expect(callArgs.model).toBe('gemini-4-hydrogen');
     expect(analysis.modelUsed).toBe('gemini-4-hydrogen');
     expect(analysis.result.healthScore).toBe(88);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0])
+      .toBe('https://api.example.com/api/gemini/analyze-comprehensive');
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.model).toBe('gemini-4-hydrogen');
+    expect(body.clientGeminiKeys).toEqual(['AIzaSy-analysis-key']);
+    expect(generateContentMock).not.toHaveBeenCalled();
   });
 
-  it('falls back to client-side keys on Web if backend returns 502 HTML while Tài nguyên AI has keys', async () => {
-    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+  it('does not bypass the central backend when a configured API returns HTML', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_APP_MODE', 'apk');
     vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
-    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-web-fallback-key']);
-    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<html>502 Bad Gateway</html>', {
-      status: 502,
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-device-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<html>Not found</html>', {
+      status: 404,
       headers: { 'Content-Type': 'text/html' },
     }));
 
-    generateContentMock
-      .mockResolvedValueOnce({ text: 'Thông tin tổng hợp' })
-      .mockResolvedValueOnce({
-        text: JSON.stringify({
-          success: true,
-          answer: 'Trả lời qua fallback client key.',
-          citations: [],
-        }),
-      });
+    await expect(askHealthAssistant('Question', member, profile))
+      .rejects.toThrow('trả về HTML thay vì JSON (HTTP 404)');
 
-    const result = await askHealthAssistant(
-      'Hỏi thử',
-      { id: 'm1', name: 'Vũ Thị Tú Anh' } as FamilyMember,
-      { timeline: [] } as unknown as HealthProfile,
-    );
-
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-    expect(result.answer).toBe('Trả lời qua fallback client key.');
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(generateContentMock).not.toHaveBeenCalled();
   });
 });
-

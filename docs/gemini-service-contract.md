@@ -4,7 +4,7 @@
 
 The assistant, summary, refinement, comprehensive analysis, OCR, and API-key validation use the Express `/api/gemini/*` gateway. Web builds use same-origin requests when served by the backend, or `VITE_BACKEND_URL` when the frontend and API are deployed separately. Android APK/AAB builds require `VITE_BACKEND_URL` to be set to the HTTPS origin of the deployed backend; release builds read it from the GitHub Actions secret with the same name.
 
-The app loads the active workspace's keys from `ai-resources.json` in Google Drive (or the local cache for a local workspace) and sends them with each Gemini request. The backend uses only those request keys; it does not fall back to `GEMINI_API_KEYS` or `GEMINI_API_KEY` environment variables. Task-specific prompts and response handling remain separate, while key validation, project selection, quota scheduling, and provider failover share the same backend implementation. OCR reuses one request context across all PDF batches. A network connection, a reachable backend, and at least one key in **Tài nguyên AI** are required.
+The app loads the active workspace's keys from `ai-resources.json` in Google Drive (or the local cache for a local workspace) and sends them with each Gemini request. Web and Android clients must use the backend; they never execute Gemini directly or fall back to a device-local scheduler. The backend uses the supplied request keys and does not fall back to `GEMINI_API_KEYS` or `GEMINI_API_KEY` environment variables. Task-specific prompts and response handling remain separate, while key validation, project selection, quota scheduling, and provider failover share the same backend implementation. OCR reuses one request context across all PDF batches. A network connection, a reachable backend, and at least one key in **Tài nguyên AI** are required.
 
 ## Key-sharing and privacy warning
 
@@ -20,9 +20,11 @@ The old `stk_gemini_api_keys_pool` entry is cleared from secure storage, Prefere
 |---|---|
 | OCR/digitization | `gemini-3.5-flash-lite` |
 | Assistant, summary, refinement | `gemini-3.5-flash-lite` |
-| Comprehensive analysis | `gemini-3.6-flash` |
+| Comprehensive analysis | `gemini-4-hydrogen` |
 
-Each request gets a quota scheduler built from its workspace keys; OCR shares that scheduler across its sequential PDF batches. The scheduler is in-memory and request-scoped, not a cross-request or cross-device quota ledger; Google provider errors such as 429 remain authoritative.
+The backend reuses an in-memory RPM scheduler for each normalized workspace key pool: `gemini-3.5-flash-lite` is limited to 15 requests per minute per key, and `gemini-4-hydrogen` to 5. There is no locally estimated daily quota counter. A key is skipped for the current request only after Gemini explicitly identifies an RPD/daily limit; the request reports daily quota exhaustion only after every configured key returns that daily-limit error. Generic 429/rate-limit responses are treated as temporary rate limits, not proof of RPD exhaustion. Scheduler wait timeouts indicate local RPM pressure and are reported separately from Google API errors. The in-memory scheduler is not shared across multiple backend processes or replicas.
+
+The backend admission queue allows up to six active Gemini requests and twelve waiting requests per verified Firebase UID (or client IP when no valid UID is available). Waiting requests are cancelled if the client disconnects and time out after two minutes; a full or expired queue returns HTTP 429. Each key is limited to one active provider request at a time, independently of its RPM window.
 
 ## Health assistant context and medical sources
 
@@ -34,7 +36,9 @@ The assistant is limited to health topics, must not make definitive diagnoses or
 
 ## OCR and multi-page PDFs
 
-The client saves the original document to the connected workspace (or to app-private storage in offline-first native mode), then sends OCR requests through the shared backend gateway. PDFs are split locally into sequential batches of up to five pages; a PDF may contain up to 60 pages. Batch results are merged in page order with de-duplicated diagnoses, medications, metrics, and page-level text indexes. The merged result is stored as one timeline event per source file.
+The client saves the original document to the connected workspace (or to app-private storage in offline-first native mode), then sends OCR requests through the shared backend gateway. Up to six independent files may be OCR-processed concurrently, with a 30 MiB aggregate input-size budget to limit mobile memory use; each file's subject matching, timeline merge, and profile save remain ordered through the upload queue. One PDF is never split across simultaneous requests: whole-file OCR is attempted first, and any fallback batches run sequentially while preferring the same key. PDFs may contain up to 60 pages. Batch results are merged in page order with de-duplicated diagnoses, medications, metrics, and page-level text indexes. The merged result is stored as one timeline event per source file.
+
+After queued OCR saves, each changed member profile is automatically normalized, deduplicated, and summarized. A previously saved comprehensive analysis is cleared when its timeline changes; the automatic step does not rerun it, so the four-layer analysis remains a user-initiated action.
 
 If OCR identifies a subject, the client performs the configured member-matching flow before saving. If the subject name is missing or does not match, the user can manually select an existing member or create a new member. The original remains unresolved until saving succeeds. A batch failure is surfaced explicitly and the original remains available for retry/manual entry.
 

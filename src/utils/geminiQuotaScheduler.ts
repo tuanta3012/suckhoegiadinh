@@ -7,15 +7,10 @@ export interface GeminiProject {
 
 export interface GeminiQuota {
   rpm: number;
-  rpd: number;
-  maxConcurrent: number;
 }
 
 interface UsageWindow {
   minuteRequests: number[];
-  day: string;
-  dayRequests: number;
-  active: number;
   cooldownUntil: number;
 }
 
@@ -27,8 +22,29 @@ export function parseGeminiProjects(
   return keys.map((apiKey, index) => ({ id: `account-${index + 1}`, apiKey }));
 }
 
-function utcDay(timestamp: number): string {
-  return new Date(timestamp).toISOString().slice(0, 10);
+function waitForCapacity(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  if (signal.aborted) {
+    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Gemini request was cancelled.'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason instanceof Error ? signal.reason : new Error('Gemini request was cancelled.'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export class GeminiQuotaScheduler {
@@ -37,8 +53,12 @@ export class GeminiQuotaScheduler {
   private readonly disabledProjects = new Set<string>();
   private readonly disabledProjectModels = new Set<string>();
   private readonly projectCooldownUntil = new Map<string, number>();
+  private readonly activeRequests = new Map<string, number>();
 
-  constructor(private readonly projects: GeminiProject[]) {}
+  constructor(
+    private readonly projects: GeminiProject[],
+    private readonly maxConcurrentPerProject = 1,
+  ) {}
 
   getProjects(): readonly GeminiProject[] {
     return this.projects;
@@ -51,10 +71,14 @@ export class GeminiQuotaScheduler {
     excludedProjectIds: ReadonlySet<string>,
     timeoutMs: number,
     preferredProjectId?: string,
+    signal?: AbortSignal,
   ): Promise<{ project: GeminiProject; release: () => void }> {
     const startedAt = Date.now();
     const queueKey = `${task}:${model}`;
     while (Date.now() - startedAt < timeoutMs) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error('Gemini request was cancelled.');
+      }
       const candidates = this.getOrderedCandidates(queueKey).filter((project) =>
         (!preferredProjectId || project.id === preferredProjectId) &&
         !excludedProjectIds.has(project.id) &&
@@ -65,25 +89,23 @@ export class GeminiQuotaScheduler {
         throw new Error(`No available projects remain for ${model}.`);
       }
       let nextWaitMs = timeoutMs - (Date.now() - startedAt);
-      let hasDailyQuota = false;
-      let blockedByConcurrency = false;
       let blockedByCapacity = false;
 
       for (const project of candidates) {
         const usage = this.getUsage(project.id, model);
         const now = Date.now();
         usage.minuteRequests = usage.minuteRequests.filter((timestamp) => now - timestamp < 60_000);
-        if (usage.day !== utcDay(now)) {
-          usage.day = utcDay(now);
-          usage.dayRequests = 0;
-        }
-        if (usage.dayRequests >= quota.rpd) continue;
-        hasDailyQuota = true;
 
         const projectCooldownWait = Math.max(0, (this.projectCooldownUntil.get(project.id) || 0) - now);
         if (projectCooldownWait > 0) {
           blockedByCapacity = true;
           nextWaitMs = Math.min(nextWaitMs, projectCooldownWait);
+          continue;
+        }
+
+        if ((this.activeRequests.get(project.id) || 0) >= this.maxConcurrentPerProject) {
+          blockedByCapacity = true;
+          nextWaitMs = Math.min(nextWaitMs, 100);
           continue;
         }
 
@@ -96,76 +118,25 @@ export class GeminiQuotaScheduler {
           nextWaitMs = Math.min(nextWaitMs, Math.max(requestWait, cooldownWait));
           continue;
         }
-        if (usage.active >= quota.maxConcurrent) {
-          blockedByConcurrency = true;
-          nextWaitMs = Math.min(nextWaitMs, 250);
-          continue;
-        }
 
         usage.minuteRequests.push(now);
-        usage.dayRequests++;
-        usage.active++;
+        this.activeRequests.set(project.id, (this.activeRequests.get(project.id) || 0) + 1);
+        let released = false;
         return {
           project,
           release: () => {
-            usage.active = Math.max(0, usage.active - 1);
+            if (released) return;
+            released = true;
+            const activeCount = this.activeRequests.get(project.id) || 0;
+            if (activeCount <= 1) this.activeRequests.delete(project.id);
+            else this.activeRequests.set(project.id, activeCount - 1);
           },
         };
       }
-
-      if (!hasDailyQuota) {
-        throw new Error(`No daily ${task} quota remains for ${model} in any configured Gemini project.`);
-      }
-      if (!blockedByConcurrency && !blockedByCapacity) {
+      if (!blockedByCapacity) {
         throw new Error(`No RPM capacity remains for ${model} in the configured projects.`);
       }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(nextWaitMs, 1_000)));
-    }
-
-    // Fallback: If timeout elapsed but there are viable candidates with remaining daily quota,
-    // available RPM capacity, and available concurrency that were only held back by a software cooldown,
-    // bypass the cooldown on the best candidate (lowest remaining cooldown wait) and proceed.
-    const finalCandidates = this.getOrderedCandidates(queueKey).filter((project) =>
-      (!preferredProjectId || project.id === preferredProjectId) &&
-      !excludedProjectIds.has(project.id) &&
-      !this.disabledProjects.has(project.id) &&
-      !this.disabledProjectModels.has(`${project.id}:${model}`),
-    );
-    const viableCandidates = finalCandidates.filter((project) => {
-      const usage = this.getUsage(project.id, model);
-      const now = Date.now();
-      usage.minuteRequests = usage.minuteRequests.filter((timestamp) => now - timestamp < 60_000);
-      return (
-        usage.dayRequests < quota.rpd &&
-        usage.active < quota.maxConcurrent &&
-        usage.minuteRequests.length < quota.rpm
-      );
-    });
-
-    if (viableCandidates.length > 0) {
-      viableCandidates.sort((a, b) => {
-        const usageA = this.getUsage(a.id, model);
-        const usageB = this.getUsage(b.id, model);
-        const cdA = Math.max(usageA.cooldownUntil, this.projectCooldownUntil.get(a.id) || 0);
-        const cdB = Math.max(usageB.cooldownUntil, this.projectCooldownUntil.get(b.id) || 0);
-        return cdA - cdB;
-      });
-
-      const selected = viableCandidates[0];
-      const usage = this.getUsage(selected.id, model);
-      usage.cooldownUntil = 0;
-      this.projectCooldownUntil.delete(selected.id);
-
-      const now = Date.now();
-      usage.minuteRequests.push(now);
-      usage.dayRequests++;
-      usage.active++;
-      return {
-        project: selected,
-        release: () => {
-          usage.active = Math.max(0, usage.active - 1);
-        },
-      };
+      await waitForCapacity(Math.max(1, Math.min(nextWaitMs, 1_000)), signal);
     }
 
     throw new Error(`Timed out waiting for an available ${task} Gemini quota slot.`);
@@ -181,12 +152,6 @@ export class GeminiQuotaScheduler {
       projectId,
       Math.max(this.projectCooldownUntil.get(projectId) || 0, Date.now() + cooldownMs),
     );
-  }
-
-  markDailyQuotaExhausted(projectId: string, model: string): void {
-    const usage = this.getUsage(projectId, model);
-    usage.day = utcDay(Date.now());
-    usage.dayRequests = Number.MAX_SAFE_INTEGER;
   }
 
   markProjectUnavailable(projectId: string): void {
@@ -210,13 +175,11 @@ export class GeminiQuotaScheduler {
     if (!usage) {
       usage = {
         minuteRequests: [],
-        day: utcDay(Date.now()),
-        dayRequests: 0,
-        active: 0,
         cooldownUntil: 0,
       };
       this.usage.set(key, usage);
     }
     return usage;
   }
+
 }

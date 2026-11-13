@@ -241,6 +241,33 @@ interface QueueItemContext {
   runId: number;
   itemToken: string;
 }
+type OcrPrefetchResult = Awaited<ReturnType<typeof extractHealthEventWithProgress>>;
+interface OcrPrefetchEntry {
+  controller: AbortController;
+  promise: Promise<OcrPrefetchResult>;
+  resolve: (result: OcrPrefetchResult) => void;
+  reject: (error: Error) => void;
+}
+interface OcrPrefetchJob {
+  itemToken: string;
+  file: File;
+  member: FamilyMember;
+  isAutoDetect: boolean;
+  entry: OcrPrefetchEntry;
+}
+const MAX_PARALLEL_OCR_FILES = 6;
+const MAX_PARALLEL_OCR_FILE_BYTES = 30 * 1024 * 1024;
+
+function createOcrPrefetchEntry(): OcrPrefetchEntry {
+  let resolve!: (result: OcrPrefetchResult) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<OcrPrefetchResult>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  void promise.catch(() => undefined);
+  return { controller: new AbortController(), promise, resolve, reject };
+}
 interface DigitizationDraft {
   source: DriveFile;
   extracted: Partial<HealthEvent>;
@@ -769,6 +796,12 @@ export function HealthDashboard({
   const uploadQueueRef = useRef<File[]>([]);
   const pendingUploadIdsRef = useRef<Array<string | undefined>>([]);
   const processingPendingUploadIdsRef = useRef(new Set<string>());
+  const queueOcrPrefetchEntriesRef = useRef(new Map<string, OcrPrefetchEntry>());
+  const queueOcrPrefetchJobsRef = useRef<OcrPrefetchJob[]>([]);
+  const activeQueueOcrPrefetchesRef = useRef(0);
+  const activeQueueOcrPrefetchBytesRef = useRef(0);
+  const activeQueuePrimaryFileSizeRef = useRef(0);
+  const updatedQueueMemberIdsRef = useRef(new Set<string>());
   const pendingUploadDrainInFlightRef = useRef(false);
   const syncOnResumeInFlightRef = useRef(false);
   const pickedMemberIdForBatchRef = useRef<string | undefined>(undefined);
@@ -900,77 +933,88 @@ export function HealthDashboard({
       showToast('Không thể xóa trạng thái khôi phục OCR khỏi thiết bị.', 'error');
     }
   }
-  async function runFamilyDoctorSummaryAfterQueue() {
-    const targetMemberId = selectedMemberIdRef.current || selectedMemberId;
-    const targetMember = workspaceRef.current?.family.members.find(m => m.id === targetMemberId) || selectedMember;
-    if (!targetMember) return;
-    let currentProfile = profilesRef.current[targetMember.id] || profiles[targetMember.id];
-    if (!currentProfile || !currentProfile.timeline || currentProfile.timeline.length === 0) return;
-    const pipelineTimer = digitizationLogger.startTimer();
-    digitizationLogger.log(
-      'info',
-      'auto_pipeline_start',
-      `Bắt đầu chuỗi phân tích tự động (Chuẩn hóa danh pháp + Phân tích 4 lớp y khoa) sau hàng đợi cho ${targetMember.name} (${currentProfile.timeline.length} sự kiện)`,
-      { memberId: targetMember.id, memberName: targetMember.name, timelineCount: currentProfile.timeline.length }
-    );
-    showToast(
-      `Đang tự động chuẩn hóa danh pháp & phân tích y khoa 4 lớp cho ${targetMember.name}...`,
-      'info',
-    );
+  async function runFamilyDoctorSummaryAfterQueue(memberIds: string[]) {
+    const updatedMemberIds = Array.from(new Set(memberIds));
+    if (updatedMemberIds.length === 0) return;
     setIsSummarizing(true);
+    const failedMembers: string[] = [];
+    let consolidatedCount = 0;
     try {
-      // 1. Tự động Chuẩn hóa, phân loại & gộp sự kiện trùng trong cùng đợt khám
-      const { organizedTimeline } = await refineAndOrganizeMemberData(
-        targetMember,
-        currentProfile.timeline,
-      );
-      const { timeline: consolidatedTimeline } = consolidateTimelineEvents(organizedTimeline);
+      for (const memberId of updatedMemberIds) {
+        const targetMember = workspaceRef.current?.family.members.find((member) => member.id === memberId);
+        const currentProfile = profilesRef.current[memberId] || profiles[memberId];
+        if (!targetMember || !currentProfile?.timeline.length) continue;
 
-      const refinedProfile: HealthProfile = {
-        ...currentProfile,
-        timeline: consolidatedTimeline,
-        summary: summarizeTimeline(consolidatedTimeline, currentProfile.summary.narrative),
-      };
-      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-4-hydrogen
-      const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
-      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-4-hydrogen');
-      
-      const updated: HealthProfile = {
-        ...refinedProfile,
-        summary: { ...refinedProfile.summary, narrative },
-        aiDeepAnalysis: deepRes.result,
-        aiAnalysis: deepRes.aiAnalysis,
-        updatedAt: new Date().toISOString(),
-      };
-      
-      const saveTimer = digitizationLogger.startTimer();
-      const saved = await saveHealthProfile(targetMember.profileFileId, updated);
-      const saveMs = saveTimer();
-      profilesRef.current = { ...profilesRef.current, [targetMember.id]: saved };
-      setProfiles((prev) => ({ ...prev, [targetMember.id]: saved }));
-      const totalPipelineMs = pipelineTimer();
-      digitizationLogger.log(
-        'info',
-        'auto_pipeline_complete',
-        `Hoàn tất thành công toàn bộ chuỗi phân tích tự động cho ${targetMember.name} trong ${totalPipelineMs}ms (lưu Drive ${saveMs}ms)!`,
-        { memberId: targetMember.id, totalPipelineMs, saveMs },
-        totalPipelineMs
-      );
-      showToast(`Đã tự động chuẩn hóa & cập nhật phân tích 4 lớp AI lên trang chính của ${targetMember.name}!`, 'success');
-    } catch (error) {
-      const totalPipelineMs = pipelineTimer();
-      digitizationLogger.log(
-        'error',
-        'auto_pipeline_error',
-        `Lỗi chuỗi phân tích tự động cho ${targetMember.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
-        { error: error instanceof Error ? error.message : 'Unknown' },
-        totalPipelineMs
-      );
-      console.warn('[Auto Family Doctor Summary Warning]:', error);
-      showToast(
-        error instanceof Error ? error.message : 'Lỗi khi tự động phân tích chuyên sâu.',
-        'error',
-      );
+        const pipelineTimer = digitizationLogger.startTimer();
+        try {
+          digitizationLogger.log(
+            'info',
+            'auto_profile_consolidation_start',
+            `Bắt đầu chuẩn hóa hồ sơ sau OCR cho ${targetMember.name} (${currentProfile.timeline.length} sự kiện)`,
+            { memberId, timelineCount: currentProfile.timeline.length },
+          );
+          showToast(`Đang chuẩn hóa và tổng hợp hồ sơ của ${targetMember.name}...`, 'info');
+
+          const { organizedTimeline } = await refineAndOrganizeMemberData(
+            targetMember,
+            currentProfile.timeline,
+          );
+          const originalIds = new Set(currentProfile.timeline.map((event) => event.id));
+          const proposedIds = organizedTimeline.map((event) => event.id);
+          if (
+            organizedTimeline.length !== originalIds.size ||
+            new Set(proposedIds).size !== originalIds.size ||
+            proposedIds.some((id) => !originalIds.has(id))
+          ) {
+            throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc; chưa ghi đè dữ liệu.');
+          }
+
+          const { timeline } = consolidateTimelineEvents(organizedTimeline);
+          const refinedProfile: HealthProfile = {
+            ...currentProfile,
+            timeline,
+            summary: summarizeTimeline(timeline, currentProfile.summary.narrative),
+          };
+          const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
+          const updatedProfile: HealthProfile = {
+            ...refinedProfile,
+            summary: { ...refinedProfile.summary, narrative },
+            updatedAt: new Date().toISOString(),
+          };
+          const saveTimer = digitizationLogger.startTimer();
+          const saved = await saveHealthProfile(targetMember.profileFileId, updatedProfile);
+          const saveMs = saveTimer();
+          profilesRef.current = { ...profilesRef.current, [memberId]: saved };
+          setProfiles((previous) => ({ ...previous, [memberId]: saved }));
+          consolidatedCount++;
+          const totalPipelineMs = pipelineTimer();
+          digitizationLogger.log(
+            'info',
+            'auto_profile_consolidation_complete',
+            `Đã chuẩn hóa và tổng hợp hồ sơ ${targetMember.name} trong ${totalPipelineMs}ms.`,
+            { memberId, totalPipelineMs, saveMs, eventCount: saved.timeline.length },
+            totalPipelineMs,
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Không thể tổng hợp hồ sơ.';
+          failedMembers.push(targetMember.name);
+          digitizationLogger.log(
+            'error',
+            'auto_profile_consolidation_error',
+            `Không thể chuẩn hóa hồ sơ ${targetMember.name}: ${message}`,
+            { memberId, error: message },
+            pipelineTimer(),
+          );
+        }
+      }
+      if (failedMembers.length > 0) {
+        showToast(
+          `OCR đã lưu xong; chưa thể tự động tổng hợp hồ sơ: ${failedMembers.join(', ')}. Bạn có thể thử chuẩn hóa lại sau.`,
+          'error',
+        );
+      } else if (consolidatedCount > 0) {
+        showToast('Đã tự động chuẩn hóa, khử trùng lặp và cập nhật tóm tắt các hồ sơ vừa thay đổi.', 'success');
+      }
     } finally {
       setIsSummarizing(false);
     }
@@ -992,6 +1036,73 @@ export function HealthDashboard({
       progressPercent,
     });
   }
+  function drainQueueOcrPrefetchJobs() {
+    const activeQueueStatus = queueStatusRef.current;
+    const reservesActiveFileSlot = !activeQueueStatus || activeQueueStatus.current === 1;
+    const maxPrefetches = MAX_PARALLEL_OCR_FILES - (reservesActiveFileSlot ? 1 : 0);
+    while (activeQueueOcrPrefetchesRef.current < maxPrefetches) {
+      const reservedBytes = reservesActiveFileSlot ? activeQueuePrimaryFileSizeRef.current : 0;
+      const availableJobIndex = queueOcrPrefetchJobsRef.current.findIndex((job) =>
+        activeQueueOcrPrefetchBytesRef.current + reservedBytes + job.file.size <= MAX_PARALLEL_OCR_FILE_BYTES,
+      );
+      if (availableJobIndex < 0) break;
+      const [job] = queueOcrPrefetchJobsRef.current.splice(availableJobIndex, 1);
+      if (job.entry.controller.signal.aborted) continue;
+      activeQueueOcrPrefetchesRef.current++;
+      activeQueueOcrPrefetchBytesRef.current += job.file.size;
+      void extractHealthEventWithProgress(
+        job.file,
+        job.member,
+        undefined,
+        { isAutoDetect: job.isAutoDetect, signal: job.entry.controller.signal },
+      )
+        .then(job.entry.resolve)
+        .catch((error: unknown) => {
+          job.entry.reject(error instanceof Error ? error : new Error(String(error)));
+        })
+        .finally(() => {
+          activeQueueOcrPrefetchesRef.current = Math.max(0, activeQueueOcrPrefetchesRef.current - 1);
+          activeQueueOcrPrefetchBytesRef.current = Math.max(
+            0,
+            activeQueueOcrPrefetchBytesRef.current - job.file.size,
+          );
+          drainQueueOcrPrefetchJobs();
+        });
+    }
+  }
+  function startQueueOcrPrefetch(
+    files: File[],
+    runId: number,
+    member: FamilyMember,
+    isAutoDetect: boolean,
+  ) {
+    for (const [index, file] of files.slice(1).entries()) {
+      const itemToken = `${runId}:${index + 2}`;
+      const entry = createOcrPrefetchEntry();
+      queueOcrPrefetchEntriesRef.current.set(itemToken, entry);
+      queueOcrPrefetchJobsRef.current.push({ itemToken, file, member, isAutoDetect, entry });
+    }
+    drainQueueOcrPrefetchJobs();
+  }
+  function cancelPrefetchedOcr(itemToken: string) {
+    const entry = queueOcrPrefetchEntriesRef.current.get(itemToken);
+    if (!entry) return;
+    queueOcrPrefetchEntriesRef.current.delete(itemToken);
+    queueOcrPrefetchJobsRef.current = queueOcrPrefetchJobsRef.current.filter(
+      (job) => job.itemToken !== itemToken,
+    );
+    entry.controller.abort(new Error('Queued OCR was cancelled.'));
+    entry.reject(new Error('Queued OCR was cancelled.'));
+  }
+  function cancelAllQueueOcrPrefetches() {
+    for (const entry of queueOcrPrefetchEntriesRef.current.values()) {
+      entry.controller.abort(new Error('Queued OCR was cancelled.'));
+      entry.reject(new Error('Queued OCR was cancelled.'));
+    }
+    queueOcrPrefetchEntriesRef.current.clear();
+    queueOcrPrefetchJobsRef.current = [];
+    activeQueuePrimaryFileSizeRef.current = 0;
+  }
   function processNextInQueue(expectedContext?: QueueItemContext) {
     if (!expectedContext) return;
     if (
@@ -1001,6 +1112,7 @@ export function HealthDashboard({
     ) {
       return;
     }
+    queueOcrPrefetchEntriesRef.current.delete(expectedContext.itemToken);
     completedQueueTokensRef.current.add(expectedContext.itemToken);
     if (queueErrorAdvanceTimerRef.current !== null) {
       window.clearTimeout(queueErrorAdvanceTimerRef.current);
@@ -1022,6 +1134,8 @@ export function HealthDashboard({
       const nextCurrent = currentStatus.current + 1;
       const nextStatus = { current: nextCurrent, total: currentStatus.total };
       updateQueueStatus(nextStatus);
+      activeQueuePrimaryFileSizeRef.current = 0;
+      drainQueueOcrPrefetchJobs();
       const nextItemToken = `${expectedContext.runId}:${nextCurrent}`;
       activeQueueItemTokenRef.current = nextItemToken;
       const nextQueueContext: QueueItemContext = {
@@ -1045,6 +1159,9 @@ export function HealthDashboard({
       const finalTotal = currentStatus.total || 1;
       const failedCount = batchFailureCountRef.current;
       const completedCount = Math.max(0, finalTotal - failedCount);
+      const updatedMemberIds = Array.from(updatedQueueMemberIdsRef.current);
+      updatedQueueMemberIdsRef.current.clear();
+      cancelAllQueueOcrPrefetches();
       uploadQueueRef.current = [];
       pendingUploadIdsRef.current = [];
       setUploadQueue([]);
@@ -1077,6 +1194,9 @@ export function HealthDashboard({
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
       batchStagingMemberIdRef.current = undefined;
+      if (updatedMemberIds.length > 0) {
+        void runFamilyDoctorSummaryAfterQueue(updatedMemberIds);
+      }
     }
   }
   async function stageFilesAndStart(
@@ -1246,11 +1366,13 @@ export function HealthDashboard({
     activeQueueRunIdRef.current = runId;
     activeQueueItemTokenRef.current = firstItemToken;
     completedQueueTokensRef.current.clear();
+    updatedQueueMemberIdsRef.current.clear();
     const firstQueueContext: QueueItemContext = { runId, itemToken: firstItemToken };
     uploadQueueRef.current = files.slice(1);
     pendingUploadIdsRef.current = queuedIds.slice(1);
     setUploadQueue(files.slice(1));
     const initialStatus = { current: 1, total: files.length };
+    activeQueuePrimaryFileSizeRef.current = files[0].size;
     batchFailureCountRef.current = 0;
     queueStartedAtRef.current = Date.now();
     setQueueElapsedSeconds(0);
@@ -1269,6 +1391,12 @@ export function HealthDashboard({
       memberName: targetMember.name,
       phase: 'Chuẩn bị',
     });
+    startQueueOcrPrefetch(
+      files,
+      runId,
+      targetMember,
+      pickedMemberIdForBatchRef.current === undefined,
+    );
     void beginDigitization(files[0], {
       memberId: memberId || targetMember.id,
       pendingUploadId: firstPendingId,
@@ -2952,6 +3080,9 @@ export function HealthDashboard({
       if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
       return;
     }
+    const prefetchEntry = queueContext
+      ? queueOcrPrefetchEntriesRef.current.get(queueContext.itemToken)
+      : undefined;
     beginUploadOp(opToken);
     const currentWorkspace = workspaceRef.current;
     const isLocalOnlyWorkspace =
@@ -3171,6 +3302,7 @@ export function HealthDashboard({
 
           const eventIsSaved = Boolean(match.linkedEvent);
           if (match.existingSource.status === 'processed' && eventIsSaved) {
+            if (queueContext) cancelPrefetchedOcr(queueContext.itemToken);
             const memberMsg = match.memberName && match.memberName !== effectiveMember.name
               ? `trong hồ sơ của ${match.memberName}`
               : `trong hồ sơ của ${effectiveMember.name}`;
@@ -3209,20 +3341,22 @@ export function HealthDashboard({
     if (canPreflightContainment) {
       try {
         notifyBatchProgress(file.name, effectiveMember.name, 'Đang đối chiếu OCR trước khi lưu raw', 30);
-        preExtractedResult = await extractHealthEventWithProgress(
-          processedFile,
-          effectiveMember,
-          (update) => {
-            applyExtractionProgress(update);
-            notifyBatchProgress(
-              file.name,
-              effectiveMember.name,
-              EXTRACTION_NOTIFICATION_PHASES[update.stage],
-              update.progressPercent,
+        preExtractedResult = prefetchEntry
+          ? await prefetchEntry.promise
+          : await extractHealthEventWithProgress(
+              processedFile,
+              effectiveMember,
+              (update) => {
+                applyExtractionProgress(update);
+                notifyBatchProgress(
+                  file.name,
+                  effectiveMember.name,
+                  EXTRACTION_NOTIFICATION_PHASES[update.stage],
+                  update.progressPercent,
+                );
+              },
+              { isAutoDetect: isAutoDetectMode },
             );
-          },
-          { isAutoDetect: isAutoDetectMode },
-        );
         const { hash } = await computeFileFingerprint(processedFile);
         const containmentMember = (
           isAutoDetectMode && isRecognizablePatientName(preExtractedResult.extracted.patientName)
@@ -3299,7 +3433,14 @@ export function HealthDashboard({
           progressPercent: 35,
           progressMessage: 'Tài liệu đã lưu an toàn trên thiết bị. Đang số hóa bằng Gemini...',
         }));
-        await runDocumentExtraction(processedFile, effectiveMember, localFile.id, preExtractedResult, queueContext);
+        await runDocumentExtraction(
+          processedFile,
+          effectiveMember,
+          localFile.id,
+          preExtractedResult,
+          queueContext,
+          prefetchEntry?.promise,
+        );
       } else if (existingDriveFileId) {
         // Tệp đã có trên Google Drive: Tái sử dụng tệp gốc, KHÔNG tạo bản sao trùng lặp trên Drive
         digitizationLogger.log(
@@ -3339,7 +3480,14 @@ export function HealthDashboard({
         } else if (pendingUploadId) {
           await completePendingUpload(pendingUploadId);
         }
-        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId, preExtractedResult, queueContext);
+        await runDocumentExtraction(
+          processedFile,
+          effectiveMember,
+          existingDriveFileId,
+          preExtractedResult,
+          queueContext,
+          prefetchEntry?.promise,
+        );
         const reusedUploaded: DriveFile = {
           ...(options?.uploadedFile || {}),
           id: existingDriveFileId,
@@ -3392,7 +3540,14 @@ export function HealthDashboard({
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
         await completePendingUpload(pendingUploadId);
-        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id, preExtractedResult, queueContext);
+        await runDocumentExtraction(
+          processedFile,
+          effectiveMember,
+          uploaded.id,
+          preExtractedResult,
+          queueContext,
+          prefetchEntry?.promise,
+        );
       }
     } catch (error) {
       batchFailureCountRef.current += 1;
@@ -3525,8 +3680,9 @@ export function HealthDashboard({
     file: File,
     member: FamilyMember,
     driveFileId?: string,
-    preExtractedResult?: Awaited<ReturnType<typeof extractHealthEventWithProgress>>,
+    preExtractedResult?: OcrPrefetchResult,
     queueContext?: QueueItemContext,
+    prefetchedResultPromise?: Promise<OcrPrefetchResult>,
   ) {
     let latestProgress = 45;
     try {
@@ -3542,12 +3698,9 @@ export function HealthDashboard({
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress, file.name);
       };
       const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
-      const result = preExtractedResult || await extractHealthEventWithProgress(
-        file,
-        member,
-        reportProgress,
-        { isAutoDetect },
-      );
+      const result = preExtractedResult || (prefetchedResultPromise
+        ? await prefetchedResultPromise
+        : await extractHealthEventWithProgress(file, member, reportProgress, { isAutoDetect }));
       if (!driveFileId) throw new Error('Không xác định được mã tài liệu Drive để lưu kết quả OCR.');
       const source = Object.values(profilesRef.current)
         .flatMap((profile) => profile.sources)
@@ -4327,10 +4480,13 @@ export function HealthDashboard({
     }
   }
   function handleCancelBatchQueue() {
+    const updatedMemberIds = Array.from(updatedQueueMemberIdsRef.current);
+    updatedQueueMemberIdsRef.current.clear();
     if (queueErrorAdvanceTimerRef.current !== null) {
       window.clearTimeout(queueErrorAdvanceTimerRef.current);
       queueErrorAdvanceTimerRef.current = null;
     }
+    cancelAllQueueOcrPrefetches();
     activeQueueRunIdRef.current = null;
     activeQueueItemTokenRef.current = null;
     completedQueueTokensRef.current.clear();
@@ -4347,6 +4503,9 @@ export function HealthDashboard({
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
     showToast('Đã dừng toàn bộ hàng đợi xử lý.', 'info');
+    if (updatedMemberIds.length > 0) {
+      void runFamilyDoctorSummaryAfterQueue(updatedMemberIds);
+    }
   }
   function deferUnresolvedSubject() {
     const draftContext = identityResolutionDraft?.queueContext;
@@ -4784,6 +4943,8 @@ export function HealthDashboard({
           timeline: updatedTimeline,
           sources: updatedSources,
           summary: summarizeTimeline(updatedTimeline, effectiveProfile.summary.narrative),
+          aiDeepAnalysis: undefined,
+          aiAnalysis: undefined,
           updatedAt: new Date().toISOString(),
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
@@ -4808,6 +4969,7 @@ export function HealthDashboard({
           `Đã hợp nhất dữ liệu vào hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
+        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }
@@ -4842,6 +5004,8 @@ export function HealthDashboard({
           timeline: updatedTimeline,
           sources: updatedSources,
           summary: summarizeTimeline(updatedTimeline, effectiveProfile.summary.narrative),
+          aiDeepAnalysis: undefined,
+          aiAnalysis: undefined,
           updatedAt: new Date().toISOString(),
         };
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
@@ -4866,6 +5030,7 @@ export function HealthDashboard({
           `Đã cập nhật ghi đè hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
+        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }
@@ -4876,6 +5041,8 @@ export function HealthDashboard({
         const digitized = digitizeHealthSource(effectiveProfile, nextEvent);
         const nextProfile: HealthProfile = {
           ...digitized,
+          aiDeepAnalysis: undefined,
+          aiAnalysis: undefined,
           sources: digitized.sources.map((item) =>
             item.driveFileId === draft.source.id
               ? {
@@ -4907,6 +5074,7 @@ export function HealthDashboard({
           saveMs
         );
         showToast(`Đã lưu hồ sơ sức khỏe cho ${effectiveMember.name} lên Google Drive.`, 'success');
+        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }

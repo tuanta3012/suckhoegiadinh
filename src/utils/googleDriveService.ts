@@ -64,6 +64,11 @@ export async function ensureGeminiAuthUser(): Promise<User | null> {
   }
 }
 
+export async function getFirebaseIdToken(): Promise<string | null> {
+  const user = await ensureGeminiAuthUser();
+  return user ? user.getIdToken() : null;
+}
+
 export function getGoogleAccessToken(): string | null {
   if (cachedAccessToken) return cachedAccessToken;
   if (typeof window !== 'undefined') {

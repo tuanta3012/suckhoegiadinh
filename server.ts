@@ -8,13 +8,17 @@ const __dirname = path.dirname(__filename);
 const firebaseConfig = JSON.parse(fs.readFileSync(path.join(__dirname, './firebase-applet-config.json'), 'utf8'));
 import {
   getOrCreateSharedGeminiRequestContext,
+  normalizeGeminiKeysInput,
   type GeminiRequestContext,
 } from './src/utils/geminiRequestContext.ts';
+import { GeminiRequestAdmission } from './src/utils/geminiRequestAdmission.ts';
 import {
   describeGeminiError,
   executeGeminiStreamWithPool,
   executeGeminiWithPool,
   GEMINI_TIMEOUTS,
+  getModelQuota,
+  getTaskQuota,
   researchHealthQuestionWithPool,
   TASK_MODELS,
   testGeminiApiKeyDirect,
@@ -56,8 +60,7 @@ function getPort(): number {
 const PORT = getPort();
 const MAX_DOCUMENT_BYTES = 30 * 1024 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(MAX_DOCUMENT_BYTES / 3) * 4;
-const GEMINI_RATE_LIMIT_PER_MINUTE = 20;
-const rateLimitWindows = new Map<string, { startedAt: number; count: number }>();
+const geminiRequestAdmission = new GeminiRequestAdmission(6, 12);
 
 async function verifyFirebaseIdToken(idToken: string): Promise<string | null> {
   try {
@@ -82,23 +85,6 @@ async function verifyFirebaseIdToken(idToken: string): Promise<string | null> {
   }
 }
 
-function isWithinRateLimit(uid: string): boolean {
-  const now = Date.now();
-  const window = rateLimitWindows.get(uid);
-  if (!window || now - window.startedAt >= 60_000) {
-    rateLimitWindows.set(uid, { startedAt: now, count: 1 });
-    if (rateLimitWindows.size > 10_000) {
-      for (const [key, value] of rateLimitWindows) {
-        if (now - value.startedAt >= 60_000) rateLimitWindows.delete(key);
-      }
-    }
-    return true;
-  }
-  if (window.count >= GEMINI_RATE_LIMIT_PER_MINUTE) return false;
-  window.count++;
-  return true;
-}
-
 function writeSse(res: Response, data: Record<string, unknown>): void {
   if (!res.destroyed && !res.writableEnded) {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -120,15 +106,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function resolveServerGeminiKeys(clientGeminiKeys: unknown): string[] {
-  const clientList = Array.isArray(clientGeminiKeys)
-    ? clientGeminiKeys.filter((key): key is string => typeof key === 'string' && key.trim().length > 10).map((k) => k.trim())
-    : [];
-  const envRaw = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
-  const envList = envRaw
-    .split(/[,;\n]+/)
-    .map((key) => key.trim())
-    .filter((key) => key.length > 10);
-  return Array.from(new Set([...clientList, ...envList]));
+  return normalizeGeminiKeysInput(clientGeminiKeys);
+}
+
+function getGeminiRequestSignal(res: Response): AbortSignal | undefined {
+  return res.locals.geminiAbortSignal as AbortSignal | undefined;
 }
 
 async function startServer() {
@@ -153,23 +135,22 @@ async function startServer() {
   });
 
   app.get('/api/gemini/status', (_req: Request, res: Response) => {
-    const serverKeysCount = resolveServerGeminiKeys([]).length;
     res.json({
       status: 'ok',
-      keySource: serverKeysCount > 0 ? 'server-env-and-workspace' : 'workspace-ai-resources',
-      hasServerEnvKeys: serverKeysCount > 0,
-      requiresWorkspaceKeys: serverKeysCount === 0,
+      keySource: 'workspace-ai-resources',
+      hasServerEnvKeys: false,
+      requiresWorkspaceKeys: true,
       supportedTasks: Object.keys(TASK_MODELS),
       taskModels: TASK_MODELS,
       quotasPerProject: {
-        digitization: { rpm: 15, rpd: 500, maxConcurrent: 3 },
-        analysis: { rpm: 5, rpd: 20, maxConcurrent: 2 },
-        assistant: { rpm: 15, rpd: 500, maxConcurrent: 3 },
-        refinement: { rpm: 15, rpd: 500, maxConcurrent: 3 },
+        digitization: getTaskQuota('digitization'),
+        analysis: getTaskQuota('analysis'),
+        assistant: getTaskQuota('assistant'),
+        refinement: getTaskQuota('refinement'),
       },
       modelQuotas: {
-        'gemini-3.5-flash-lite': { rpm: 15, rpd: 500, maxConcurrent: 3 },
-        'gemini-4-hydrogen': { rpm: 5, rpd: 20, maxConcurrent: 2 },
+        'gemini-3.5-flash-lite': getModelQuota('gemini-3.5-flash-lite'),
+        'gemini-4-hydrogen': getModelQuota('gemini-4-hydrogen'),
       },
       ocr: {
         strategy: 'whole-pdf-first-with-context-chunk-fallback',
@@ -206,12 +187,55 @@ async function startServer() {
       }
     }
 
-    if (!isWithinRateLimit(uid)) {
-      res.setHeader('Retry-After', '60');
-      res.status(429).json({ error: 'Bạn đã dùng hết lượt yêu cầu tạm thời. Hãy thử lại sau một phút.' });
+    const admissionAbort = new AbortController();
+    const abortQueuedRequest = () => admissionAbort.abort(new Error('Client disconnected.'));
+    req.once('aborted', abortQueuedRequest);
+    res.once('close', abortQueuedRequest);
+    let admissionTimedOut = false;
+    const admissionTimer = setTimeout(() => {
+      admissionTimedOut = true;
+      admissionAbort.abort(new Error('Timed out waiting for a Gemini request slot.'));
+    }, 120_000);
+    let releaseAdmission: (() => void) | undefined;
+    try {
+      releaseAdmission = await geminiRequestAdmission.acquire(uid, admissionAbort.signal);
+    } catch (error) {
+      clearTimeout(admissionTimer);
+      req.removeListener('aborted', abortQueuedRequest);
+      res.removeListener('close', abortQueuedRequest);
+      const queueIsFull = error instanceof Error && error.message.includes('queue is full');
+      if (res.destroyed || res.writableEnded || (admissionAbort.signal.aborted && !admissionTimedOut)) return;
+      res.setHeader('Retry-After', '10');
+      res.status(429).json({
+        error: queueIsFull
+          ? 'Máy chủ AI đang có nhiều tác vụ. Yêu cầu chưa được xếp hàng; vui lòng thử lại sau ít giây.'
+          : 'Đang chờ quá lâu để xử lý yêu cầu AI. Vui lòng thử lại sau.',
+      });
       return;
     }
+    clearTimeout(admissionTimer);
+    req.removeListener('aborted', abortQueuedRequest);
+    res.removeListener('close', abortQueuedRequest);
+    if (admissionAbort.signal.aborted) {
+      releaseAdmission();
+      return;
+    }
+    let admissionReleased = false;
+    const releaseOnce = () => {
+      if (admissionReleased) return;
+      admissionReleased = true;
+      releaseAdmission?.();
+    };
+    const abortActiveRequest = () => {
+      if (!res.writableEnded) admissionAbort.abort(new Error('Client disconnected.'));
+    };
+    res.once('finish', releaseOnce);
+    res.once('close', () => {
+      abortActiveRequest();
+      releaseOnce();
+    });
     res.locals.firebaseUid = uid;
+    res.locals.geminiAbortSignal = admissionAbort.signal;
     next();
   });
 
@@ -256,6 +280,7 @@ async function startServer() {
         preferredModel: model,
         generationConfig: isRecord(config) ? config : undefined,
         timeoutMs: 60_000,
+        signal: getGeminiRequestSignal(res),
         clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
       res.json({ success: true, text, modelUsed });
@@ -380,6 +405,7 @@ async function startServer() {
         memberBirthDate: member?.birthDate,
         isAutoDetect: Boolean(isAutoDetect),
         requestContext,
+        signal: getGeminiRequestSignal(res),
         interBatchDelayMs: 2_000,
       });
       res.json({
@@ -430,6 +456,7 @@ async function startServer() {
         task: 'refinement',
         contents: [{ text: buildRefinePrompt(memberName, events) }],
         responseMimeType: 'application/json',
+        signal: getGeminiRequestSignal(res),
         clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
@@ -461,6 +488,7 @@ async function startServer() {
         contents: [{ text: buildSummarizePrompt(memberName, member, profile) }],
         responseMimeType: 'application/json',
         responseSchema: SUMMARIZE_RESPONSE_SCHEMA,
+        signal: getGeminiRequestSignal(res),
         clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
@@ -493,6 +521,7 @@ async function startServer() {
         responseMimeType: 'application/json',
         responseSchema: COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
         preferredModel: requestedModel,
+        signal: getGeminiRequestSignal(res),
         clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
@@ -507,13 +536,7 @@ async function startServer() {
     } catch (error) {
       console.error('[Gemini Server Analyze Error]', { status: describeGeminiError(error).status });
       const { status, message } = describeGeminiError(error);
-      let userFriendlyMessage = message;
-      if (status === 503 || /high demand|temporarily unavailable|overloaded/i.test(message)) {
-        userFriendlyMessage = 'Mô hình AI hiện đang quá tải từ máy chủ Google (503 High Demand). Hệ thống sẽ tự động thử lại sau.';
-      } else if (status === 429 || /quota|resource_exhausted/i.test(message)) {
-        userFriendlyMessage = 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau.';
-      }
-      res.status(500).json({ error: userFriendlyMessage });
+      res.status(status || 500).json({ error: message });
     }
   });
 
@@ -588,7 +611,7 @@ async function startServer() {
           res.write('data: [DONE]\n\n');
           res.end();
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý Gemini.';
+          const { message } = describeGeminiError(error);
           writeSse(res, { type: 'error', error: message });
           res.end();
         } finally {
@@ -598,7 +621,12 @@ async function startServer() {
         return;
       }
 
-      const research = await researchHealthQuestionWithPool(currentQuestion, memberName, { requestContext });
+      const requestSignal = getGeminiRequestSignal(res);
+      const research = await researchHealthQuestionWithPool(
+        currentQuestion,
+        memberName,
+        { requestContext, signal: requestSignal },
+      );
       const prompt = createHealthAssistantPrompt(
         currentQuestion,
         memberName,
@@ -611,6 +639,7 @@ async function startServer() {
         contents: [{ text: prompt }],
         systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
         requestContext,
+        signal: requestSignal,
       });
 
       res.json({ success: true, answer: text, citations: research.citations, modelUsed });
@@ -623,9 +652,8 @@ async function startServer() {
         });
         res.end();
       } else {
-        res.status(500).json({
-          error: error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
-        });
+        const { status, message } = describeGeminiError(error);
+        res.status(status || 500).json({ error: message });
       }
     }
   });

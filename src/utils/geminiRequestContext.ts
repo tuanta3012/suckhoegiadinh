@@ -29,8 +29,8 @@ export function createGeminiRequestContext(rawKeys: unknown): GeminiRequestConte
 
 /**
  * Returns a persistent shared GeminiRequestContext (scheduler + project pool)
- * keyed by the normalized key pool signature, so RPM/RPD/concurrency/cooldown/invalid-key
- * state is coordinated across all sequential and concurrent tasks on both server and APK.
+ * keyed by the normalized key pool signature, so RPM/cooldown/invalid-key state is
+ * coordinated across sequential and concurrent tasks on both server and APK.
  */
 export function getOrCreateSharedGeminiRequestContext(rawKeys: unknown): GeminiRequestContext {
   const keys = normalizeGeminiKeysInput(rawKeys);

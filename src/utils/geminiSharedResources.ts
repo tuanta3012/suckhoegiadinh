@@ -2,6 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
 import { testGeminiApiKeyDirect } from './geminiUnifiedExecutor';
+import { getFirebaseIdToken } from './googleDriveService';
 
 const LOCAL_AI_KEYS_STORAGE_KEY = 'health_local_ai_resources_keys_v1';
 
@@ -103,9 +104,12 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
   let response: Response;
   try {
     const url = buildApiUrl('/api/gemini/test-key');
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = await getFirebaseIdToken().catch(() => null);
+    if (token) headers.Authorization = `Bearer ${token}`;
     response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ key: cleanKey }),
     });
   } catch {

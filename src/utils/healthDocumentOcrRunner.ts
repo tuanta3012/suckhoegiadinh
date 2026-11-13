@@ -77,6 +77,7 @@ export async function runUnifiedHealthDocumentOcr(
         batches: [{ firstPage: 1, lastPage: 1, base64Data: options.base64Data }],
       };
 
+  let preferredProjectId: string | undefined;
   options.onPlanReady?.({
     mode: plan.mode,
     totalPages: plan.totalPages,
@@ -125,11 +126,13 @@ export async function runUnifiedHealthDocumentOcr(
         onProgress: options.onProgress,
         clientGeminiKeys: options.clientGeminiKeys,
         requestContext: options.requestContext,
+        preferredProjectId,
         shouldStopRetrying:
           isWholeDocumentPass && effectiveMime === 'application/pdf' && plan.totalPages > 1
             ? (error) => shouldFallbackToBatchedPdfOcr(error, plan.totalPages)
             : undefined,
       });
+      preferredProjectId = projectId;
 
       const parsedJson = cleanExtractedJson(parseRobustJson(text));
       const labeledModel = `${modelUsed} [${projectId}]`;

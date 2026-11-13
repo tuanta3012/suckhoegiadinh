@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GeminiQuotaScheduler, parseGeminiProjects } from './geminiQuotaScheduler';
 
-const quota = { rpm: 1, rpd: 2, maxConcurrent: 1 };
+const quota = { rpm: 1 };
 
 describe('parseGeminiProjects', () => {
   it('parses list of independent API keys into project objects', () => {
@@ -55,6 +55,7 @@ describe('GeminiQuotaScheduler', () => {
     ]);
 
     const primary = await scheduler.acquire('digitization', 'model-primary', quota, new Set(), 100);
+    primary.release();
     const fallback = await scheduler.acquire(
       'digitization',
       'model-fallback',
@@ -65,7 +66,6 @@ describe('GeminiQuotaScheduler', () => {
     );
 
     expect(fallback.project.id).toBe(primary.project.id);
-    primary.release();
     fallback.release();
   });
 
@@ -93,10 +93,42 @@ describe('GeminiQuotaScheduler', () => {
     lease.release();
   });
 
-  it('marks a project-model daily quota as unavailable', async () => {
+  it('does not bypass an upstream rate-limit cooldown after the acquire timeout', async () => {
     const scheduler = new GeminiQuotaScheduler([{ id: 'one', apiKey: 'first-project-api-key' }]);
-    scheduler.markDailyQuotaExhausted('one', 'model-a');
-    await expect(scheduler.acquire('analysis', 'model-a', quota, new Set(), 100))
-      .rejects.toThrow('No daily analysis quota remains');
+    scheduler.markRateLimited('one', 'model-a', 60_000);
+
+    await expect(scheduler.acquire('assistant', 'model-a', quota, new Set(), 25))
+      .rejects.toThrow('Timed out waiting for an available assistant Gemini quota slot.');
+  });
+
+  it('cancels a request while it is waiting for RPM capacity', async () => {
+    const scheduler = new GeminiQuotaScheduler([{ id: 'one', apiKey: 'first-project-api-key' }]);
+    const active = await scheduler.acquire('assistant', 'model-a', quota, new Set(), 100);
+    const controller = new AbortController();
+    const waiting = scheduler.acquire(
+      'assistant',
+      'model-a',
+      quota,
+      new Set(),
+      10_000,
+      undefined,
+      controller.signal,
+    );
+    controller.abort(new Error('Client disconnected.'));
+
+    await expect(waiting).rejects.toThrow('Client disconnected.');
+    active.release();
+  });
+
+  it('limits each key to one active request and releases the slot after completion', async () => {
+    const scheduler = new GeminiQuotaScheduler([{ id: 'one', apiKey: 'first-project-api-key' }]);
+    const active = await scheduler.acquire('assistant', 'model-a', { rpm: 2 }, new Set(), 100);
+    const waiting = scheduler.acquire('assistant', 'model-a', { rpm: 2 }, new Set(), 1_000);
+    setTimeout(active.release, 20);
+
+    const next = await waiting;
+
+    expect(next.project.id).toBe('one');
+    next.release();
   });
 });
