@@ -68,15 +68,21 @@ BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU:
 4. TRÁNH LẶP DỮ LIỆU: Không lặp lại cùng tên chỉ số xét nghiệm giữa các trang.
 
 QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
-1. PHÂN LOẠI TÀI LIỆU (type) — BẮT BUỘC đọc tiêu đề chính bên trong trang đầu VÀ toàn bộ nội dung tài liệu để phân loại đúng mục đích khám/chữa bệnh:
-   - "comprehensive_exam": Hồ sơ/Sổ/Phiếu khám sức khỏe định kỳ, sức khỏe tổng quát, khám đoàn thể. Nếu tiêu đề hoặc tên tệp là "Hồ sơ sức khỏe định kỳ...", "Khám sức khỏe định kỳ", "Khám tổng quát", "Khám sức khỏe năm ...", BẮT BUỘC chọn "comprehensive_exam" dù bên trong có nhiều phiếu xét nghiệm, siêu âm, X-quang hoặc ECG.
-   - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu... (nếu chỉ là phiếu xét nghiệm thì PHẢI chọn "test_result", tuyệt đối không chọn "discharge").
-   - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG, nội soi...).
-   - "prescription": Đơn thuốc, toa thuốc điều trị ngoại trú/nội trú.
-   - "vaccination": Phiếu tiêm chủng, sổ tiêm ngừa vắc xin.
-   - "discharge": CHỈ dùng khi là Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án điều trị nội trú/phẫu thuật thực sự.
-   - "medical_report": Phiếu khám bệnh ngoại trú/chuyên khoa (không có điều trị nội trú).
-   - "other": Tài liệu y tế khác (cung cấp "customCategory" và "extractedData").
+1. PHÂN LOẠI TÀI LIỆU (type) — BẮT BUỘC ĐỌC TIÊU ĐỀ BIỂU MẪU (FORM TITLE BANNER) VÀ BẢN CHẤT NỘI DUNG:
+   - NGUYÊN TẮC QUAN TRỌNG: Phân biệt rõ TIÊU ĐỀ TÀI LIỆU với TÊN PHÒNG KHÁM / KHOA / CƠ SỞ (Facility/Department).
+     * Các thông tin hành chính như "Phòng khám Đa khoa...", "Phòng khám Tổng quát", "Khoa Khám bệnh", "Khoa Nội tổng quát", "Bác sĩ khám tổng quát" CHỈ là tên cơ sở/chuyên khoa, TUYỆT ĐỐI KHÔNG dùng để phân loại tài liệu thành "comprehensive_exam"!
+     * Nếu một ĐƠN THUỐC được in ra từ "Phòng khám tổng quát", "title" BẮT BUỘC là "Đơn thuốc ngoại trú" (hoặc tiêu đề đơn thuốc tương ứng) và "type" BẮT BUỘC là "prescription", KHÔNG ĐƯỢC chọn "comprehensive_exam"!
+     * Nếu một PHIẾU XÉT NGHIỆM được in từ "Phòng khám tổng quát", type BẮT BUỘC là "test_result", KHÔNG ĐƯỢC chọn "comprehensive_exam"!
+     * Nếu một PHIẾU SIÊU ÂM được in từ "Phòng khám tổng quát", type BẮT BUỘC là "imaging", KHÔNG ĐƯỢC chọn "comprehensive_exam"!
+   - BẢNG PHÂN LOẠI CHI TIẾT (chọn đúng 1 trong các type sau):
+     * "prescription": BẮT BUỘC khi tiêu đề là "ĐƠN THUỐC", "ĐƠN THUỐC NGOẠI TRÚ", "ĐƠN THUỐC ĐIỆN TỬ", "TOA THUỐC", "CHỈ ĐỊNH DÙNG THUỐC", "PHIẾU LĨNH THUỐC", "KÊ ĐƠN", hoặc tài liệu là danh sách thuốc kê đơn điều trị (tên thuốc, hàm lượng, số lượng, cách dùng).
+     * "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu, vi sinh... (nếu tài liệu là phiếu kết quả xét nghiệm thì PHẢI chọn "test_result", tuyệt đối không chọn "discharge" hay "comprehensive_exam").
+     * "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT Scanner, MRI, Điện tâm đồ ECG, nội soi...).
+     * "discharge": CHỈ dùng khi là Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án điều trị nội trú thực sự.
+     * "vaccination": Phiếu tiêm chủng, sổ tiêm ngừa vắc xin.
+     * "comprehensive_exam": CHỈ DÙNG cho bộ Hồ sơ/Sổ/Phiếu khám sức khỏe định kỳ trọn gói (thường có bảng khám nhiều chuyên khoa: thể lực, tuần hoàn, hô hấp, mắt, tai mũi họng kèm xét nghiệm/siêu âm). TUYỆT ĐỐI KHÔNG chọn "comprehensive_exam" cho đơn thuốc đơn lẻ hay phiếu xét nghiệm đơn lẻ!
+     * "medical_report": Phiếu khám bệnh, sổ khám bệnh ngoại trú/chuyên khoa (không có điều trị nội trú, không phải đơn thuốc đơn thuần).
+     * "other": Tài liệu y tế khác (cung cấp "customCategory" và "extractedData").
 
 2. THÔNG TIN BÁC SĨ & ĐƠN VỊ: "facility", "doctorName".
 3. KHÁM THỂ LỰC (physicalExam): height_cm, weight_kg, bmi, bp_mmHg, pulse_bpm, classification (chỉ điền nếu có đo thực tế, nếu không có thì để null).
@@ -118,9 +124,9 @@ Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
 
 export function buildWholeDocumentOcrPrompt(memberName: string, totalPages: number): string {
   if (totalPages <= 1) {
-    return `Đọc toàn bộ tài liệu này (tham khảo hồ sơ ${memberName}). Trích xuất đầy đủ, chính xác tất cả thông tin y tế (họ tên bệnh nhân thực tế vào "patientName", ngày khám, physicalExam, diagnoses, toàn bộ metrics kèm standardKey & refRange, imagingResults, medications, lời dặn). Ngoài JSON y tế, trả thêm "pageTexts": mảng gồm đúng 1 chuỗi văn bản đọc được trên trang (nếu trang chỉ có ảnh/trống, ghi "[Trang không có văn bản]"). Trả về DUY NHẤT một JSON object chuẩn.`;
+    return `Đọc toàn bộ tài liệu này (tham khảo hồ sơ ${memberName}). Trích xuất đầy đủ, chính xác tất cả thông tin y tế (họ tên bệnh nhân thực tế vào "patientName", ngày khám, "title" phản ánh đúng tiêu đề biểu mẫu như Đơn thuốc ngoại trú/Phiếu xét nghiệm/Kết quả siêu âm, "type" chính xác theo quy tắc: đơn thuốc -> "prescription", không nhầm với phòng khám tổng quát, physicalExam, diagnoses, toàn bộ metrics kèm standardKey & refRange, imagingResults, medications, lời dặn). Ngoài JSON y tế, trả thêm "pageTexts": mảng gồm đúng 1 chuỗi văn bản đọc được trên trang (nếu trang chỉ có ảnh/trống, ghi "[Trang không có văn bản]"). Trả về DUY NHẤT một JSON object chuẩn.`;
   }
-  return `Đọc TOÀN BỘ tài liệu gồm ${totalPages} trang này để giữ đầy đủ ngữ cảnh xuyên suốt từ trang bìa/hành chính đến các phiếu xét nghiệm, chẩn đoán hình ảnh và kết luận cuối sổ. Trích xuất chính xác "patientName" (tên bệnh nhân/người khám thực tế in trên tài liệu), "date", "type", "physicalExam", "diagnoses", TOÀN BỘ "metrics" (kèm standardKey, refRange, status), "imagingResults", "medications", và "advice". Ngoài ra trả thêm "pageTexts": mảng chuỗi gồm ĐÚNG ${totalPages} phần tử theo đúng thứ tự từ trang 1 đến trang ${totalPages} (nếu một trang chỉ là bìa/ảnh/trống không có chữ, ghi "[Trang bìa/ảnh]" thay vì bỏ sót phần tử). Trả về DUY NHẤT một JSON object chuẩn.`;
+  return `Đọc TOÀN BỘ tài liệu gồm ${totalPages} trang này để giữ đầy đủ ngữ cảnh xuyên suốt từ trang bìa/hành chính đến các phiếu xét nghiệm, chẩn đoán hình ảnh và kết luận cuối sổ. Trích xuất chính xác "patientName" (tên bệnh nhân/người khám thực tế in trên tài liệu), "date", "title" phản ánh đúng tiêu đề biểu mẫu (như Đơn thuốc ngoại trú/Phiếu xét nghiệm...), "type" (đơn thuốc -> "prescription", không nhầm với phòng khám tổng quát), "physicalExam", "diagnoses", TOÀN BỘ "metrics" (kèm standardKey, refRange, status), "imagingResults", "medications", và "advice". Ngoài ra trả thêm "pageTexts": mảng chuỗi gồm ĐÚNG ${totalPages} phần tử theo đúng thứ tự từ trang 1 đến trang ${totalPages} (nếu một trang chỉ là bìa/ảnh/trống không có chữ, ghi "[Trang bìa/ảnh]" thay vì bỏ sót phần tử). Trả về DUY NHẤT một JSON object chuẩn.`;
 }
 
 export function buildBatchOcrPrompt(
@@ -130,7 +136,7 @@ export function buildBatchOcrPrompt(
   totalPages: number,
 ): string {
   const expectedCount = lastPage - firstPage + 1;
-  return `Đọc các trang ${firstPage}-${lastPage} (trên tổng ${totalPages} trang) của tài liệu này (tham khảo ${memberName}). Trích xuất đầy đủ thông tin y tế có trên các trang này (họ tên bệnh nhân thực tế vào "patientName" nếu thấy, ngày khám, physicalExam, diagnoses, metrics kèm standardKey & refRange, imagingResults, medications, lời dặn). Ngoài JSON y tế, trả thêm "pageTexts": mảng chuỗi gồm ĐÚNG ${expectedCount} phần tử tương ứng từ trang ${firstPage} đến ${lastPage} (nếu trang không có chữ, ghi "[Trang bìa/ảnh]"). Trả về DUY NHẤT một JSON object chuẩn.`;
+  return `Đọc các trang ${firstPage}-${lastPage} (trên tổng ${totalPages} trang) của tài liệu này (tham khảo ${memberName}). Trích xuất đầy đủ thông tin y tế có trên các trang này (họ tên bệnh nhân thực tế vào "patientName" nếu thấy, ngày khám, "title" phản ánh đúng tiêu đề biểu mẫu, "type" chính xác theo quy tắc: đơn thuốc -> "prescription", physicalExam, diagnoses, metrics kèm standardKey & refRange, imagingResults, medications, lời dặn). Ngoài JSON y tế, trả thêm "pageTexts": mảng chuỗi gồm ĐÚNG ${expectedCount} phần tử tương ứng từ trang ${firstPage} đến ${lastPage} (nếu trang không có chữ, ghi "[Trang bìa/ảnh]"). Trả về DUY NHẤT một JSON object chuẩn.`;
 }
 
 export function buildRefinePrompt(memberName: string, events: unknown[]): string {

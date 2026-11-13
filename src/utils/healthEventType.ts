@@ -124,6 +124,16 @@ function extractFullDocumentBody(value: Record<string, unknown>): string {
   return parts.join(' ');
 }
 
+export function stripAdministrativeFacilityContext(text: string): string {
+  return text
+    .replace(/\b(?:phong\s+kham|khoa|bac\s+si|bs|khoa\s+noi|chuyen\s+khoa)\s+(?:kham\s+)?(?:tong\s+quat|da\s+khoa|noi\s+tong\s+quat)\b/g, ' ')
+    .replace(/\b(?:phong\s+kham|khoa|chuyen\s+khoa)\s+kham\s+benh\b/g, ' ')
+    .replace(/\b(?:benh\s+vien|phong\s+kham|trung\s+tam\s+y\s+te)\s+(?:da\s+khoa|dai\s+hoc\s+y\s+duoc(?:\s*\d+)?)\b/g, ' ')
+    .replace(/\b(?:tai\s+kham|hen\s+kham|lich\s+kham)\s+(?:dinh\s+ky|lai)?\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const COMPREHENSIVE_PATTERNS = [
   /\bkham suc khoe\b/,
   /\bsuc khoe dinh ky\b/,
@@ -134,13 +144,18 @@ const COMPREHENSIVE_PATTERNS = [
   /\bket qua kham suc khoe\b/,
   /\btong ket suc khoe\b/,
   /\bso kham suc khoe\b/,
-  /\bkham tong quat\b/,
-  /\bkham dinh ky\b/,
   /\bkham skdk\b/,
   /\bkham doan\b/,
   /\bkiem tra suc khoe\b/,
   /\bhealth check(?:up)?\b/,
   /\bannual physical\b/,
+  /\bgiay kham suc khoe\b/,
+];
+
+const PURE_COMPREHENSIVE_EXAM_PATTERNS = [
+  ...COMPREHENSIVE_PATTERNS,
+  /\bkham tong quat\b/,
+  /\bkham dinh ky\b/,
 ];
 
 const VACCINATION_PATTERNS = [
@@ -158,6 +173,7 @@ const PRESCRIPTION_PATTERNS = [
   /\bke don\b/,
   /\bphieu linh thuoc\b/,
   /\bchi dinh dung thuoc\b/,
+  /\bdon thuoc dieu tri\b/,
   /\bprescription\b/,
 ];
 
@@ -218,8 +234,11 @@ export function classifyHealthEventType(
   const titleLabel = normalizeText(
     [value.title, value.customCategory].filter((item): item is string => typeof item === 'string').join(' '),
   );
-  const headerLabel = normalizeText(extractLeadingDocumentHeader(value));
-  const titleAndHeader = `${fileLabel} ${titleLabel} ${headerLabel}`.trim();
+  const directTitleText = stripAdministrativeFacilityContext(`${fileLabel} ${titleLabel}`);
+
+  const rawHeader = extractLeadingDocumentHeader(value);
+  const headerLabel = stripAdministrativeFacilityContext(normalizeText(rawHeader));
+
   const bodyText = normalizeText(extractFullDocumentBody(value));
   const structuredText = normalizeText(JSON.stringify({
     facility: value.facility,
@@ -230,7 +249,7 @@ export function classifyHealthEventType(
     vaccinations: value.vaccinations,
     hospitalization: cleanHospitalizationRecord(value.hospitalization),
   }));
-  const fullContent = `${bodyText} ${structuredText}`.trim();
+  const fullContent = stripAdministrativeFacilityContext(`${bodyText} ${structuredText}`);
 
   const metricsCount = Array.isArray(value.metrics) ? value.metrics.length : 0;
   const diagnosesCount = Array.isArray(value.diagnoses) ? value.diagnoses.length : 0;
@@ -241,69 +260,94 @@ export function classifyHealthEventType(
   const hasHosp = hasMeaningfulHospitalization(value.hospitalization);
   const hasPhysicalExam = hasMeaningfulPhysicalExam(value.physicalExam);
 
-  // 1. Khám sức khỏe định kỳ / tổng quát (ưu tiên cao nhất khi tiêu đề/header hoặc nội dung kết hợp)
-  if (matchesAny(titleAndHeader, COMPREHENSIVE_PATTERNS)) {
+  // 1. TIÊU ĐỀ RÕ RÀNG (Direct explicit document title):
+  // 1.1 Đơn thuốc: nếu tiêu đề/tên file nói rõ là đơn thuốc/toa thuốc
+  if (matchesAny(directTitleText, PRESCRIPTION_PATTERNS)) {
+    if (hasMeds || (!hasMetrics && !hasImaging)) {
+      return 'prescription';
+    }
+  }
+
+  // 1.2 Tiêm chủng
+  if (matchesAny(directTitleText, VACCINATION_PATTERNS) || hasVax) {
+    return 'vaccination';
+  }
+
+  // 1.3 Giấy ra viện / xuất viện
+  if (matchesAny(directTitleText, DISCHARGE_PATTERNS) || (hasHosp && !matchesAny(directTitleText, PRESCRIPTION_PATTERNS))) {
+    return 'discharge';
+  }
+
+  // 1.4 Khám sức khỏe định kỳ / tổng quát (khi tiêu đề nói rõ là hồ sơ/sổ/phiếu khám sức khỏe)
+  if (matchesAny(directTitleText, PURE_COMPREHENSIVE_EXAM_PATTERNS) && !matchesAny(directTitleText, PRESCRIPTION_PATTERNS)) {
+    return 'comprehensive_exam';
+  }
+
+  // 1.5 Xét nghiệm vs Chẩn đoán hình ảnh vs Khám bệnh từ tiêu đề
+  const isDirectTitleLab = matchesAny(directTitleText, TEST_RESULT_PATTERNS);
+  const isDirectTitleImaging = matchesAny(directTitleText, IMAGING_PATTERNS);
+  const isDirectTitleMedicalReport = matchesAny(directTitleText, MEDICAL_REPORT_PATTERNS);
+
+  if (isDirectTitleLab && !isDirectTitleImaging) return 'test_result';
+  if (isDirectTitleImaging && !isDirectTitleLab && !hasPhysicalExam) return 'imaging';
+  if (isDirectTitleMedicalReport && !isDirectTitleImaging && !isDirectTitleLab) {
+    return hasMetrics && hasImaging && (hasPhysicalExam || diagnosesCount >= 2)
+      ? 'comprehensive_exam'
+      : 'medical_report';
+  }
+
+  // 2. HEADER TRANG ĐẦU TIÊN (Khi tiêu đề/file chưa đủ rõ, đọc banner tiêu đề trang đầu):
+  if (matchesAny(headerLabel, PRESCRIPTION_PATTERNS) && (hasMeds || (!hasMetrics && !hasImaging))) {
+    return 'prescription';
+  }
+  if (matchesAny(headerLabel, VACCINATION_PATTERNS)) {
+    return 'vaccination';
+  }
+  if (matchesAny(headerLabel, DISCHARGE_PATTERNS) || hasHosp) {
+    return 'discharge';
+  }
+  if (matchesAny(headerLabel, COMPREHENSIVE_PATTERNS) && !matchesAny(headerLabel, PRESCRIPTION_PATTERNS)) {
+    return 'comprehensive_exam';
+  }
+
+  const isHeaderLab = matchesAny(headerLabel, TEST_RESULT_PATTERNS);
+  const isHeaderImaging = matchesAny(headerLabel, IMAGING_PATTERNS);
+  const isHeaderMedicalReport = matchesAny(headerLabel, MEDICAL_REPORT_PATTERNS);
+
+  if (isHeaderLab && !isHeaderImaging && !hasImaging) return 'test_result';
+  if (isHeaderImaging && !isHeaderLab && !hasMetrics && !hasPhysicalExam) return 'imaging';
+  if (isHeaderMedicalReport && !isHeaderImaging && !isHeaderLab) {
+    return hasMetrics && hasImaging && (hasPhysicalExam || diagnosesCount >= 2)
+      ? 'comprehensive_exam'
+      : 'medical_report';
+  }
+
+  // 3. HỒ SƠ ĐA CHUYÊN KHOA (Khám sức khỏe tổng hợp gồm cả xét nghiệm + chẩn đoán hình ảnh + thể lực)
+  if (!isDirectTitleImaging && !isHeaderImaging && hasMetrics && hasImaging && (hasPhysicalExam || (metricsCount >= 2 && diagnosesCount >= 2))) {
     return 'comprehensive_exam';
   }
   if (matchesAny(fullContent, COMPREHENSIVE_PATTERNS) && hasMetrics && (hasImaging || hasPhysicalExam)) {
     return 'comprehensive_exam';
   }
 
-  // 2. Tiêm chủng
-  if (matchesAny(titleAndHeader, VACCINATION_PATTERNS) || hasVax) {
-    return 'vaccination';
-  }
-
-  // 3. Đơn thuốc
-  if (matchesAny(titleAndHeader, PRESCRIPTION_PATTERNS)) {
-    return 'prescription';
-  }
-
-  // 4. Giấy ra viện / Tóm tắt bệnh án nội trú (chỉ khi thực sự có từ khóa hoặc hospitalization có dữ liệu thật)
-  if (matchesAny(titleAndHeader, DISCHARGE_PATTERNS) || hasHosp) {
-    return 'discharge';
-  }
-
-  // 5. Tiêu đề / header trang đầu nói rõ Xét nghiệm vs Chẩn đoán hình ảnh vs Khám bệnh
-  const titleImaging = matchesAny(`${fileLabel} ${titleLabel}`, IMAGING_PATTERNS);
-  const titleLab = matchesAny(`${fileLabel} ${titleLabel}`, TEST_RESULT_PATTERNS);
-  const titleMedicalReport = matchesAny(`${fileLabel} ${titleLabel}`, MEDICAL_REPORT_PATTERNS);
-  const headerImaging = matchesAny(headerLabel, IMAGING_PATTERNS);
-  const headerLab = matchesAny(headerLabel, TEST_RESULT_PATTERNS);
-
-  if (titleLab && !titleImaging) return 'test_result';
-  if (titleImaging && !titleLab && !hasPhysicalExam) return 'imaging';
-  if (titleMedicalReport && !titleImaging && !titleLab) {
-    return hasMetrics && hasImaging && (hasPhysicalExam || diagnosesCount >= 2)
-      ? 'comprehensive_exam'
-      : 'medical_report';
-  }
-
-  if (headerLab && !headerImaging && !hasImaging) return 'test_result';
-  if (headerImaging && !headerLab && !hasMetrics && !hasPhysicalExam) return 'imaging';
-
-  // Hồ sơ đa chuyên khoa (có cả nhiều chỉ số xét nghiệm lẫn chẩn đoán hình ảnh và khám lâm sàng/nhiều chẩn đoán)
-  if (!titleImaging && hasMetrics && hasImaging && (hasPhysicalExam || (metricsCount >= 2 && diagnosesCount >= 2))) {
-    return 'comprehensive_exam';
-  }
-
-  if (titleImaging || headerImaging || hasImaging) {
+  // 4. KIỂM TRA ĐẶC ĐIỂM DỮ LIỆU CẤU TRÚC KẾT HỢP
+  if (isDirectTitleImaging || isHeaderImaging || hasImaging) {
     if (hasMetrics && !hasImaging) return 'test_result';
-    if (hasImaging && !hasMetrics && !matchesAny(titleAndHeader, MEDICAL_REPORT_PATTERNS)) return 'imaging';
-    if (matchesAny(titleAndHeader, TEST_RESULT_PATTERNS)) return 'test_result';
-    if (matchesAny(titleAndHeader, MEDICAL_REPORT_PATTERNS)) return 'medical_report';
+    if (hasImaging && !hasMetrics && !matchesAny(`${directTitleText} ${headerLabel}`, MEDICAL_REPORT_PATTERNS)) return 'imaging';
+    if (matchesAny(`${directTitleText} ${headerLabel}`, TEST_RESULT_PATTERNS)) return 'test_result';
+    if (matchesAny(`${directTitleText} ${headerLabel}`, MEDICAL_REPORT_PATTERNS)) return 'medical_report';
     return 'imaging';
   }
 
-  if (titleLab || headerLab) {
+  if (isDirectTitleLab || isHeaderLab) {
     return 'test_result';
   }
 
-  if (matchesAny(titleAndHeader, MEDICAL_REPORT_PATTERNS)) {
+  if (matchesAny(`${directTitleText} ${headerLabel}`, MEDICAL_REPORT_PATTERNS)) {
     return 'medical_report';
   }
 
-  // 6. Đánh giá theo toàn bộ nội dung văn bản + dữ liệu cấu trúc
+  // 5. TOÀN BỘ NỘI DUNG VĂN BẢN (Full body text)
   if (matchesAny(fullContent, VACCINATION_PATTERNS)) return 'vaccination';
   if (matchesAny(fullContent, DISCHARGE_PATTERNS)) return 'discharge';
   if (matchesAny(fullContent, PRESCRIPTION_PATTERNS) || (hasMeds && !hasMetrics && !hasImaging)) {
@@ -314,20 +358,25 @@ export function classifyHealthEventType(
   }
   if (matchesAny(fullContent, IMAGING_PATTERNS)) return 'imaging';
 
-  // 7. Giữ phân loại của model nếu hợp lệ và không mâu thuẫn rõ rệt
+  // 6. GIỮ PHÂN LOẠI CỦA MODEL NẾU HỢP LỆ VÀ HỢP LÝ
   if (isHealthEventType(value.type)) {
-    if (value.type === 'discharge' && !hasHosp && !matchesAny(`${titleAndHeader} ${fullContent}`, DISCHARGE_PATTERNS)) {
+    if (value.type === 'discharge' && !hasHosp && !matchesAny(`${directTitleText} ${headerLabel} ${fullContent}`, DISCHARGE_PATTERNS)) {
       if (hasMetrics) return 'test_result';
       if (hasImaging) return 'imaging';
       if (hasMeds) return 'prescription';
       return 'medical_report';
     }
+    // Nếu model nhầm đơn thuốc (có thuốc, không xét nghiệm, không hình ảnh) thành comprehensive_exam hay medical_report:
+    if ((value.type === 'comprehensive_exam' || value.type === 'medical_report') && hasMeds && !hasMetrics && !hasImaging) {
+      return 'prescription';
+    }
     return value.type;
   }
 
+  // 7. FALLBACK THEO DỮ LIỆU THỰC TẾ
+  if (hasMeds) return 'prescription';
   if (hasMetrics) return 'test_result';
   if (hasImaging) return 'imaging';
-  if (hasMeds) return 'prescription';
 
   return undefined;
 }

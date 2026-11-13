@@ -80,12 +80,6 @@ export default function HealthMetricsChart({
               stroke="#10b981"
               strokeDasharray="3 3"
               strokeOpacity={0.4}
-              label={{
-                value: 'Khoảng an toàn',
-                fill: '#047857',
-                fontSize: 10,
-                position: 'insideTopRight',
-              }}
             />
           )}
           <Tooltip

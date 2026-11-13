@@ -40,14 +40,14 @@ export function getAttemptTimeout(task: GeminiTask): number {
 
 export function getModelQuota(model: string): GeminiQuota {
   if (model.includes('4-hydrogen') || model.includes('3.8-flash') || model.includes('3.6-flash')) {
-    return { rpm: 5, rpd: 20, maxConcurrent: 2 };
+    return { rpm: 10, rpd: 50, maxConcurrent: 4 };
   }
-  return { rpm: 15, rpd: 500, maxConcurrent: 3 };
+  return { rpm: 30, rpd: 500, maxConcurrent: 10 };
 }
 
 export function getTaskQuota(task: GeminiTask): GeminiQuota {
-  if (task === 'analysis') return { rpm: 5, rpd: 20, maxConcurrent: 2 };
-  return { rpm: 15, rpd: 500, maxConcurrent: 3 };
+  if (task === 'analysis') return { rpm: 10, rpd: 50, maxConcurrent: 4 };
+  return { rpm: 30, rpd: 500, maxConcurrent: 10 };
 }
 
 export function cleanErrorMessage(rawMessage?: string): string {
@@ -520,7 +520,7 @@ export async function executeGeminiStreamWithPool(
         targetModel,
         quota,
         attemptedProjectIds,
-        2_000,
+        15_000,
       );
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));

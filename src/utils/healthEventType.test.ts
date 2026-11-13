@@ -128,4 +128,37 @@ describe('classifyHealthEventType', () => {
       ],
     })).toBe('test_result');
   });
+
+  it('classifies outpatient prescriptions as prescription even if facility or department mentions "Phòng khám tổng quát"', () => {
+    expect(classifyHealthEventType({
+      title: 'Đơn thuốc ngoại trú',
+      type: 'comprehensive_exam',
+      facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+      pageTexts: [
+        'BỆNH VIỆN ĐẠI HỌC Y DƯỢC TP.HCM\nPHÒNG KHÁM BỆNH VIỆN ĐẠI HỌC Y DƯỢC 1\nPHÒNG KHÁM TỔNG QUÁT\nĐƠN THUỐC NGOẠI TRÚ\nBS. ThS.BS. Đặng Đồng Quốc Chí\nChẩn đoán: Bệnh tăng huyết áp vô căn (nguyên phát) (I10); Bệnh đái tháo đường không phụ thuộc insuline (E11)\nĐƠN THUỐC ĐIỀU TRỊ:\n1. Sitagliptin + metformin (STRADIRAS 50/850MG) SL: 60 Viên',
+      ],
+      medications: [
+        {
+          name: 'Sitagliptin + metformin (STRADIRAS 50/850MG)',
+          dosage: '50mg + 850mg',
+          quantity: '60 Viên',
+          instructions: 'Uống mỗi ngày 1 lần, mỗi lần 1 Viên (Sáng sau ăn), trong 60 ngày.',
+        },
+      ],
+      diagnoses: [
+        'Bệnh tăng huyết áp vô căn (nguyên phát) (I10)',
+        'Bệnh đái tháo đường không phụ thuộc insuline (E11)',
+      ],
+    })).toBe('prescription');
+  });
+
+  it('classifies generic titled document as prescription if page text has an outpatient prescription banner', () => {
+    expect(classifyHealthEventType({
+      title: 'Hồ sơ y tế',
+      pageTexts: [
+        'PHÒNG KHÁM BỆNH VIỆN ĐẠI HỌC Y DƯỢC 1\nPHÒNG KHÁM TỔNG QUÁT\nĐƠN THUỐC ĐIỀU TRỊ\nThuốc 1: Amlodipine 5mg',
+      ],
+      medications: [{ name: 'Amlodipine 5mg' }],
+    })).toBe('prescription');
+  });
 });
