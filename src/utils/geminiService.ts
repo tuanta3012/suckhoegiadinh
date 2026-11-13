@@ -13,7 +13,11 @@ import type {
   HospitalizationRecord,
 } from '../types';
 import { digitizationLogger } from './digitizationLogger';
-import { classifyHealthEventType, isHealthEventType } from './healthEventType';
+import {
+  classifyHealthEventType,
+  cleanHospitalizationRecord,
+  isHealthEventType,
+} from './healthEventType';
 import { parseRobustJson, sleep } from './healthRecordService';
 import { getValidGoogleAccessToken } from './googleDriveService';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
@@ -1250,16 +1254,8 @@ function normalizeExtractedEvent(value: Record<string, unknown>, fileName?: stri
         }];
       })
     : [];
-  const hospitalization: HospitalizationRecord | undefined = isRecord(value.hospitalization)
-    ? {
-        admissionDate: optionalString(value.hospitalization.admissionDate),
-        dischargeDate: optionalString(value.hospitalization.dischargeDate),
-        department: optionalString(value.hospitalization.department),
-        treatmentSummary: optionalString(value.hospitalization.treatmentSummary),
-        surgicalNotes: optionalString(value.hospitalization.surgicalNotes),
-      }
-    : undefined;
-  const physicalExam = isRecord(value.physicalExam)
+  const hospitalization: HospitalizationRecord | undefined = cleanHospitalizationRecord(value.hospitalization);
+  const rawPhysicalExam = isRecord(value.physicalExam)
     ? {
         height_cm: typeof value.physicalExam.height_cm === 'number' ? value.physicalExam.height_cm : undefined,
         weight_kg: typeof value.physicalExam.weight_kg === 'number' ? value.physicalExam.weight_kg : undefined,
@@ -1269,6 +1265,10 @@ function normalizeExtractedEvent(value: Record<string, unknown>, fileName?: stri
         classification: optionalString(value.physicalExam.classification),
       }
     : undefined;
+  const physicalExam =
+    rawPhysicalExam && Object.values(rawPhysicalExam).some((item) => item !== undefined)
+      ? rawPhysicalExam
+      : undefined;
 
   return {
     title: optionalString(value.title),

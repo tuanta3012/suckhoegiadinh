@@ -77,12 +77,9 @@ export function UnresolvedSubjectModal({
             </p>
             {suggestedSubjectName && (
               <p className="mt-1 text-xs text-amber-800">
-                AI nhận diện: <strong className="font-bold text-amber-950">{suggestedSubjectName}</strong>
+                Gợi ý OCR: <strong className="font-bold text-amber-950">{suggestedSubjectName}</strong>
               </p>
             )}
-            <p className="mt-2 rounded-xl bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 text-xs font-semibold text-amber-900">
-              Hãy chọn thành viên có sẵn hoặc nhập tên mới để gán tài liệu:
-            </p>
           </div>
           <button
             type="button"

@@ -37,6 +37,7 @@ import {
   Pill,
   Plus,
   RefreshCw,
+  RotateCcw,
   Send,
   Share2,
   ShieldAlert,
@@ -101,6 +102,7 @@ import {
 } from '../utils/healthDriveService';
 import { getSignedInGoogleEmail } from '../utils/googleDriveService';
 import {
+  deleteLocalSource,
   fileFromLocalSource,
   fileFromPendingUpload,
   localSyncOutbox,
@@ -120,7 +122,11 @@ import {
   prioritizeMemberForEmail,
 } from '../utils/memberOrdering';
 import { getGoogleAccessToken, getValidGoogleAccessToken } from '../utils/googleDriveService';
-import { HEALTH_EVENT_TYPES } from '../utils/healthEventType';
+import {
+  cleanHospitalizationRecord,
+  hasMeaningfulHospitalization,
+  HEALTH_EVENT_TYPES,
+} from '../utils/healthEventType';
 import {
   addHealthSource,
   createHealthProfile,
@@ -153,6 +159,7 @@ import { RawFilesManagerModal } from './RawFilesManagerModal';
 import { WorkspaceAuditModal } from './WorkspaceAuditModal';
 import {
   computeFileFingerprint,
+  compareStructuredEventContainment,
   detectDuplicateFile,
   detectCrossMemberDuplicateFile,
   detectDuplicateEvent,
@@ -3023,8 +3030,10 @@ export function HealthDashboard({
         Boolean(profile?.sources.some((source) =>
           source.status === 'processed' &&
           !source.rawDeletedAt &&
-          source.contentIndexComplete &&
-          source.contentIndexPages?.length,
+          (
+            (source.contentIndexComplete && Boolean(source.contentIndexPages?.length)) ||
+            profile.timeline.some((event) => event.sourceFileId === source.driveFileId)
+          ),
         )),
       );
     if (canPreflightContainment) {
@@ -3663,40 +3672,78 @@ export function HealthDashboard({
   }
 
   async function cleanupContainedRawDocuments(member: FamilyMember, incomingSourceId: string): Promise<void> {
-    if (workspaceRef.current?.rootFolderId === 'local_offline_workspace') return;
-
+    const isLocalWorkspace = workspaceRef.current?.rootFolderId === 'local_offline_workspace';
     let profile = profilesRef.current[member.id] || profiles[member.id];
-    if (!profile || profile.syncPending) return;
+    if (!profile || (!isLocalWorkspace && profile.syncPending)) return;
     const incoming = profile.sources.find((source) => source.driveFileId === incomingSourceId);
     if (
       !incoming ||
       incoming.status !== 'processed' ||
       incoming.rawDeletedAt ||
-      !incoming.contentIndexComplete ||
-      !incoming.contentIndexPages?.length ||
       !incoming.digitizedAt
     ) return;
+
+    const incomingEvents = profile.timeline.filter(
+      (event) =>
+        event.sourceFileId === incoming.driveFileId ||
+        event.additionalSources?.some((source) => source.driveFileId === incoming.driveFileId),
+    );
+    const hasIncomingIndex = Boolean(incoming.contentIndexComplete && incoming.contentIndexPages?.length);
+    if (!hasIncomingIndex && incomingEvents.length === 0) return;
 
     for (const existing of profile.sources) {
       if (
         existing.driveFileId === incoming.driveFileId ||
         existing.status !== 'processed' ||
         existing.rawDeletedAt ||
-        !existing.contentIndexComplete ||
-        !existing.contentIndexPages?.length ||
         !existing.digitizedAt
       ) continue;
 
-      const comparison = compareDocumentContainment(
-        { pages: existing.contentIndexPages, complete: true },
-        { pages: incoming.contentIndexPages, complete: true },
-      );
-      const incomingContainsExisting = comparison.relation === 'right_contains_left';
-      const existingContainsIncoming = comparison.relation === 'left_contains_right';
-      if (!incomingContainsExisting && !existingContainsIncoming) continue;
+      let containmentRelation: 'left_contains_right' | 'right_contains_left' | 'equivalent' | null = null;
+      if (hasIncomingIndex && existing.contentIndexComplete && existing.contentIndexPages?.length) {
+        const comparison = compareDocumentContainment(
+          { pages: existing.contentIndexPages, complete: true },
+          { pages: incoming.contentIndexPages || [], complete: true },
+        );
+        if (
+          comparison.relation === 'right_contains_left' ||
+          comparison.relation === 'left_contains_right' ||
+          comparison.relation === 'equivalent'
+        ) {
+          containmentRelation = comparison.relation;
+        }
+      }
 
-      const canonical = incomingContainsExisting ? incoming : existing;
-      const redundant = incomingContainsExisting ? existing : incoming;
+      if (!containmentRelation && incomingEvents.length > 0) {
+        const existingEvents = profile.timeline.filter((event) => event.sourceFileId === existing.driveFileId);
+        for (const existingEv of existingEvents) {
+          for (const incomingEv of incomingEvents) {
+            const structCmp = compareStructuredEventContainment(existingEv, incomingEv);
+            if (structCmp !== 'none') {
+              containmentRelation = structCmp;
+              break;
+            }
+          }
+          if (containmentRelation) break;
+        }
+      }
+
+      if (!containmentRelation) continue;
+
+      let canonical = existing;
+      let redundant = incoming;
+      if (containmentRelation === 'right_contains_left') {
+        canonical = incoming;
+        redundant = existing;
+      } else if (containmentRelation === 'equivalent') {
+        const existingScore = (existing.contentIndexPages?.length || 0) * 1_000_000 + (existing.fileSize || 0);
+        const incomingScore = (incoming.contentIndexPages?.length || 0) * 1_000_000 + (incoming.fileSize || 0);
+        if (incomingScore > existingScore) {
+          canonical = incoming;
+          redundant = existing;
+        }
+      }
+
       const linkedEvents = profile.timeline.filter((event) =>
         event.sourceFileId === redundant.driveFileId ||
         event.additionalSources?.some((source) => source.driveFileId === redundant.driveFileId),
@@ -3708,7 +3755,7 @@ export function HealthDashboard({
         fileHash: redundant.fileHash || '',
         hashAlgorithm: 'sha256' as const,
         uploadedAt: redundant.uploadedAt,
-        disposition: 'included' as const,
+        disposition: (containmentRelation === 'equivalent' ? 'duplicate' : 'included') as 'duplicate' | 'included',
       };
       const canonicalContributions = [
         ...(canonical.sourceContributions || []),
@@ -3775,9 +3822,9 @@ export function HealthDashboard({
         showToast(`Đã lưu dữ liệu OCR, nhưng giữ lại raw do không lưu được liên kết nguồn: ${message}`, 'error');
         return;
       }
-      if (savedBeforeTrash.syncPending) {
+      if (!isLocalWorkspace && savedBeforeTrash.syncPending) {
         showToast(
-          `Đã hợp nhất dữ liệu OCR của "${redundant.fileName}", nhưng chưa xóa raw vì JSON chưa đồng bộ Drive.`,
+          `Đã hợp nhất "${redundant.fileName}"; chờ đồng bộ Drive trước khi dọn tệp thừa.`,
           'info',
         );
         return;
@@ -3786,7 +3833,11 @@ export function HealthDashboard({
       setProfiles((previous) => ({ ...previous, [member.id]: savedBeforeTrash }));
 
       try {
-        await trashDriveFile(redundant.driveFileId);
+        if (redundant.driveFileId.startsWith('local_file_')) {
+          await deleteLocalSource(redundant.driveFileId, offlineOwnerKey || 'apk-local-device');
+        } else {
+          await trashDriveFile(redundant.driveFileId);
+        }
         const deletionTime = new Date().toISOString();
         const markedProfile: HealthProfile = {
           ...savedBeforeTrash,
@@ -3801,31 +3852,21 @@ export function HealthDashboard({
         profilesRef.current = { ...profilesRef.current, [member.id]: savedAfterTrash };
         setProfiles((previous) => ({ ...previous, [member.id]: savedAfterTrash }));
         profile = savedAfterTrash;
-        if (savedAfterTrash.syncPending) {
-          showToast(
-            `Raw "${redundant.fileName}" đã chuyển vào Thùng rác; trạng thái xóa sẽ đồng bộ khi Drive kết nối lại.`,
-            'info',
-          );
-        } else {
-          showToast(
-            `Đã gộp OCR và tự động chuyển raw "${redundant.fileName}" vào Thùng rác; giữ lại "${canonical.fileName}".`,
-            'success',
-          );
-        }
+        showToast(
+          `Đã gộp và dọn tệp trùng "${redundant.fileName}"; giữ bản đầy đủ "${canonical.fileName}".`,
+          'success',
+        );
         if (redundant.driveFileId === incomingSourceId) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
-        try {
-          await restoreTrashedDriveFile(redundant.driveFileId);
-        } catch (restoreError) {
-          const restoreMessage = restoreError instanceof Error ? restoreError.message : 'Lỗi không xác định.';
-          showToast(
-            `Không thể hoàn tất dọn raw "${redundant.fileName}" (${message}) hoặc khôi phục từ Thùng rác (${restoreMessage}).`,
-            'error',
-          );
-          return;
+        if (!redundant.driveFileId.startsWith('local_file_')) {
+          try {
+            await restoreTrashedDriveFile(redundant.driveFileId);
+          } catch {
+            // ignore restore failure
+          }
         }
-        showToast(`Đã giữ lại raw "${redundant.fileName}" vì không lưu được trạng thái sau dọn dẹp: ${message}`, 'error');
+        showToast(`Đã giữ lại tệp "${redundant.fileName}": ${message}`, 'error');
         return;
       }
     }
@@ -3840,7 +3881,6 @@ export function HealthDashboard({
   ): Promise<boolean> {
     if (
       !/^[a-f0-9]{64}$/i.test(fileHash) ||
-      !result.contentIndexComplete ||
       !isRecognizablePatientName(result.extracted.patientName) ||
       !isOcrSubjectMatchedToMember(
         result.extracted.patientName,
@@ -3851,32 +3891,49 @@ export function HealthDashboard({
       )
     ) return false;
 
+    const isLocalWorkspace = workspaceRef.current?.rootFolderId === 'local_offline_workspace';
     const profile = profilesRef.current[member.id] || profiles[member.id];
-    if (!profile || profile.syncPending) return false;
+    if (!profile || (!isLocalWorkspace && profile.syncPending)) return false;
     const incomingIndex = createDocumentContentIndex(result.contentIndexPages);
-    if (!incomingIndex.complete) return false;
 
     const candidates = profile.sources
       .filter((source) =>
         source.status === 'processed' &&
         !source.rawDeletedAt &&
         source.digitizedAt &&
-        source.contentIndexComplete &&
-        source.contentIndexPages?.length &&
         profile.timeline.some((event) =>
           event.sourceFileId === source.driveFileId ||
           event.additionalSources?.some((item) => item.driveFileId === source.driveFileId),
         ),
       )
-      .map((source) => ({
-        source,
-        comparison: compareDocumentContainment(
-          { pages: source.contentIndexPages || [], complete: true },
-          incomingIndex,
-        ),
-      }))
-      .filter(({ comparison }) => comparison.relation === 'left_contains_right')
-      .sort((left, right) => right.comparison.rightCoverage - left.comparison.rightCoverage);
+      .map((source) => {
+        let matched = false;
+        let score = 0;
+        if (incomingIndex.complete && source.contentIndexComplete && source.contentIndexPages?.length) {
+          const comparison = compareDocumentContainment(
+            { pages: source.contentIndexPages, complete: true },
+            incomingIndex,
+          );
+          if (comparison.relation === 'left_contains_right' || comparison.relation === 'equivalent') {
+            matched = true;
+            score = comparison.rightCoverage;
+          }
+        }
+        if (!matched) {
+          const sourceEvents = profile.timeline.filter((ev) => ev.sourceFileId === source.driveFileId);
+          for (const ev of sourceEvents) {
+            const structCmp = compareStructuredEventContainment(ev, result.extracted);
+            if (structCmp === 'left_contains_right' || structCmp === 'equivalent') {
+              matched = true;
+              score = structCmp === 'equivalent' ? 0.99 : 0.95;
+              break;
+            }
+          }
+        }
+        return { source, matched, score };
+      })
+      .filter((candidate) => candidate.matched)
+      .sort((left, right) => right.score - left.score);
 
     const canonical = candidates[0]?.source;
     if (!canonical) return false;
@@ -3891,7 +3948,7 @@ export function HealthDashboard({
       },
       extracted: result.extracted,
       contentIndexPages: canonical.contentIndexPages || [],
-      contentIndexComplete: true,
+      contentIndexComplete: Boolean(canonical.contentIndexComplete),
       sourceContributions: [{
         fileName: file.name,
         fileHash,
@@ -3905,7 +3962,7 @@ export function HealthDashboard({
     const saved = await saveExtractedDocumentAutomatically(draft, member, true);
     if (saved) {
       showToast(
-        `Tài liệu "${file.name}" đã được OCR, gộp vào JSON của "${canonical.fileName}" và không tải raw trùng lên Drive.`,
+        `Đã gộp "${file.name}" vào "${canonical.fileName}"; không lưu bản trùng.`,
         'success',
       );
     }
@@ -3951,7 +4008,7 @@ export function HealthDashboard({
       metrics: extracted.metrics || [],
       imagingResults: extracted.imagingResults || [],
       vaccinations: extracted.vaccinations || [],
-      hospitalization: extracted.hospitalization,
+      hospitalization: cleanHospitalizationRecord(extracted.hospitalization),
       advice: extracted.advice,
       nextFollowUp: extracted.nextFollowUp,
       notes: extracted.notes,
@@ -4357,7 +4414,7 @@ export function HealthDashboard({
       metrics: parseMetricLines(String(form.get('metrics') || '')),
       imagingResults: extracted.imagingResults || [],
       vaccinations: extracted.vaccinations || [],
-      hospitalization: extracted.hospitalization,
+      hospitalization: cleanHospitalizationRecord(extracted.hospitalization),
       advice: String(form.get('advice') || '').trim() || undefined,
       nextFollowUp: String(form.get('nextFollowUp') || '').trim() || undefined,
       notes: String(form.get('notes') || '').trim() || undefined,
@@ -5300,33 +5357,32 @@ export function HealthDashboard({
               <h2 className="text-2xl font-black tracking-tight text-slate-900">
                 Sức Khỏe Gia Đình
               </h2>
-              <p className="mt-2 text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
-                Nơi lưu trữ hồ sơ y tế, đơn thuốc, kết quả xét nghiệm an toàn và riêng tư tuyệt đối
-                trực tiếp trên Google Drive của chính gia đình bạn.
+              <p className="mt-1.5 text-xs sm:text-sm text-slate-600 max-w-md mx-auto">
+                Lưu trữ hồ sơ y tế gia đình an toàn trên Google Drive của bạn.
               </p>
             </div>
             {needsDriveAuthorization ? (
               <div className="space-y-4">
                 {userEmail ? (
-                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex items-start gap-2.5">
+                  <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex items-start gap-2.5">
                     <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
                       <p className="font-bold text-amber-900">
-                        Google Drive cần được cấp quyền
+                        Cần cấp quyền Google Drive
                       </p>
-                      <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
-                        Tài khoản <span className="font-semibold">{userEmail}</span> đã đăng nhập nhưng Drive chưa sẵn sàng. Hãy cấp quyền để tạo kho hoặc đồng bộ dữ liệu.
+                      <p className="text-[11px] text-amber-800 mt-0.5">
+                        Tài khoản <span className="font-semibold">{userEmail}</span> chưa cấp quyền Drive để đồng bộ.
                       </p>
                     </div>
                   </div>
                 ) : (
-                  <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-950 text-xs leading-relaxed space-y-2">
+                  <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-950 text-xs space-y-1">
                     <div className="flex items-center gap-2 font-bold text-emerald-900">
                       <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                      <span>Quyền riêng tư tuyệt đối</span>
+                      <span>Riêng tư trên Google Drive cá nhân</span>
                     </div>
-                    <p>
-                      Dữ liệu y tế của bạn được mã hóa và lưu trữ trực tiếp trên tài khoản Google Drive cá nhân. Không máy chủ trung gian nào lưu giữ bệnh án của bạn.
+                    <p className="text-[11px]">
+                      Dữ liệu lưu trực tiếp trên Google Drive của bạn, không qua máy chủ trung gian.
                     </p>
                   </div>
                 )}
@@ -5341,15 +5397,15 @@ export function HealthDashboard({
                 </button>
               </div>
             ) : (
-              <div className="space-y-5">
+              <div className="space-y-4">
                 <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs flex items-start gap-2.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                   <div className="flex-1 min-w-0">
                     <p className="font-bold text-emerald-900">
-                      Đăng nhập Quản trị viên (Admin): <span className="font-semibold text-emerald-700">{userEmail}</span>
+                      Admin: <span className="font-semibold text-emerald-700">{userEmail}</span>
                     </p>
-                    <p className="text-[11px] text-emerald-800 mt-1 leading-relaxed">
-                      Chưa phát hiện thư mục gia đình được chia sẻ trước đó. Bạn có thể nhấn nút dưới đây để khởi tạo không gian lưu trữ y tế gia đình mới trên Google Drive của mình.
+                    <p className="text-[11px] text-emerald-800 mt-0.5">
+                      Tạo thư mục gia đình mới hoặc mở thư mục Drive đã được chia sẻ.
                     </p>
                   </div>
                 </div>
@@ -5419,7 +5475,7 @@ export function HealthDashboard({
                     </div>
                     <h3 className="text-base font-black text-slate-900 tracking-tight">Chưa có dữ liệu y tế</h3>
                     <p className="mt-0.5 text-xs text-slate-500 max-w-xs mx-auto">
-                      Hồ sơ và tài liệu lưu riêng trên thiết bị; Gemini cần Internet để số hóa và phân tích.
+                      Dữ liệu lưu trên thiết bị; cần mạng để OCR và phân tích AI.
                     </p>
                     {/* Compact 3-Step Chips */}
                     <div className="grid grid-cols-3 gap-2 my-3 text-left">
@@ -5771,16 +5827,14 @@ export function HealthDashboard({
                 <div className="space-y-4">
                   {filteredTimeline.length === 0 ? (
                     <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center">
-                      <img
-                        src="/src/assets/images/empty_health_records_1793695802950.jpg"
-                        alt="Chưa có dữ liệu"
-                        className="w-40 h-32 object-cover rounded-2xl mx-auto mb-3 opacity-90"
-                      />
+                      <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3 border border-emerald-100 shadow-2xs">
+                        <FolderHeart className="w-7 h-7" />
+                      </div>
                       <h4 className="font-extrabold text-slate-800 text-base">
-                        Chưa có sự kiện y tế nào
+                        Chưa có sự kiện y tế
                       </h4>
                       <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                        Tải lên sổ khám bệnh, đơn thuốc hoặc kết quả xét nghiệm để hệ thống lưu trữ và xử lý.
+                        Tải ảnh hoặc PDF sổ khám, đơn thuốc, xét nghiệm để số hóa.
                       </p>
                     </div>
                   ) : (
@@ -5795,7 +5849,7 @@ export function HealthDashboard({
                           className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:border-emerald-300 transition-all space-y-3"
                         >
                           {/* Event Header Top Bar */}
-                          <div className="flex items-center justify-between gap-3 w-full border-b border-slate-100 pb-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2.5 w-full border-b border-slate-100 pb-2.5">
                             <div className="flex items-center gap-2.5 min-w-0">
                               <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs border border-emerald-100/60">
                                 <IconComp className="w-4 h-4" />
@@ -5813,7 +5867,7 @@ export function HealthDashboard({
                             </div>
                             {/* View original file(s) on Drive */}
                             {event.additionalSources && event.additionalSources.length > 1 ? (
-                              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
                                 {event.additionalSources.map((src, idx) => (
                                   <a
                                     key={src.driveFileId || idx}
@@ -5822,7 +5876,7 @@ export function HealthDashboard({
                                     )}/view`}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100/70 text-[11px] font-medium text-emerald-800 max-w-[180px] truncate"
+                                    className="flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100/70 text-[11px] font-medium text-emerald-800 max-w-[160px] sm:max-w-[240px] truncate"
                                     title={`Xem tệp gốc: ${src.fileName}`}
                                   >
                                     <ExternalLink className="w-3 h-3 text-emerald-600 shrink-0" />
@@ -5965,7 +6019,7 @@ export function HealthDashboard({
                             </div>
                           )}
                           {/* Hospitalization Record */}
-                          {event.hospitalization && (
+                          {hasMeaningfulHospitalization(event.hospitalization) && event.hospitalization && (
                             <div className="p-3 rounded-2xl bg-indigo-50/70 border border-indigo-200 text-xs space-y-1.5">
                               <span className="text-[11px] font-bold text-indigo-900 uppercase tracking-wide flex items-center gap-1">
                                 <FileHeart className="w-3.5 h-3.5" />
@@ -6165,7 +6219,7 @@ export function HealthDashboard({
             )}
             {/* VIEW 3: TRỢ LÝ AI (HEALTH CHAT ASSISTANT) */}
             {activeTab === 'assistant' && (
-              <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col gap-2.5 animate-in fade-in duration-150">
+              <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl md:max-w-3xl flex-col gap-2.5 animate-in fade-in duration-150">
                 <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-xs">
                   <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white shadow-sm">
                     <Bot className="h-5 w-5" />
@@ -6176,6 +6230,23 @@ export function HealthDashboard({
                       {selectedMember?.name || 'Chưa chọn thành viên'} · {selectedProfile?.timeline.length || 0} hồ sơ
                     </p>
                   </div>
+                  {chatMessages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        chatRequestIdRef.current += 1;
+                        setIsChatting(false);
+                        setChatMessages([]);
+                        setChatInput('');
+                      }}
+                      title="Làm mới cuộc trò chuyện"
+                      aria-label="Làm mới cuộc trò chuyện"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-800 active:scale-95"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      <span>Làm mới</span>
+                    </button>
+                  )}
                   <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
                     AI hỗ trợ
                   </span>
@@ -6196,9 +6267,9 @@ export function HealthDashboard({
                         <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
                           <Sparkles className="h-6 w-6" />
                         </div>
-                        <p className="text-sm font-bold text-slate-800">Bạn muốn tìm hiểu điều gì?</p>
-                        <p className="mt-1 max-w-sm text-xs leading-relaxed text-slate-500">
-                          Hỏi về hồ sơ sức khỏe hoặc kiến thức y tế nói chung. Khi có nguồn đáng tin cậy, trợ lý sẽ đính kèm liên kết tham khảo. AI không thay thế tư vấn của bác sĩ.
+                        <p className="text-sm font-bold text-slate-800">Bạn muốn hỏi gì?</p>
+                        <p className="mt-1 max-w-xs text-xs text-slate-500">
+                          Hỏi về hồ sơ sức khỏe hoặc kiến thức y tế tham khảo (không thay thế bác sĩ).
                         </p>
                         <div className="mt-4 flex max-w-lg flex-wrap justify-center gap-2">
                           {[
@@ -6279,7 +6350,7 @@ export function HealthDashboard({
                       aria-label={`Hỏi về hồ sơ sức khỏe của ${selectedMember?.name || 'thành viên'}`}
                       enterKeyHint="send"
                       disabled={isChatting}
-                      className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/15 disabled:opacity-60"
+                      className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-base sm:text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/15 disabled:opacity-60"
                     />
                     <button
                       type="submit"
@@ -6619,9 +6690,9 @@ export function HealthDashboard({
                 </div>
               </div>
             </div>
-            <div className="bg-slate-50 px-4 py-2 border-t border-slate-100">
-              <p className="text-[10px] text-slate-500 italic text-center font-medium">
-                AI xử lý tự động; kết quả sẽ xuất hiện trong Dòng thời gian sau khi hoàn tất.
+            <div className="bg-slate-50 px-4 py-1.5 border-t border-slate-100">
+              <p className="text-[10px] text-slate-500 text-center font-medium">
+                Tự động lưu vào Dòng thời gian sau khi xong.
               </p>
             </div>
           </div>
@@ -6632,7 +6703,7 @@ export function HealthDashboard({
           >
             <div className="mb-2 flex items-center gap-2 text-xs font-bold text-amber-900">
               <AlertCircle className="h-4 w-4" />
-              Có tài liệu OCR cần tiếp tục ({ocrRecoveryJobs.filter((job) => job.status !== 'processing').length})
+              Cần xử lý lại ({ocrRecoveryJobs.filter((job) => job.status !== 'processing').length})
             </div>
             <div className="max-h-36 space-y-2 overflow-y-auto">
               {ocrRecoveryJobs.filter((job) => job.status !== 'processing').map((job) => {
@@ -6647,14 +6718,12 @@ export function HealthDashboard({
                   <div key={job.driveFileId} className="flex items-center justify-between gap-2 rounded-xl bg-white/80 p-2">
                     <div className="min-w-0">
                       <span className="block truncate text-[11px] font-semibold text-slate-800">
-                        {job.status === 'needs_review'
-                          ? `Chưa xác định chủ thể · ${displayName}`
-                          : member ? `Hồ sơ ${member.name} (${displayName})` : displayName}
+                        {displayName}
                       </span>
-                      <span className="block text-[10px] text-slate-500">
+                      <span className="block text-[10px] text-slate-500 truncate">
                         {job.status === 'needs_review'
-                          ? 'Tài liệu được giữ lại, chưa thêm vào dòng thời gian sức khỏe. Có thể chạy lại OCR từ Drive.'
-                          : `Tiến độ trước đó ${job.progressPercent}%. Kết quả OCR không lưu trên thiết bị; chạy lại từ Drive để tiếp tục.`}
+                          ? 'Chưa rõ chủ thể — cần chọn thành viên'
+                          : `${member ? `${member.name} · ` : ''}Dừng ở ${job.progressPercent}%`}
                       </span>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
@@ -6664,7 +6733,7 @@ export function HealthDashboard({
                         onClick={() => void resumeInterruptedOcr(job)}
                         className="rounded-lg bg-emerald-700 px-2.5 py-1.5 text-[10px] font-bold text-white disabled:opacity-50"
                       >
-                        Chạy lại OCR
+                        OCR lại
                       </button>
                       <button
                         type="button"
@@ -6678,15 +6747,12 @@ export function HealthDashboard({
                 );
               })}
             </div>
-            <p className="mt-2 text-[9px] text-amber-800">
-              Chỉ trạng thái và ID tệp được lưu cục bộ; không lưu nội dung PDF, kết quả y tế hay API key.
-            </p>
           </div>
         )}
       </main>
       {/* 2. FIXED BOTTOM TAB BAR (Thumb navigation, Mobile Pattern 1) */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 safe-area-bottom shadow-lg">
-        <div className="max-w-md mx-auto grid grid-cols-5 items-center h-16 px-2">
+        <div className="max-w-md md:max-w-xl mx-auto grid grid-cols-5 items-center h-16 px-2">
           <button
             type="button"
             onClick={() => setActiveTab('overview')}
@@ -6781,9 +6847,9 @@ export function HealthDashboard({
                   <Camera className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="text-sm font-extrabold">Chụp ảnh bằng Camera</div>
+                  <div className="text-sm font-extrabold">Chụp ảnh tài liệu</div>
                   <div className="text-[11px] text-emerald-700 font-normal">
-                    Chụp trực tiếp sổ khám, hóa đơn, kết quả xét nghiệm
+                    Sổ khám, đơn thuốc, xét nghiệm
                   </div>
                 </div>
               </button>
@@ -6803,7 +6869,7 @@ export function HealthDashboard({
                 <div>
                   <div className="text-sm font-extrabold">Tải ảnh hoặc tệp PDF</div>
                   <div className="text-[11px] text-slate-500 font-normal">
-                    Chọn tệp tài liệu y tế sẵn có từ máy
+                    Chọn từ bộ nhớ thiết bị
                   </div>
                 </div>
               </button>
@@ -6919,6 +6985,8 @@ export function HealthDashboard({
         workspace={workspace}
         members={members}
         profiles={profiles}
+        selectedMemberId={selectedMember?.id}
+        recoveryJobs={ocrRecoveryJobs}
         localOwnerKey={offlineOwnerKey || 'apk-local-device'}
         isBatchBusy={Boolean(queueStatus) || isUploading}
         onClose={() => setShowRawFilesModal(false)}
@@ -7181,8 +7249,8 @@ function DigitizationReviewModal({
             {error}
           </div>
         )}
-        <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-100 text-[11px] text-emerald-900">
-          AI đã tự động trích xuất thông tin từ tài liệu. Bạn có thể kiểm tra họ tên, ngày sinh, giới tính đối chiếu với thành viên gia đình trước khi lưu.
+        <div className="p-2.5 rounded-xl bg-emerald-50/60 border border-emerald-100 text-[11px] text-emerald-900">
+          Kiểm tra nhanh thông tin OCR trước khi lưu.
         </div>
         {/* Đối chiếu & Ghép thông tin bệnh nhân với thành viên gia đình */}
         <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">

@@ -1,6 +1,6 @@
 import { normalizeModalityKey } from './deduplicationService';
 import { standardizeMetricKey } from './healthRecordService';
-import { classifyHealthEventType } from './healthEventType';
+import { classifyHealthEventType, cleanHospitalizationRecord } from './healthEventType';
 import {
   extractPatientNameFallbackFromText,
   isRecognizablePatientName,
@@ -104,14 +104,23 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
   }
 
   if (isRecord(result.physicalExam)) {
-    result.physicalExam = {
+    const cleanedPhysical = {
       height_cm: typeof result.physicalExam.height_cm === 'number' ? result.physicalExam.height_cm : undefined,
       weight_kg: typeof result.physicalExam.weight_kg === 'number' ? result.physicalExam.weight_kg : undefined,
       bmi: typeof result.physicalExam.bmi === 'number' ? result.physicalExam.bmi : undefined,
-      bp_mmHg: typeof result.physicalExam.bp_mmHg === 'string' ? result.physicalExam.bp_mmHg.trim() : undefined,
+      bp_mmHg: typeof result.physicalExam.bp_mmHg === 'string' && result.physicalExam.bp_mmHg.trim()
+        ? result.physicalExam.bp_mmHg.trim()
+        : undefined,
       pulse_bpm: typeof result.physicalExam.pulse_bpm === 'number' ? result.physicalExam.pulse_bpm : undefined,
-      classification: typeof result.physicalExam.classification === 'string' ? result.physicalExam.classification.trim() : undefined,
+      classification: typeof result.physicalExam.classification === 'string' && result.physicalExam.classification.trim()
+        ? result.physicalExam.classification.trim()
+        : undefined,
     };
+    if (Object.values(cleanedPhysical).some((val) => val !== undefined)) {
+      result.physicalExam = cleanedPhysical;
+    } else {
+      delete result.physicalExam;
+    }
   }
 
   if (Array.isArray(result.imagingResults)) {
@@ -176,14 +185,11 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
     result.vaccinations = vaxList;
   }
 
-  if (isRecord(result.hospitalization)) {
-    result.hospitalization = {
-      admissionDate: typeof result.hospitalization.admissionDate === 'string' ? result.hospitalization.admissionDate.trim() : undefined,
-      dischargeDate: typeof result.hospitalization.dischargeDate === 'string' ? result.hospitalization.dischargeDate.trim() : undefined,
-      department: typeof result.hospitalization.department === 'string' ? result.hospitalization.department.trim() : undefined,
-      treatmentSummary: typeof result.hospitalization.treatmentSummary === 'string' ? result.hospitalization.treatmentSummary.trim() : undefined,
-      surgicalNotes: typeof result.hospitalization.surgicalNotes === 'string' ? result.hospitalization.surgicalNotes.trim() : undefined,
-    };
+  const cleanedHospitalization = cleanHospitalizationRecord(result.hospitalization);
+  if (cleanedHospitalization) {
+    result.hospitalization = cleanedHospitalization;
+  } else {
+    delete result.hospitalization;
   }
 
   if (isRecord(result.extractedData)) {
@@ -455,7 +461,10 @@ export function mergeExtractedBatches(
   }
 
   const cleaned = cleanExtractedJson(merged);
-  const classifiedType = classifyHealthEventType(cleaned, fileName);
+  const classifiedType = classifyHealthEventType(
+    { ...cleaned, pageTexts: contentPages.length > 0 ? contentPages : rawCollectedPageTexts },
+    fileName,
+  );
   if (classifiedType) cleaned.type = classifiedType;
   return cleaned;
 }

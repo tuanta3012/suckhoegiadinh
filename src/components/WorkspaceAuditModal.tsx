@@ -136,10 +136,10 @@ export function WorkspaceAuditModal({
               </div>
               <div className="space-y-1">
                 <h4 className="font-bold text-white text-sm sm:text-base">
-                  Dọn dẹp thông minh toàn bộ Workspace
+                  Dọn dẹp tệp & sự kiện trùng lặp
                 </h4>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Hệ thống sẽ tự động quét toàn bộ tệp thô trên Google Drive và các sự kiện y tế, tự động xóa tệp thừa và gộp các sự kiện trùng lặp về duy nhất một cách an toàn.
+                  Tự động xóa tệp gốc trùng/đã bao trùm trên Drive và gộp sự kiện trùng lặp.
                 </p>
               </div>
             </div>

@@ -63,9 +63,6 @@ export function MemberEditModal({
             <h2 id="edit-member-title" className="text-lg font-extrabold text-slate-900">
               Chỉnh sửa thành viên
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Cập nhật thông tin trong Workspace và hồ sơ Drive.
-            </p>
           </div>
           <button
             type="button"

@@ -1,7 +1,12 @@
 import type { DriveFile, HealthDriveWorkspace } from './healthDriveService';
 import type { FamilyMember, HealthEvent, HealthProfile, HealthSource } from '../types';
 import { parseHealthProfile, summarizeTimeline } from './healthProfile';
-import { normalizeMedicalText, mergeHealthEvents } from './deduplicationService';
+import {
+  compareStructuredEventContainment,
+  normalizeMedicalText,
+  mergeHealthEvents,
+} from './deduplicationService';
+import { compareDocumentContainment } from './documentContainment';
 
 export interface WorkspaceAuditReport {
   scannedMembers: number;
@@ -281,6 +286,157 @@ export async function cleanupWorkspaceDuplicates(
             }
             console.warn(`[Cleanup Raw] Không thể hoàn tất dọn raw ${duplicate.id}:`, error);
           }
+        }
+      }
+
+      // 1b. Dọn dẹp các tệp raw có nội dung trùng lặp / bị bao trùm bởi bản đầy đủ hơn
+      const activeProcessedSources = profile.sources.filter((source) =>
+        source.status === 'processed' &&
+        !source.rawDeletedAt &&
+        !source.relocatedToMemberId &&
+        Boolean(source.digitizedAt) &&
+        profile.timeline.some((event) =>
+          event.sourceFileId === source.driveFileId ||
+          event.additionalSources?.some((item) => item.driveFileId === source.driveFileId),
+        ),
+      );
+      const removedRedundantIds = new Set<string>();
+      for (let leftIdx = 0; leftIdx < activeProcessedSources.length; leftIdx++) {
+        const leftSource = activeProcessedSources[leftIdx];
+        if (removedRedundantIds.has(leftSource.driveFileId)) continue;
+        for (let rightIdx = leftIdx + 1; rightIdx < activeProcessedSources.length; rightIdx++) {
+          const rightSource = activeProcessedSources[rightIdx];
+          if (removedRedundantIds.has(rightSource.driveFileId)) continue;
+
+          let containmentRelation: 'left_contains_right' | 'right_contains_left' | 'equivalent' | null = null;
+          if (
+            leftSource.contentIndexComplete &&
+            leftSource.contentIndexPages?.length &&
+            rightSource.contentIndexComplete &&
+            rightSource.contentIndexPages?.length
+          ) {
+            const cmp = compareDocumentContainment(
+              { pages: leftSource.contentIndexPages, complete: true },
+              { pages: rightSource.contentIndexPages, complete: true },
+            );
+            if (
+              cmp.relation === 'left_contains_right' ||
+              cmp.relation === 'right_contains_left' ||
+              cmp.relation === 'equivalent'
+            ) {
+              containmentRelation = cmp.relation;
+            }
+          }
+
+          if (!containmentRelation) {
+            const leftEvents = profile.timeline.filter((ev) => ev.sourceFileId === leftSource.driveFileId);
+            const rightEvents = profile.timeline.filter((ev) => ev.sourceFileId === rightSource.driveFileId);
+            for (const leftEv of leftEvents) {
+              for (const rightEv of rightEvents) {
+                const structCmp = compareStructuredEventContainment(leftEv, rightEv);
+                if (structCmp !== 'none') {
+                  containmentRelation = structCmp;
+                  break;
+                }
+              }
+              if (containmentRelation) break;
+            }
+          }
+
+          if (!containmentRelation) continue;
+
+          let canonical = leftSource;
+          let redundant = rightSource;
+          if (containmentRelation === 'right_contains_left') {
+            canonical = rightSource;
+            redundant = leftSource;
+          } else if (containmentRelation === 'equivalent') {
+            const leftScore = (leftSource.contentIndexPages?.length || 0) * 1_000_000 + (leftSource.fileSize || 0);
+            const rightScore = (rightSource.contentIndexPages?.length || 0) * 1_000_000 + (rightSource.fileSize || 0);
+            if (rightScore > leftScore) {
+              canonical = rightSource;
+              redundant = leftSource;
+            }
+          }
+
+          const now = new Date().toISOString();
+          const contribution = {
+            fileName: redundant.fileName,
+            fileHash: redundant.fileHash || '',
+            hashAlgorithm: 'sha256' as const,
+            uploadedAt: redundant.uploadedAt,
+            disposition: (containmentRelation === 'equivalent' ? 'duplicate' : 'included') as 'duplicate' | 'included',
+          };
+          const canonicalContributions = [
+            ...(canonical.sourceContributions || []),
+            ...(redundant.sourceContributions || []),
+            contribution,
+          ].filter((item, index, list) =>
+            list.findIndex((candidate) =>
+              candidate.fileHash === item.fileHash &&
+              candidate.hashAlgorithm === item.hashAlgorithm &&
+              candidate.fileName === item.fileName,
+            ) === index,
+          );
+          const remappedTimeline = profile.timeline.map((event) => {
+            if (event.sourceFileId !== redundant.driveFileId) return event;
+            const additionalSources = new Map(
+              (event.additionalSources || []).map((source) => [source.driveFileId, source]),
+            );
+            additionalSources.set(redundant.driveFileId, {
+              driveFileId: redundant.driveFileId,
+              fileName: redundant.fileName,
+            });
+            return {
+              ...event,
+              sourceFileId: canonical.driveFileId,
+              sourceFileName: canonical.fileName,
+              additionalSources: Array.from(additionalSources.values()),
+            };
+          });
+
+          const preparedProfile: HealthProfile = {
+            ...profile,
+            timeline: remappedTimeline,
+            sources: profile.sources.map((source) =>
+              source.driveFileId === canonical.driveFileId
+                ? { ...source, sourceContributions: canonicalContributions }
+                : source,
+            ),
+            updatedAt: now,
+          };
+          let prepared = await saveProfileFn(member.profileFileId, preparedProfile);
+          if (prepared.syncPending) continue;
+          profile = prepared;
+
+          try {
+            await deleteFileFn(redundant.driveFileId);
+            const deleteTime = new Date().toISOString();
+            const markedProfile: HealthProfile = {
+              ...prepared,
+              sources: prepared.sources.map((source) =>
+                source.driveFileId === redundant.driveFileId
+                  ? { ...source, rawDeletedAt: deleteTime }
+                  : source,
+              ),
+              updatedAt: deleteTime,
+            };
+            const savedAfterTrash = await saveProfileFn(member.profileFileId, markedProfile);
+            profile = savedAfterTrash;
+            removedRedundantIds.add(redundant.driveFileId);
+            deletedRawFiles++;
+          } catch (error) {
+            if (restoreFileFn) {
+              try {
+                await restoreFileFn(redundant.driveFileId);
+              } catch {
+                // ignore restore error
+              }
+            }
+            console.warn(`[Cleanup Raw] Không thể dọn tệp trùng nội dung ${redundant.driveFileId}:`, error);
+          }
+
+          if (redundant.driveFileId === leftSource.driveFileId) break;
         }
       }
     } catch (err) {

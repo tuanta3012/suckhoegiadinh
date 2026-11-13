@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { classifyHealthEventType } from './healthEventType';
+import {
+  classifyHealthEventType,
+  cleanHospitalizationRecord,
+  hasMeaningfulHospitalization,
+} from './healthEventType';
 
 describe('classifyHealthEventType', () => {
   it('classifies a periodic health examination as comprehensive despite attached lab results', () => {
@@ -18,6 +22,30 @@ describe('classifyHealthEventType', () => {
     })).toBe('test_result');
   });
 
+  it('does not misclassify lab reports with an empty hospitalization object as discharge', () => {
+    expect(classifyHealthEventType({
+      title: 'Kết quả xét nghiệm',
+      type: 'discharge',
+      facility: 'Công ty TNHH Lab Group International Vietnam - Medical Diag Center',
+      hospitalization: {},
+      metrics: [{ name: 'Glucose', value: 5.1, unit: 'mmol/L' }],
+    }, '26020379765_vi.pdf')).toBe('test_result');
+  });
+
+  it('ignores placeholder hospitalization strings', () => {
+    expect(hasMeaningfulHospitalization({
+      department: 'Không có',
+      treatmentSummary: 'N/A',
+    })).toBe(false);
+    expect(cleanHospitalizationRecord({
+      department: 'Nội tổng hợp',
+      dischargeDate: '2026-08-10',
+    })).toEqual({
+      department: 'Nội tổng hợp',
+      dischargeDate: '2026-08-10',
+    });
+  });
+
   it.each([
     ['Phieu tiem chung vac xin', 'vaccination'],
     ['Đơn thuốc điều trị ngoại trú', 'prescription'],
@@ -26,6 +54,27 @@ describe('classifyHealthEventType', () => {
     ['Phiếu khám bệnh', 'medical_report'],
   ] as const)('classifies document title "%s"', (title, expected) => {
     expect(classifyHealthEventType({ title })).toBe(expected);
+  });
+
+  it('uses internal pageTexts header and body when title and filename are generic', () => {
+    expect(classifyHealthEventType({
+      title: 'Tài liệu y tế',
+      pageTexts: ['PHIẾU KẾT QUẢ SIÊU ÂM DOPPLER TUYẾN GIÁP\nKết luận: Bình thường.'],
+    }, 'scan001.pdf')).toBe('imaging');
+
+    expect(classifyHealthEventType({
+      title: 'Hồ sơ sức khỏe',
+      pageTexts: ['MEDICAL DIAG CENTER\nKết quả tổng hợp'],
+      metrics: [
+        { name: 'WBC', value: 6.2, unit: 'G/L' },
+        { name: 'RBC', value: 4.8, unit: 'T/L' },
+      ],
+    }, '26020551115_vi.pdf')).toBe('test_result');
+
+    expect(classifyHealthEventType({
+      title: 'Hồ sơ sức khỏe',
+      pageTexts: ['SỔ KHÁM BỆNH\nKhám chuyên khoa nội'],
+    }, 'scan002.pdf')).toBe('medical_report');
   });
 
   it('uses the document filename when the extracted title is generic', () => {

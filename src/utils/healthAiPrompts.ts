@@ -68,17 +68,18 @@ BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU:
 4. TRÁNH LẶP DỮ LIỆU: Không lặp lại cùng tên chỉ số xét nghiệm giữa các trang.
 
 QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
-1. PHÂN LOẠI TÀI LIỆU (type) — phân loại theo mục đích/chủ đề chính của tài liệu:
+1. PHÂN LOẠI TÀI LIỆU (type) — BẮT BUỘC đọc tiêu đề chính bên trong trang đầu VÀ toàn bộ nội dung tài liệu để phân loại đúng mục đích khám/chữa bệnh:
    - "comprehensive_exam": Sổ/Phiếu khám sức khỏe định kỳ tổng quát, khám đoàn thể. Nếu tài liệu có tiêu đề hoặc tên tệp như "Khám sức khỏe định kỳ", "Khám tổng quát", "Khám sức khỏe năm ...", PHẢI chọn loại này dù kèm nhiều phiếu xét nghiệm, siêu âm hoặc ECG.
-   - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu...
-   - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG...).
+   - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu... (nếu chỉ là phiếu xét nghiệm thì PHẢI chọn "test_result", tuyệt đối không chọn "discharge").
+   - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG, nội soi...).
    - "prescription": Đơn thuốc, toa thuốc điều trị ngoại trú/nội trú.
    - "vaccination": Phiếu tiêm chủng, sổ tiêm ngừa vắc xin.
-   - "discharge": Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án nội trú.
+   - "discharge": CHỈ dùng khi là Giấy ra viện, phiếu xuất viện, tóm tắt bệnh án điều trị nội trú/phẫu thuật thực sự.
+   - "medical_report": Phiếu khám bệnh ngoại trú/chuyên khoa (không có điều trị nội trú).
    - "other": Tài liệu y tế khác (cung cấp "customCategory" và "extractedData").
 
 2. THÔNG TIN BÁC SĨ & ĐƠN VỊ: "facility", "doctorName".
-3. KHÁM THỂ LỰC (physicalExam): height_cm, weight_kg, bmi, bp_mmHg, pulse_bpm, classification.
+3. KHÁM THỂ LỰC (physicalExam): height_cm, weight_kg, bmi, bp_mmHg, pulse_bpm, classification (chỉ điền nếu có đo thực tế, nếu không có thì để null).
 4. CHẨN ĐOÁN & KẾT LUẬN (diagnoses): Toàn bộ chẩn đoán bệnh, tiền sử bệnh lý, kết luận bất thường.
 5. CHỈ SỐ XÉT NGHIỆM (metrics):
    - Trích xuất TẤT CẢ các chỉ số xét nghiệm với "standardKey" chuẩn hóa.
@@ -87,24 +88,24 @@ QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
 6. CHẨN ĐOÁN HÌNH ẢNH (imagingResults): modality, findings, conclusion.
 7. ĐƠN THUỐC CHI TIẾT (medications): name, dosage, quantity, frequency, timing, duration, instructions.
 8. TIÊM CHỦNG VẮC XIN (vaccinations): vaccineName, targetDisease, doseNumber, lotNumber, manufacturer, administeredDate, nextDoseDate, reactionNotes.
-9. NẰM VIỆN & RA VIỆN (hospitalization): admissionDate, dischargeDate, department, treatmentSummary, surgicalNotes.
+9. NẰM VIỆN & RA VIỆN (hospitalization): CHỈ điền khi tài liệu là hồ sơ nhập/ra viện hoặc điều trị nội trú thực sự; ngược lại PHẢI trả về null (không trả object rỗng {}).
 
 Hãy trả về DUY NHẤT một JSON object tuân thủ đúng cấu trúc:
 {
   "title": "Tên sự kiện y tế phản ánh đúng năm thực tế khám",
   "date": "YYYY-MM-DD",
-  "type": "comprehensive_exam" | "test_result" | "imaging" | "prescription" | "vaccination" | "discharge" | "other",
+  "type": "comprehensive_exam" | "medical_report" | "test_result" | "imaging" | "prescription" | "vaccination" | "discharge" | "other",
   "customCategory": "Tên phân loại nếu type là other",
   "patientName": "Họ và tên thuần túy của bệnh nhân ghi trên tài liệu (KHÔNG kèm tiền tố Ông/Bà/Họ tên/Giới tính; chuẩn hóa viết hoa có dấu tiếng Việt đầy đủ, VD: 'TRUONG ANH TUAN' -> 'Trương Anh Tuấn')",
   "patientBirthDate": "YYYY-MM-DD hoặc YYYY",
   "patientGender": "Nam" | "Nữ" | "Khác",
   "facility": "Tên cơ sở y tế",
   "doctorName": "Tên bác sĩ khám/kê đơn nếu có",
-  "physicalExam": { "height_cm": 178, "weight_kg": 77, "bmi": 24.3, "bp_mmHg": "120/80", "pulse_bpm": 60, "classification": "Loại I" },
+  "physicalExam": null,
   "diagnoses": ["Chẩn đoán 1"],
   "medications": [{ "name": "Tên thuốc", "dosage": "500mg", "quantity": "20 viên", "frequency": "2 lần/ngày", "timing": "Sau ăn", "duration": "10 ngày", "instructions": "Uống nhiều nước" }],
   "vaccinations": [],
-  "hospitalization": {},
+  "hospitalization": null,
   "metrics": [{ "name": "Tên chỉ số", "standardKey": "WBC", "value": 6.41, "unit": "G/L", "refRange": "3.9-10", "status": "normal" }],
   "imagingResults": [{ "modality": "Siêu âm", "findings": "Mô tả", "conclusion": "Kết luận" }],
   "extractedData": {},

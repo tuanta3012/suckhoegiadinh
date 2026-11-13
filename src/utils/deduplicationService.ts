@@ -7,6 +7,7 @@ import type {
   ImagingResult,
   Medication,
 } from '../types';
+import { cleanHospitalizationRecord } from './healthEventType';
 
 /**
  * Tính mã băm SHA-256 của tệp để định danh nội dung chính xác
@@ -565,7 +566,8 @@ export function mergeHealthEvents(
     metrics: Array.from(metricMap.values()),
     imagingResults: Array.from(imgMap.values()),
     vaccinations: cleanIncoming.vaccinations?.length ? cleanIncoming.vaccinations : cleanExisting.vaccinations,
-    hospitalization: cleanIncoming.hospitalization || cleanExisting.hospitalization,
+    hospitalization: cleanHospitalizationRecord(cleanIncoming.hospitalization) ||
+      cleanHospitalizationRecord(cleanExisting.hospitalization),
     advice: mergedAdvice,
     notes: mergedNotes,
     nextFollowUp: cleanIncoming.nextFollowUp || cleanExisting.nextFollowUp,
@@ -574,4 +576,77 @@ export function mergeHealthEvents(
     patientGender: cleanIncoming.patientGender || cleanExisting.patientGender,
     recordedAt: now,
   };
+}
+
+export type StructuredEventContainment =
+  | 'left_contains_right'
+  | 'right_contains_left'
+  | 'equivalent'
+  | 'none';
+
+function collectStructuredClinicalItems(event: Partial<HealthEvent>): Set<string> {
+  const items = new Set<string>();
+  for (const diag of event.diagnoses || []) {
+    const norm = normalizeMedicalText(diag);
+    if (norm) items.add(`diag:${norm}`);
+  }
+  for (const metric of event.metrics || []) {
+    if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
+    const key = metric.standardKey
+      ? metric.standardKey.trim().toUpperCase()
+      : normalizeMetricName(metric.name);
+    if (!key) continue;
+    items.add(`metric:${key}:${Number(metric.value).toFixed(2)}`);
+  }
+  for (const med of event.medications || []) {
+    const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
+    if (key) items.add(`med:${key}`);
+  }
+  for (const img of event.imagingResults || []) {
+    const key = normalizeModalityKey(img.modality);
+    if (key) items.add(`img:${key}`);
+  }
+  for (const vax of event.vaccinations || []) {
+    const key = normalizeMedicalText(vax.vaccineName);
+    if (key) items.add(`vax:${key}`);
+  }
+  return items;
+}
+
+export function compareStructuredEventContainment(
+  leftEvent: Partial<HealthEvent>,
+  rightEvent: Partial<HealthEvent>,
+): StructuredEventContainment {
+  const leftDate = typeof leftEvent.date === 'string' ? leftEvent.date.trim() : '';
+  const rightDate = typeof rightEvent.date === 'string' ? rightEvent.date.trim() : '';
+  if (!leftDate || leftDate !== rightDate) return 'none';
+
+  const leftItems = collectStructuredClinicalItems(leftEvent);
+  const rightItems = collectStructuredClinicalItems(rightEvent);
+  if (leftItems.size === 0 || rightItems.size === 0) return 'none';
+
+  const minSize = Math.min(leftItems.size, rightItems.size);
+  if (minSize < 2) {
+    const leftFacility = normalizeMedicalText(leftEvent.facility || '');
+    const rightFacility = normalizeMedicalText(rightEvent.facility || '');
+    const leftTitle = normalizeMedicalText(leftEvent.title || '');
+    const rightTitle = normalizeMedicalText(rightEvent.title || '');
+    const sameContext =
+      (leftFacility && rightFacility && (leftFacility.includes(rightFacility) || rightFacility.includes(leftFacility))) ||
+      (leftTitle && rightTitle && leftTitle === rightTitle);
+    if (!sameContext) return 'none';
+  }
+
+  let shared = 0;
+  for (const item of leftItems) {
+    if (rightItems.has(item)) shared += 1;
+  }
+
+  const leftInRight = shared / leftItems.size;
+  const rightInLeft = shared / rightItems.size;
+
+  if (leftInRight >= 0.9 && rightInLeft >= 0.9) return 'equivalent';
+  if (leftInRight >= 0.9 && rightInLeft < 0.9) return 'right_contains_left';
+  if (rightInLeft >= 0.9 && leftInRight < 0.9) return 'left_contains_right';
+  return 'none';
 }

@@ -107,8 +107,7 @@ export function AiDeepAnalysisCard({
           <div className="space-y-2.5">
             <div className="text-xs text-slate-600">
               <AnalysisBullet label="Tóm tắt">
-                {narrativeSummary ||
-                  'Nhấn nút "AI Y Khoa Chuyên Sâu" bên dưới để kích hoạt hệ thống tổng hợp chỉ số & phân tích 4 lớp y khoa cho hồ sơ thành viên.'}
+                {narrativeSummary || 'Chưa có phân tích AI. Bấm nút bên dưới để tổng hợp hồ sơ.'}
               </AnalysisBullet>
             </div>
             {onRetry && (

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   cleanAndDeduplicateEventData,
+  compareStructuredEventContainment,
   detectDuplicateEvent,
   detectDuplicateFile,
   mergeHealthEvents,
@@ -208,6 +209,32 @@ describe('Deduplication Service', () => {
 
       expect(merged.metrics).toHaveLength(2);
       expect(merged.advice).toBe('Tập thể dục đều đặn');
+    });
+
+    it('identifies subset and equivalent structured clinical events on the same date', () => {
+      const fullCheckup: Partial<HealthEvent> = {
+        date: '2026-08-10',
+        title: 'Khám sức khỏe định kỳ năm 2026',
+        metrics: [
+          { name: 'WBC', standardKey: 'WBC', value: 6.41, unit: 'G/L' },
+          { name: 'Glucose', standardKey: 'GLUCOSE', value: 5.1, unit: 'mmol/L' },
+          { name: 'Creatinin', standardKey: 'CREATININ', value: 78, unit: 'µmol/L' },
+        ],
+        imagingResults: [{ modality: 'Siêu âm ổ bụng', findings: '', conclusion: 'Bình thường' }],
+      };
+      const labSubset: Partial<HealthEvent> = {
+        date: '2026-08-10',
+        title: 'Kết quả xét nghiệm',
+        metrics: [
+          { name: 'WBC', standardKey: 'WBC', value: 6.41, unit: 'G/L' },
+          { name: 'Glucose', standardKey: 'GLUCOSE', value: 5.1, unit: 'mmol/L' },
+        ],
+      };
+
+      expect(compareStructuredEventContainment(labSubset, fullCheckup)).toBe('right_contains_left');
+      expect(compareStructuredEventContainment(fullCheckup, labSubset)).toBe('left_contains_right');
+      expect(compareStructuredEventContainment(labSubset, { ...labSubset })).toBe('equivalent');
+      expect(compareStructuredEventContainment(labSubset, { ...fullCheckup, date: '2026-08-11' })).toBe('none');
     });
   });
 });

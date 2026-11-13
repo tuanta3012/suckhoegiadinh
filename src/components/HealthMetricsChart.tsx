@@ -48,9 +48,9 @@ export default function HealthMetricsChart({
   const hasRange = typeof minNormal === 'number' && typeof maxNormal === 'number';
 
   return (
-    <div className="h-56 w-full pt-2">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+    <div className="h-56 sm:h-64 md:h-72 w-full min-w-0 overflow-hidden pt-2">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+        <AreaChart data={data} margin={{ top: 12, right: 16, left: 4, bottom: 4 }}>
           <defs>
             <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#059669" stopOpacity={0.25} />
@@ -58,8 +58,15 @@ export default function HealthMetricsChart({
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-          <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#64748b' }} stroke="#cbd5e1" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            tickMargin={6}
+            minTickGap={16}
+            stroke="#cbd5e1"
+          />
           <YAxis
+            width={44}
             tick={{ fontSize: 11, fill: '#64748b' }}
             stroke="#cbd5e1"
             domain={['auto', 'auto']}

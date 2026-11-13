@@ -23,6 +23,27 @@ describe('document containment', () => {
     expect(result.relation).toBe('right_contains_left');
   });
 
+  it('detects equivalent documents even with minor OCR formatting differences', () => {
+    const variant = pageA.replace('ba tháng', '3 tháng');
+    const result = compareDocumentContainment(
+      createDocumentContentIndex([pageA]),
+      createDocumentContentIndex([variant]),
+    );
+
+    expect(result.relation).toBe('equivalent');
+  });
+
+  it('detects containment on concise single-page lab reports', () => {
+    const shortLab = 'Phiếu kết quả xét nghiệm sinh hóa máu bệnh nhân Trương Anh Tuấn ngày 10 tháng 08 năm 2026 Glucose 5.2 Creatinin 78 Cholesterol 4.9 HDL 1.4 Medical Diag Center';
+    const fullCheckup = `${shortLab} Kết quả siêu âm ổ bụng tổng quát gan nhiễm mỡ nhẹ độ 1 bác sĩ khuyến nghị giảm tinh bột và tái khám định kỳ sau sáu tháng`;
+    const result = compareDocumentContainment(
+      createDocumentContentIndex([shortLab]),
+      createDocumentContentIndex([fullCheckup]),
+    );
+
+    expect(result.relation).toBe('right_contains_left');
+  });
+
   it('does not claim containment when documents only overlap partially', () => {
     const result = compareDocumentContainment(
       createDocumentContentIndex([pageA]),

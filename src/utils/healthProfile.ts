@@ -7,7 +7,11 @@ import type {
   HealthSource,
 } from '../types';
 import { mergeHealthEvents } from './deduplicationService';
-import { classifyHealthEventType, HEALTH_EVENT_TYPES } from './healthEventType';
+import {
+  classifyHealthEventType,
+  cleanHospitalizationRecord,
+  HEALTH_EVENT_TYPES,
+} from './healthEventType';
 
 const EVENT_TYPES = new Set<HealthEvent['type']>(HEALTH_EVENT_TYPES);
 
@@ -351,18 +355,24 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
   if (!raw || typeof raw !== 'object') return null;
   const type = classifyHealthEventType(raw, raw.sourceFileName) ||
     (EVENT_TYPES.has(raw.type) ? raw.type : 'medical_report');
-  const physicalExam = isJsonRecord(raw.physicalExam)
+  const rawPhysicalExam = isJsonRecord(raw.physicalExam)
     ? {
         height_cm: typeof raw.physicalExam.height_cm === 'number' ? raw.physicalExam.height_cm : undefined,
         weight_kg: typeof raw.physicalExam.weight_kg === 'number' ? raw.physicalExam.weight_kg : undefined,
         bmi: typeof raw.physicalExam.bmi === 'number' ? raw.physicalExam.bmi : undefined,
-        bp_mmHg: typeof raw.physicalExam.bp_mmHg === 'string' ? raw.physicalExam.bp_mmHg : undefined,
+        bp_mmHg: typeof raw.physicalExam.bp_mmHg === 'string' && raw.physicalExam.bp_mmHg.trim()
+          ? raw.physicalExam.bp_mmHg.trim()
+          : undefined,
         pulse_bpm: typeof raw.physicalExam.pulse_bpm === 'number' ? raw.physicalExam.pulse_bpm : undefined,
-        classification: typeof raw.physicalExam.classification === 'string'
-          ? raw.physicalExam.classification
+        classification: typeof raw.physicalExam.classification === 'string' && raw.physicalExam.classification.trim()
+          ? raw.physicalExam.classification.trim()
           : undefined,
       }
     : undefined;
+  const physicalExam =
+    rawPhysicalExam && Object.values(rawPhysicalExam).some((item) => item !== undefined)
+      ? rawPhysicalExam
+      : undefined;
   const vaccinations = Array.isArray(raw.vaccinations)
     ? raw.vaccinations.flatMap((item: any) => {
         if (!isJsonRecord(item) || !isNonEmptyString(item.vaccineName)) return [];
@@ -381,19 +391,7 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
         }];
       })
     : [];
-  const hospitalization = isJsonRecord(raw.hospitalization)
-    ? {
-        admissionDate: typeof raw.hospitalization.admissionDate === 'string' ? raw.hospitalization.admissionDate : undefined,
-        dischargeDate: typeof raw.hospitalization.dischargeDate === 'string' ? raw.hospitalization.dischargeDate : undefined,
-        department: typeof raw.hospitalization.department === 'string' ? raw.hospitalization.department : undefined,
-        treatmentSummary: typeof raw.hospitalization.treatmentSummary === 'string'
-          ? raw.hospitalization.treatmentSummary
-          : undefined,
-        surgicalNotes: typeof raw.hospitalization.surgicalNotes === 'string'
-          ? raw.hospitalization.surgicalNotes
-          : undefined,
-      }
-    : undefined;
+  const hospitalization = cleanHospitalizationRecord(raw.hospitalization);
   return {
     id: String(raw.id || `event_${crypto.randomUUID().slice(0, 8)}`),
     sourceFileId: String(raw.sourceFileId || 'legacy_source'),

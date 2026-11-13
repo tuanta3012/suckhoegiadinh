@@ -1,6 +1,7 @@
 export type DocumentContainment =
   | 'left_contains_right'
   | 'right_contains_left'
+  | 'equivalent'
   | 'overlap'
   | 'unknown';
 
@@ -15,11 +16,13 @@ export interface DocumentContainmentResult {
   rightCoverage: number;
 }
 
-const MIN_DOCUMENT_WORDS = 60;
-const MIN_PAGE_WORDS = 18;
-const MIN_SHINGLE_COUNT = 25;
-const DOCUMENT_COVERAGE_THRESHOLD = 0.98;
-const PAGE_COVERAGE_THRESHOLD = 0.94;
+const MIN_DOCUMENT_WORDS = 20;
+const MIN_PAGE_WORDS = 8;
+const MIN_SHINGLE_COUNT = 8;
+const DOCUMENT_COVERAGE_THRESHOLD = 0.90;
+const EQUIVALENT_COVERAGE_THRESHOLD = 0.92;
+const PAGE_COVERAGE_THRESHOLD = 0.80;
+const REFLOW_DOCUMENT_COVERAGE_THRESHOLD = 0.92;
 const MAX_INDEX_CHARACTERS = 120_000;
 
 export function createDocumentContentIndex(value: unknown): DocumentContentIndex {
@@ -101,18 +104,26 @@ export function compareDocumentContainment(
   const leftPagesCovered = left.pages.every((page) => isPageCovered(page, right.pages));
   const rightPagesCovered = right.pages.every((page) => isPageCovered(page, left.pages));
 
+  const leftContainedInRight =
+    (leftCoverage >= DOCUMENT_COVERAGE_THRESHOLD && leftPagesCovered) ||
+    (leftCoverage >= REFLOW_DOCUMENT_COVERAGE_THRESHOLD && right.pages.length >= left.pages.length);
+
+  const rightContainedInLeft =
+    (rightCoverage >= DOCUMENT_COVERAGE_THRESHOLD && rightPagesCovered) ||
+    (rightCoverage >= REFLOW_DOCUMENT_COVERAGE_THRESHOLD && left.pages.length >= right.pages.length);
+
   if (
-    leftCoverage >= DOCUMENT_COVERAGE_THRESHOLD &&
-    leftPagesCovered &&
-    (rightCoverage < DOCUMENT_COVERAGE_THRESHOLD || !rightPagesCovered)
+    leftContainedInRight &&
+    rightContainedInLeft &&
+    leftCoverage >= EQUIVALENT_COVERAGE_THRESHOLD &&
+    rightCoverage >= EQUIVALENT_COVERAGE_THRESHOLD
   ) {
+    return { relation: 'equivalent', leftCoverage, rightCoverage };
+  }
+  if (leftContainedInRight && (!rightContainedInLeft || leftCoverage > rightCoverage + 0.05)) {
     return { relation: 'right_contains_left', leftCoverage, rightCoverage };
   }
-  if (
-    rightCoverage >= DOCUMENT_COVERAGE_THRESHOLD &&
-    rightPagesCovered &&
-    (leftCoverage < DOCUMENT_COVERAGE_THRESHOLD || !leftPagesCovered)
-  ) {
+  if (rightContainedInLeft && (!leftContainedInRight || rightCoverage > leftCoverage + 0.05)) {
     return { relation: 'left_contains_right', leftCoverage, rightCoverage };
   }
   if (leftCoverage > 0 || rightCoverage > 0) {

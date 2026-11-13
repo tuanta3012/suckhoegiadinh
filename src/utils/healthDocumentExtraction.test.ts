@@ -129,5 +129,27 @@ describe('mergeExtractedBatches', () => {
 
     expect(recoveredFromText.patientName).toBe('Vũ Thị Tú Anh');
   });
+
+  it('drops empty hospitalization objects and keeps lab reports typed as test_result', () => {
+    const merged = mergeExtractedBatches([
+      {
+        firstPage: 1,
+        lastPage: 2,
+        extracted: {
+          title: 'Kết quả xét nghiệm',
+          type: 'discharge',
+          hospitalization: {},
+          physicalExam: {},
+          facility: 'Medical Diag Center',
+          metrics: [{ name: 'Glucose', standardKey: 'GLUCOSE', value: 5.2, unit: 'mmol/L' }],
+          pageTexts: ['PHIẾU KẾT QUẢ XÉT NGHIỆM\nHọ tên: Trương Anh Tuấn', 'Trang 2'],
+        },
+      },
+    ], undefined, '26020379765_vi.pdf');
+
+    expect(merged.hospitalization).toBeUndefined();
+    expect(merged.physicalExam).toBeUndefined();
+    expect(merged.type).toBe('test_result');
+  });
 });
 

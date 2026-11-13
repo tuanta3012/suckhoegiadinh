@@ -428,3 +428,10 @@ export async function fileFromLocalSource(sourceId: string, ownerKey: string): P
   if (!operation) throw new Error('Không tìm thấy tài liệu gốc trong bộ nhớ của ứng dụng.');
   return localSyncOutbox.readUploadFile(operation);
 }
+
+export async function deleteLocalSource(sourceId: string, ownerKey: string): Promise<void> {
+  const match = /^local_file_(.+)$/.exec(sourceId);
+  if (!match) return;
+  await localSyncOutbox.complete(ownerKey, match[1]);
+}
+

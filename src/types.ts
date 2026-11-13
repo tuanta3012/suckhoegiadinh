@@ -240,13 +240,6 @@ export interface WorkspaceMember {
   addedAt: string;
 }
 
-export interface AppSettings {
-  sharedFolderId?: string;
-  members?: FamilyMember[];
-  notificationsEnabled?: boolean;
-  enableBiometricLogin?: boolean;
-}
-
 export function canEditData(role?: string | null): boolean {
   return role === 'Owner' || role === 'Editor';
 }

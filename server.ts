@@ -119,6 +119,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function resolveServerGeminiKeys(clientGeminiKeys: unknown): string[] {
+  const clientList = Array.isArray(clientGeminiKeys)
+    ? clientGeminiKeys.filter((key): key is string => typeof key === 'string' && key.trim().length > 10).map((k) => k.trim())
+    : [];
+  const envRaw = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
+  const envList = envRaw
+    .split(/[,;\n]+/)
+    .map((key) => key.trim())
+    .filter((key) => key.length > 10);
+  return Array.from(new Set([...clientList, ...envList]));
+}
+
 async function startServer() {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -141,10 +153,12 @@ async function startServer() {
   });
 
   app.get('/api/gemini/status', (_req: Request, res: Response) => {
+    const serverKeysCount = resolveServerGeminiKeys([]).length;
     res.json({
       status: 'ok',
-      keySource: 'workspace-ai-resources',
-      requiresWorkspaceKeys: true,
+      keySource: serverKeysCount > 0 ? 'server-env-and-workspace' : 'workspace-ai-resources',
+      hasServerEnvKeys: serverKeysCount > 0,
+      requiresWorkspaceKeys: serverKeysCount === 0,
       supportedTasks: Object.keys(TASK_MODELS),
       taskModels: TASK_MODELS,
       quotasPerProject: {
@@ -242,7 +256,7 @@ async function startServer() {
         preferredModel: model,
         generationConfig: isRecord(config) ? config : undefined,
         timeoutMs: 60_000,
-        clientGeminiKeys: req.body.clientGeminiKeys,
+        clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
       res.json({ success: true, text, modelUsed });
     } catch (err) {
@@ -283,7 +297,7 @@ async function startServer() {
 
       const effectiveMime = mimeType || 'application/pdf';
       const fileNameStr = typeof req.body.fileName === 'string' ? req.body.fileName : 'Không rõ tên tệp';
-      const requestContext = getOrCreateSharedGeminiRequestContext(req.body.clientGeminiKeys);
+      const requestContext = getOrCreateSharedGeminiRequestContext(resolveServerGeminiKeys(req.body.clientGeminiKeys));
 
       if (req.body.stream) {
         res.setHeader('Content-Type', 'text/event-stream');
@@ -416,7 +430,7 @@ async function startServer() {
         task: 'refinement',
         contents: [{ text: buildRefinePrompt(memberName, events) }],
         responseMimeType: 'application/json',
-        clientGeminiKeys: req.body.clientGeminiKeys,
+        clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
       const parsed = parseJsonSafely(text) as {
@@ -447,7 +461,7 @@ async function startServer() {
         contents: [{ text: buildSummarizePrompt(memberName, member, profile) }],
         responseMimeType: 'application/json',
         responseSchema: SUMMARIZE_RESPONSE_SCHEMA,
-        clientGeminiKeys: req.body.clientGeminiKeys,
+        clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
       const parsed = parseJsonSafely(text) as { summary?: string };
@@ -479,7 +493,7 @@ async function startServer() {
         responseMimeType: 'application/json',
         responseSchema: COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
         preferredModel: requestedModel,
-        clientGeminiKeys: req.body.clientGeminiKeys,
+        clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
       });
 
       const parsed = parseJsonSafely(text);
@@ -519,7 +533,7 @@ async function startServer() {
 
       const memberName = typeof member?.name === 'string' ? member.name.slice(0, 120) : 'Thành viên';
       const history = normalizeHealthAssistantHistory(req.body.history);
-      const requestContext = getOrCreateSharedGeminiRequestContext(req.body.clientGeminiKeys);
+      const requestContext = getOrCreateSharedGeminiRequestContext(resolveServerGeminiKeys(req.body.clientGeminiKeys));
 
       if (stream) {
         res.setHeader('Content-Type', 'text/event-stream');
