@@ -241,7 +241,7 @@ export function standardizeMetricKey(rawKey: string, unit: string, metricName: s
     // Chuẩn hóa các key phổ biến trong nước tiểu
     if (key === 'WBC' || key === 'LEU' || lowerName.includes('bạch cầu')) return 'URINE_LEU';
     if (key === 'RBC' || key === 'ERY' || lowerName.includes('hồng cầu')) return 'URINE_RBC_SED';
-    if (key === 'PRO' || key === 'PROTEIN' || lowerName.includes('đạm')) return 'URINE_PRO';
+    if (key === 'PRO' || key === 'PROTEIN' || lowerName.includes('đạm') || /\b(?:pro|protein)\b/i.test(normalizedName)) return 'URINE_PRO';
     if (key === 'GLUCOSE' || key === 'GLU' || lowerName.includes('đường')) return 'URINE_GLU';
     if (key === 'BIL' || lowerName.includes('sắc tố mật')) return 'URINE_BIL';
     if (key === 'NIT' || lowerName.includes('nitrit')) return 'URINE_NIT';

@@ -161,6 +161,7 @@ import { WorkspaceAuditModal } from './WorkspaceAuditModal';
 import {
   computeFileFingerprint,
   compareStructuredEventContainment,
+  consolidateTimelineEvents,
   detectDuplicateFile,
   detectCrossMemberDuplicateFile,
   detectDuplicateEvent,
@@ -801,10 +802,13 @@ export function HealthDashboard({
     }
   }, [workspace?.rootFolderId]);
   const normalizedUserEmail = userEmail?.trim().toLowerCase() || null;
+  const [cacheOwnerEmail, setCacheOwnerEmail] = useState<string | null>(normalizedUserEmail);
   const previousUserEmailRef = useRef(normalizedUserEmail);
+  const discoveryAttemptedRef = useRef(false);
   useEffect(() => {
     if (previousUserEmailRef.current === normalizedUserEmail) return;
     previousUserEmailRef.current = normalizedUserEmail;
+    discoveryAttemptedRef.current = false;
     chatRequestIdRef.current += 1;
     const nextOfflineState = loadNativeOfflineState(userEmail);
     setWorkspace(nextOfflineState.workspace);
@@ -813,6 +817,7 @@ export function HealthDashboard({
       nextOfflineState.workspace.rootFolderId !== 'local_offline_workspace';
     setProfiles(nextOfflineState.profiles);
     profilesRef.current = nextOfflineState.profiles;
+    setCacheOwnerEmail(normalizedUserEmail);
     setSelectedMemberId(
       findMemberForEmail(nextOfflineState.workspace.family.members, userEmail)?.id ||
         nextOfflineState.workspace.family.members[0]?.id ||
@@ -834,7 +839,7 @@ export function HealthDashboard({
     workspaceRef.current = workspace;
   }, [workspace]);
   useEffect(() => {
-    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
+    if (!Capacitor.isNativePlatform() || cacheOwnerEmail !== normalizedUserEmail) return;
     try {
       localStorage.setItem(
         offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail),
@@ -843,9 +848,9 @@ export function HealthDashboard({
     } catch (error) {
       console.warn('[Offline cache] Could not persist native workspace.', error);
     }
-  }, [normalizedUserEmail, userEmail, workspace]);
+  }, [cacheOwnerEmail, normalizedUserEmail, userEmail, workspace]);
   useEffect(() => {
-    if (!Capacitor.isNativePlatform() || previousUserEmailRef.current !== normalizedUserEmail) return;
+    if (!Capacitor.isNativePlatform() || cacheOwnerEmail !== normalizedUserEmail) return;
     const key = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
     try {
       if (Object.keys(profiles).length > 0) {
@@ -856,7 +861,7 @@ export function HealthDashboard({
     } catch (error) {
       console.warn('[Offline cache] Could not persist native health profiles.', error);
     }
-  }, [normalizedUserEmail, profiles, userEmail]);
+  }, [cacheOwnerEmail, normalizedUserEmail, profiles, userEmail]);
   useEffect(() => {
     profilesRef.current = profiles;
   }, [profiles]);
@@ -914,15 +919,17 @@ export function HealthDashboard({
     );
     setIsSummarizing(true);
     try {
-      // 1. Tự động Chuẩn hóa & Sắp xếp toàn bộ dữ liệu mới (Batch Refinement)
+      // 1. Tự động Chuẩn hóa, phân loại & gộp sự kiện trùng trong cùng đợt khám
       const { organizedTimeline } = await refineAndOrganizeMemberData(
         targetMember,
         currentProfile.timeline,
       );
-      
+      const { timeline: consolidatedTimeline } = consolidateTimelineEvents(organizedTimeline);
+
       const refinedProfile: HealthProfile = {
         ...currentProfile,
-        timeline: organizedTimeline,
+        timeline: consolidatedTimeline,
+        summary: summarizeTimeline(consolidatedTimeline, currentProfile.summary.narrative),
       };
       // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-4-hydrogen
       const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
@@ -2041,11 +2048,9 @@ export function HealthDashboard({
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return 'unlinked';
     return 'online';
   }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace, userEmail]);
-  // Auto-connect workspace on mount or Drive authorization change
-  const discoveryAttemptedRef = useRef(false);
   // Auto-connect to Drive Workspace on login
   useEffect(() => {
-    if (!driveAuthorized || !userEmail || isResettingRef.current) return;
+    if (!driveAuthorized || !userEmail || isResettingRef.current || cacheOwnerEmail !== normalizedUserEmail) return;
     const shouldRefreshCachedWorkspace = shouldRefreshCachedWorkspaceRef.current;
     
     // Skip if already connected (unless force refresh) or if we already tried discovery and failed
@@ -2081,8 +2086,12 @@ export function HealthDashboard({
               showToast('Đã kết nối và đồng bộ 2 chiều dữ liệu từ Google Drive.', 'success');
               return;
             }
-          } catch {
-            console.warn('[Auto-Connect] Saved root folder failed, searching Drive...');
+          } catch (savedError) {
+            console.warn('[Auto-Connect] Saved root folder failed, searching Drive...', savedError);
+            const savedMsg = savedError instanceof Error ? savedError.message : '';
+            if (/file not found|\b404\b|not found|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json|không còn trong danh sách/i.test(savedMsg)) {
+              localStorage.removeItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`);
+            }
           }
         }
         const assignmentPromise = readHealthWorkspaceAssignment(userEmail).then(
@@ -2177,9 +2186,9 @@ export function HealthDashboard({
               showToast(message, 'error');
             });
         } else if (!cancelled) {
-          // Nếu không có lời mời và cũng không tìm thấy thư mục cũ trên Drive
+          // Không tìm thấy lời mời hay thư mục Drive cũ: trạng thái sạch, không báo lỗi giả
           if (!assignment && !('error' in assignmentResult)) {
-            setErrorMessage('Tài khoản chưa được mời vào gia đình. Hãy nhờ Quản trị viên (Admin) thêm email của bạn vào danh sách thành viên.');
+            setErrorMessage('');
           }
           setIsSyncing(false);
         }
@@ -2201,7 +2210,7 @@ export function HealthDashboard({
       cancelled = true;
       setIsSyncing(false);
     };
-  }, [driveAuthorized, reloadProfiles, showToast, userEmail, workspace?.rootFolderId]);
+  }, [cacheOwnerEmail, driveAuthorized, normalizedUserEmail, reloadProfiles, showToast, userEmail, workspace?.rootFolderId]);
   // Clean expired raw files (>3 years) automatically
   useEffect(() => {
     if (!workspace || !driveAuthorized || cleanupInFlight.current) return;
@@ -3827,7 +3836,14 @@ export function HealthDashboard({
     return fallback;
   }
 
-  async function cleanupContainedRawDocuments(member: FamilyMember, incomingSourceId: string): Promise<void> {
+  async function cleanupContainedRawDocuments(
+    member: FamilyMember,
+    incomingSourceId: string,
+    preMergeContainmentHint?: {
+      existingSourceId: string;
+      relation: 'left_contains_right' | 'right_contains_left' | 'equivalent';
+    },
+  ): Promise<void> {
     const isLocalWorkspace = workspaceRef.current?.rootFolderId === 'local_offline_workspace';
     let profile = profilesRef.current[member.id] || profiles[member.id];
     if (!profile || (!isLocalWorkspace && profile.syncPending)) return;
@@ -3845,7 +3861,7 @@ export function HealthDashboard({
         event.additionalSources?.some((source) => source.driveFileId === incoming.driveFileId),
     );
     const hasIncomingIndex = Boolean(incoming.contentIndexComplete && incoming.contentIndexPages?.length);
-    if (!hasIncomingIndex && incomingEvents.length === 0) return;
+    if (!hasIncomingIndex && incomingEvents.length === 0 && !preMergeContainmentHint) return;
 
     for (const existing of profile.sources) {
       if (
@@ -3882,6 +3898,14 @@ export function HealthDashboard({
           }
           if (containmentRelation) break;
         }
+      }
+
+      if (
+        !containmentRelation &&
+        preMergeContainmentHint &&
+        existing.driveFileId === preMergeContainmentHint.existingSourceId
+      ) {
+        containmentRelation = preMergeContainmentHint.relation;
       }
 
       if (!containmentRelation) continue;
@@ -3942,16 +3966,24 @@ export function HealthDashboard({
         }
       }
 
-      const remappedTimeline = profile.timeline.map((event) =>
-        event.sourceFileId === redundant.driveFileId
-          ? {
-              ...event,
-              sourceFileId: canonical.driveFileId,
-              sourceFileName: canonical.fileName,
-              additionalSources: Array.from(canonicalSources.values()),
-            }
-          : event,
-      );
+      const remappedTimeline = profile.timeline.map((event) => {
+        const referencesRedundant =
+          event.sourceFileId === redundant.driveFileId ||
+          event.additionalSources?.some((source) => source.driveFileId === redundant.driveFileId);
+        if (!referencesRedundant) return event;
+        const mergedEventSources = new Map(
+          (event.additionalSources || []).map((source) => [source.driveFileId, source]),
+        );
+        for (const [id, src] of canonicalSources.entries()) {
+          if (id && id !== canonical.driveFileId) mergedEventSources.set(id, src);
+        }
+        return {
+          ...event,
+          sourceFileId: canonical.driveFileId,
+          sourceFileName: canonical.fileName,
+          additionalSources: Array.from(mergedEventSources.values()),
+        };
+      });
       const linkedSourceIds = new Set(
         remappedTimeline.flatMap((event) => [
           event.sourceFileId,
@@ -4708,6 +4740,21 @@ export function HealthDashboard({
         : null;
       const saveProfileTimer = digitizationLogger.startTimer();
       if (duplicateResolution === 'merge' && existingMatch) {
+        let preMergeContainmentHint:
+          | {
+              existingSourceId: string;
+              relation: 'left_contains_right' | 'right_contains_left' | 'equivalent';
+            }
+          | undefined;
+        if (existingMatch.sourceFileId && existingMatch.sourceFileId !== draft.source.id) {
+          const structRelation = compareStructuredEventContainment(existingMatch, nextEvent);
+          if (structRelation !== 'none') {
+            preMergeContainmentHint = {
+              existingSourceId: existingMatch.sourceFileId,
+              relation: structRelation,
+            };
+          }
+        }
         // 1. Hợp nhất thông minh sự kiện cũ và mới (giữ lại chỉ số, thuốc, bổ sung cái mới)
         const mergedEvent = mergeHealthEvents(existingMatch, nextEvent);
         const updatedTimeline = effectiveProfile.timeline.map((item) =>
@@ -4739,7 +4786,7 @@ export function HealthDashboard({
         currentProfiles[effectiveMember.id] = saved;
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: saved };
         setProfiles((prev) => ({ ...prev, [effectiveMember.id]: saved }));
-        await cleanupContainedRawDocuments(effectiveMember, draft.source.id);
+        await cleanupContainedRawDocuments(effectiveMember, draft.source.id, preMergeContainmentHint);
         forgetOcrRecoveryJob(draft.source.id);
         setSelectedMemberId(effectiveMember.id);
         selectedMemberIdRef.current = effectiveMember.id;
@@ -5018,15 +5065,21 @@ export function HealthDashboard({
       ) {
         throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc. Không có dữ liệu nào được thay đổi.');
       }
+      const { timeline: finalTimeline, mergedCount } = consolidateTimelineEvents(organizedTimeline);
       const updatedProfile: HealthProfile = {
         ...selectedProfile,
-        timeline: organizedTimeline,
-        summary: summarizeTimeline(organizedTimeline, selectedProfile.summary.narrative),
+        timeline: finalTimeline,
+        summary: summarizeTimeline(finalTimeline, selectedProfile.summary.narrative),
         updatedAt: new Date().toISOString(),
       };
       const saved = await saveHealthProfile(selectedMember.profileFileId, updatedProfile);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      showToast('Đã chuẩn hóa danh pháp y khoa thành công! Bạn có thể bấm "Phân tích chuyên sâu" khi cần.', 'success');
+      showToast(
+        mergedCount > 0
+          ? `Đã chuẩn hóa danh pháp & gộp ${mergedCount} hồ sơ trùng/cùng đợt khám thành công!`
+          : 'Đã chuẩn hóa danh pháp y khoa thành công! Bạn có thể bấm "Phân tích chuyên sâu" khi cần.',
+        'success',
+      );
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Lỗi khi hiệu chỉnh dữ liệu.', 'error');
     } finally {
@@ -5688,9 +5741,6 @@ export function HealthDashboard({
                       <FolderHeart className="w-5 h-5" />
                     </div>
                     <h3 className="text-base font-black text-slate-900 tracking-tight">Chưa có dữ liệu y tế</h3>
-                    <p className="mt-0.5 text-xs text-slate-500 max-w-xs mx-auto">
-                      Dữ liệu lưu trên thiết bị; cần mạng để OCR và phân tích AI.
-                    </p>
                     {/* Compact 3-Step Chips */}
                     <div className="grid grid-cols-3 gap-2 my-3 text-left">
                       <button
@@ -5718,15 +5768,7 @@ export function HealthDashboard({
                       </div>
                     </div>
                     {/* Action Bar */}
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <button
-                        type="button"
-                        onClick={handleFileUploadTrigger}
-                        className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all"
-                      >
-                        <FileUp className="w-4 h-4" />
-                        <span>Số hóa tài liệu ngay</span>
-                      </button>
+                    <div className="flex justify-center">
                       {!userEmail ? (
                         <button
                           type="button"
@@ -5734,9 +5776,9 @@ export function HealthDashboard({
                             setErrorMessage('');
                             onConnectDrive();
                           }}
-                          className="py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
+                          className="w-full sm:w-auto min-w-[220px] py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-all"
                         >
-                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                          <ShieldCheck className="w-4 h-4 text-white" />
                           <span>{driveActionLabel}</span>
                         </button>
                       ) : (
@@ -5752,9 +5794,10 @@ export function HealthDashboard({
                               void handleCreateWorkspace();
                             }
                           }}
-                          className="py-2.5 px-3 rounded-xl border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center gap-1 transition-all disabled:opacity-50"
+                          className="w-full sm:w-auto min-w-[220px] py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50 shadow-xs"
                         >
-                          {isSyncing ? 'Đang đồng bộ...' : driveActionLabel}
+                          <Cloud className="w-4 h-4 text-white" />
+                          <span>{isSyncing ? 'Đang đồng bộ...' : driveActionLabel}</span>
                         </button>
                       )}
                     </div>
@@ -5963,47 +6006,49 @@ export function HealthDashboard({
             {activeTab === 'timeline' && (
               <div className={`space-y-6 ${tabSlideClass}`}>
                 {/* Active Member Bar & Action CTAs */}
-                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-lg shrink-0">
-                      {selectedMember?.name.charAt(0) || 'U'}
+                {selectedProfile && selectedProfile.timeline.length > 0 && (
+                  <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-lg shrink-0">
+                        {selectedMember?.name.charAt(0) || 'U'}
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="font-extrabold text-slate-900 text-sm truncate">
+                          {selectedMember?.name}
+                        </h3>
+                        {selectedMember && (
+                          <p className="text-[11px] text-slate-500 truncate">
+                            {[
+                              selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
+                              selectedMember.birthDate ? `Sinh ${formatDateVN(selectedMember.birthDate)}` : '',
+                            ].filter(Boolean).join(' · ')}
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <h3 className="font-extrabold text-slate-900 text-sm truncate">
-                        {selectedMember?.name}
-                      </h3>
-                      {selectedMember && (
-                        <p className="text-[11px] text-slate-500 truncate">
-                          {[
-                            selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
-                            selectedMember.birthDate ? `Sinh ${formatDateVN(selectedMember.birthDate)}` : '',
-                          ].filter(Boolean).join(' · ')}
-                        </p>
-                      )}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleFileUploadTrigger}
+                        disabled={(!driveAuthorized && !canUseLocalWorkspace) || isUploading}
+                        className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
+                      >
+                        <FileUp className="w-4 h-4" />
+                        <span>Tải tài liệu</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowRawFilesModal(true)}
+                        disabled={!driveAuthorized && !canUseLocalWorkspace}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-teal-200 bg-teal-50/80 hover:bg-teal-100 text-teal-900 font-bold text-xs transition-all disabled:opacity-50 shrink-0"
+                        title="Quản lý tài liệu gốc và trạng thái số hóa"
+                      >
+                        <FileStack className="w-4 h-4 text-teal-600" />
+                        <span>Tài liệu gốc</span>
+                      </button>
                     </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={handleFileUploadTrigger}
-                      disabled={(!driveAuthorized && !canUseLocalWorkspace) || isUploading}
-                      className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
-                    >
-                      <FileUp className="w-4 h-4" />
-                      <span>Tải tài liệu</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowRawFilesModal(true)}
-                      disabled={!driveAuthorized && !canUseLocalWorkspace}
-                      className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-teal-200 bg-teal-50/80 hover:bg-teal-100 text-teal-900 font-bold text-xs transition-all disabled:opacity-50 shrink-0"
-                      title="Quản lý tài liệu gốc và trạng thái số hóa"
-                    >
-                      <FileStack className="w-4 h-4 text-teal-600" />
-                      <span>Tài liệu gốc</span>
-                    </button>
-                  </div>
-                </div>
+                )}
                 {/* Timeline Filter Tabs */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
                   <button
@@ -6434,38 +6479,6 @@ export function HealthDashboard({
             {/* VIEW 3: TRỢ LÝ AI (HEALTH CHAT ASSISTANT) */}
             {activeTab === 'assistant' && (
               <div className={`mx-auto flex h-full min-h-0 w-full max-w-2xl md:max-w-3xl flex-col gap-2.5 ${tabSlideClass}`}>
-                <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-xs">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white shadow-sm">
-                    <Bot className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-sm font-extrabold text-slate-900">Trợ lý Y tế Gia đình</h3>
-                    <p className="truncate text-[11px] text-slate-500">
-                      {selectedMember?.name || 'Chưa chọn thành viên'} · {selectedProfile?.timeline.length || 0} hồ sơ
-                    </p>
-                  </div>
-                  {chatMessages.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        chatRequestIdRef.current += 1;
-                        setIsChatting(false);
-                        setChatMessages([]);
-                        setChatInput('');
-                      }}
-                      title="Làm mới cuộc trò chuyện"
-                      aria-label="Làm mới cuộc trò chuyện"
-                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-800 active:scale-95"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      <span>Làm mới</span>
-                    </button>
-                  )}
-                  <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
-                    AI hỗ trợ
-                  </span>
-                </div>
-
                 <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
                   <div
                     ref={chatScrollRef}

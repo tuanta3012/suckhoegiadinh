@@ -391,11 +391,24 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
         }];
       })
     : [];
+  const additionalSources = Array.isArray(raw.additionalSources)
+    ? raw.additionalSources.flatMap((item: any) => {
+        if (!isJsonRecord(item) || !isNonEmptyString(item.driveFileId)) return [];
+        return [{
+          driveFileId: String(item.driveFileId),
+          fileName:
+            typeof item.fileName === 'string' && item.fileName.trim()
+              ? item.fileName
+              : 'Tài liệu y tế',
+        }];
+      })
+    : [];
   const hospitalization = cleanHospitalizationRecord(raw.hospitalization);
   return {
     id: String(raw.id || `event_${crypto.randomUUID().slice(0, 8)}`),
     sourceFileId: String(raw.sourceFileId || 'legacy_source'),
     sourceFileName: String(raw.sourceFileName || 'Tài liệu y tế'),
+    ...(additionalSources.length > 0 ? { additionalSources } : {}),
     type,
     title: String(raw.title || 'Kết quả khám y tế'),
     date: typeof raw.date === 'string' ? raw.date : '',

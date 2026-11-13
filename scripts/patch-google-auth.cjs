@@ -154,6 +154,70 @@ if (source.includes(pickMethodMarker)) {
 const tokenLog = '    Log.d("AuthenticatedBackend", "token: " + authToken + ", verification: " + stringResponse);\n';
 if (source.includes(tokenLog)) source = source.replace(tokenLog, '');
 
+replaceOnce(
+  '  @PluginMethod()\n' +
+    '  public void signIn(PluginCall call) {\n' +
+    '    Intent signInIntent = googleSignInClient.getSignInIntent();\n' +
+    '    startActivityForResult(call, signInIntent, "signInResult");\n' +
+    '  }',
+  '  @PluginMethod()\n' +
+    '  public void signIn(PluginCall call) {\n' +
+    '    if (googleSignInClient == null) {\n' +
+    '      call.reject("GoogleAuth is not initialized. Call initialize() first.");\n' +
+    '      return;\n' +
+    '    }\n' +
+    '    Intent signInIntent = googleSignInClient.getSignInIntent();\n' +
+    '    startActivityForResult(call, signInIntent, "signInResult");\n' +
+    '  }',
+  'if (googleSignInClient == null) {\n      call.reject("GoogleAuth is not initialized. Call initialize() first.");'
+);
+
+replaceOnce(
+  '  @PluginMethod()\n' +
+    '  public void signOut(final PluginCall call) {\n' +
+    '    googleSignInClient.signOut()\n' +
+    '      .addOnSuccessListener(getActivity(), new OnSuccessListener<Void>() {\n' +
+    '        @Override\n' +
+    '          public void onSuccess(Void aVoid) {\n' +
+    '            call.resolve();\n' +
+    '          }\n' +
+    '      })\n' +
+    '      .addOnFailureListener(getActivity(), new OnFailureListener() {\n' +
+    '        @Override\n' +
+    '          public void onFailure(Exception e) {\n' +
+    '            call.reject("Sign out failed", e);\n' +
+    '          }\n' +
+    '      });\n' +
+    '  }',
+  '  @PluginMethod()\n' +
+    '  public void signOut(final PluginCall call) {\n' +
+    '    if (googleSignInClient == null) {\n' +
+    '      call.resolve();\n' +
+    '      return;\n' +
+    '    }\n' +
+    '    Activity activity = getActivity();\n' +
+    '    Task<Void> signOutTask = googleSignInClient.signOut();\n' +
+    '    OnSuccessListener<Void> onSuccess = new OnSuccessListener<Void>() {\n' +
+    '      @Override\n' +
+    '      public void onSuccess(Void aVoid) {\n' +
+    '        call.resolve();\n' +
+    '      }\n' +
+    '    };\n' +
+    '    OnFailureListener onFailure = new OnFailureListener() {\n' +
+    '      @Override\n' +
+    '      public void onFailure(Exception e) {\n' +
+    '        call.reject("Sign out failed", e);\n' +
+    '      }\n' +
+    '    };\n' +
+    '    if (activity != null) {\n' +
+    '      signOutTask.addOnSuccessListener(activity, onSuccess).addOnFailureListener(activity, onFailure);\n' +
+    '    } else {\n' +
+    '      signOutTask.addOnSuccessListener(onSuccess).addOnFailureListener(onFailure);\n' +
+    '    }\n' +
+    '  }',
+  '    if (googleSignInClient == null) {\n      call.resolve();\n      return;\n    }'
+);
+
 fs.writeFileSync(sourcePath, source);
 
 const manifestPath = path.join(packageRoot, 'android', 'src', 'main', 'AndroidManifest.xml');

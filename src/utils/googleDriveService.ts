@@ -38,6 +38,7 @@ const REFRESH_TIMEOUT_MS = 8000;
 let cachedAccessToken: string | null = null;
 let cachedTokenExpiresAt: number | null = null;
 let googleAuthInitialization: Promise<void> | null = null;
+let googleAuthInitialized = false;
 let silentRefreshInFlight: Promise<string | null> | null = null;
 
 const firebasePersistenceReady = setPersistence(auth, browserLocalPersistence).catch((error: unknown) => {
@@ -137,7 +138,10 @@ export async function restoreGoogleAuthSession(): Promise<boolean> {
 }
 
 export async function ensureGoogleAuthInitialized(): Promise<void> {
-  if (!isNative || googleAuthInitialization) {
+  if (!isNative || googleAuthInitialized) {
+    return;
+  }
+  if (googleAuthInitialization) {
     await googleAuthInitialization;
     return;
   }
@@ -146,9 +150,13 @@ export async function ensureGoogleAuthInitialized(): Promise<void> {
     clientId: firebaseConfig.oAuthClientId,
     scopes: ['profile', 'email', 'openid', 'https://www.googleapis.com/auth/drive'],
     grantOfflineAccess: false,
-  }).finally(() => {
-    googleAuthInitialization = null;
-  });
+  })
+    .then(() => {
+      googleAuthInitialized = true;
+    })
+    .finally(() => {
+      googleAuthInitialization = null;
+    });
   await googleAuthInitialization;
 }
 
@@ -214,6 +222,7 @@ export async function signOutGoogle(): Promise<void> {
   }
   if (isNative) {
     try {
+      await ensureGoogleAuthInitialized();
       await GoogleAuth.signOut();
     } catch (error) {
       console.warn('[Google Auth] Error in GoogleAuth.signOut:', error);
@@ -230,6 +239,11 @@ export function initGoogleAuth(
   onSuccess?: (user: User, token: string | null) => void,
   onSignedOut?: () => void,
 ): () => void {
+  if (isNative) {
+    void ensureGoogleAuthInitialized().catch((error: unknown) => {
+      console.warn('[Google Auth] Native initialization deferred:', error);
+    });
+  }
   return onAuthStateChanged(auth, (user) => {
     void (async () => {
       await firebasePersistenceReady;
@@ -256,7 +270,9 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
     await ensureGoogleAuthInitialized();
     const result = await GoogleAuth.signIn();
     accessToken = result.authentication.accessToken;
+    if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');
     if (!result.authentication.idToken) throw new Error('Google không trả về ID token để đăng nhập.');
+    await storeAccessToken(accessToken);
     const credential = GoogleAuthProvider.credential(result.authentication.idToken);
     user = (await signInWithCredential(auth, credential)).user;
   } else {
@@ -280,9 +296,9 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
       }
       throw popupError;
     }
+    if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');
+    await storeAccessToken(accessToken);
   }
 
-  if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');
-  await storeAccessToken(accessToken);
   return { user, accessToken };
 }

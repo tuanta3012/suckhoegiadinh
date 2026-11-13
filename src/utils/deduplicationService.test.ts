@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   cleanAndDeduplicateEventData,
   compareStructuredEventContainment,
+  consolidateTimelineEvents,
   detectDuplicateEvent,
   detectDuplicateFile,
   mergeHealthEvents,
@@ -235,6 +236,78 @@ describe('Deduplication Service', () => {
       expect(compareStructuredEventContainment(fullCheckup, labSubset)).toBe('left_contains_right');
       expect(compareStructuredEventContainment(labSubset, { ...labSubset })).toBe('equivalent');
       expect(compareStructuredEventContainment(labSubset, { ...fullCheckup, date: '2026-08-11' })).toBe('none');
+    });
+
+    it('deduplicates canonical metric variants like urine PRO across different naming styles', () => {
+      const cleaned = cleanAndDeduplicateEventData({
+        metrics: [
+          { name: 'Tổng phân tích nước tiểu – PRO', value: 0.15, unit: 'G/L', refRange: 'Negative' },
+          { name: 'PRO (Nước tiểu)', value: 0.15, unit: 'G/L' },
+        ],
+      });
+      expect(cleaned.metrics).toHaveLength(1);
+      expect(cleaned.metrics![0].value).toBe(0.15);
+    });
+
+    it('matches and merges an earlier lab slip into a comprehensive checkup dossier within 14 days when metrics match', () => {
+      const labSlip: HealthEvent = {
+        id: 'ev_lab_0806',
+        sourceFileId: 'file_lab',
+        sourceFileName: 'xet-nghiem.pdf',
+        type: 'test_result',
+        title: 'Phiếu kết quả xét nghiệm tổng quát',
+        date: '2026-06-08',
+        facility: 'Bệnh Viện Đại Học Y Dược TP.HCM - Phòng Khám Bệnh Viện Đại Học Y Dược 1',
+        diagnoses: ['Z00.0 - Khám sức khỏe tổng quát'],
+        medications: [],
+        metrics: [
+          { name: 'HBsAb định lượng', value: 1000, unit: 'IU/L' },
+          { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+          { name: 'Định lượng HDL-C', value: 0.99, unit: 'mmol/L' },
+          { name: 'PRO (Nước tiểu)', value: 0.15, unit: 'G/L' },
+        ],
+        recordedAt: '2026-06-08T08:00:00Z',
+      };
+
+      const annualCheckup: HealthEvent = {
+        id: 'ev_checkup_1106',
+        sourceFileId: 'file_checkup',
+        sourceFileName: 'ho-so-2026.pdf',
+        type: 'comprehensive_exam',
+        title: 'Hồ sơ sức khỏe định kỳ năm 2026',
+        date: '2026-06-11',
+        facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+        diagnoses: ['Tăng acid uric máu', 'Đạm niệu (+)', 'Nang giáp keo hai thùy'],
+        medications: [],
+        metrics: [
+          { name: 'HBsAb định lượng', value: 1000, unit: 'IU/L' },
+          { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+          { name: 'Định lượng HDL-C', value: 0.99, unit: 'mmol/L' },
+          { name: 'Tổng phân tích nước tiểu – PRO', value: 0.15, unit: 'G/L' },
+          { name: 'Định lượng Glucose', value: 5.1, unit: 'mmol/L' },
+        ],
+        imagingResults: [{ modality: 'Siêu âm tuyến giáp', findings: 'Nang keo', conclusion: 'TIRADS 1' }],
+        recordedAt: '2026-06-11T10:00:00Z',
+      };
+
+      expect(compareStructuredEventContainment(labSlip, annualCheckup)).toBe('right_contains_left');
+      expect(compareStructuredEventContainment(annualCheckup, labSlip)).toBe('left_contains_right');
+
+      const matchFromLabFirst = detectDuplicateEvent([labSlip], annualCheckup);
+      expect(matchFromLabFirst).not.toBeNull();
+      expect(matchFromLabFirst?.matchedEvent.id).toBe('ev_lab_0806');
+
+      const mergedLabFirst = mergeHealthEvents(labSlip, annualCheckup);
+      expect(mergedLabFirst.type).toBe('comprehensive_exam');
+      expect(mergedLabFirst.title).toBe('Hồ sơ sức khỏe định kỳ năm 2026');
+      expect(mergedLabFirst.date).toBe('2026-06-11');
+      expect(mergedLabFirst.metrics).toHaveLength(5);
+
+      const consolidated = consolidateTimelineEvents([labSlip, annualCheckup]);
+      expect(consolidated.mergedCount).toBe(1);
+      expect(consolidated.timeline).toHaveLength(1);
+      expect(consolidated.timeline[0].type).toBe('comprehensive_exam');
+      expect(consolidated.timeline[0].title).toBe('Hồ sơ sức khỏe định kỳ năm 2026');
     });
   });
 });

@@ -3,8 +3,9 @@ import type { FamilyMember, HealthEvent, HealthProfile, HealthSource } from '../
 import { parseHealthProfile, summarizeTimeline } from './healthProfile';
 import {
   compareStructuredEventContainment,
+  consolidateTimelineEvents,
+  detectDuplicateEvent,
   normalizeMedicalText,
-  mergeHealthEvents,
 } from './deduplicationService';
 import { compareDocumentContainment } from './documentContainment';
 
@@ -88,16 +89,50 @@ export async function auditWorkspaceFolder(
 
       // Check orphan sources
       for (const source of profile.sources) {
+        if (source.rawDeletedAt || source.relocatedToMemberId) continue;
         const linked = profile.timeline.some(
-          (ev) => ev.sourceFileId === source.driveFileId || ev.sourceFileName === source.fileName
+          (ev) =>
+            ev.sourceFileId === source.driveFileId ||
+            ev.sourceFileName === source.fileName ||
+            ev.additionalSources?.some((item) => item.driveFileId === source.driveFileId),
         );
         if (!linked) {
           orphanSources.push({ source, memberName: member.name });
         }
       }
 
-      // Check timeline events
-      for (const event of profile.timeline) {
+      // Check timeline events (exact signature + clinical episode containment/duplication)
+      const matchedInMember = new Set<string>();
+      for (let i = 0; i < profile.timeline.length; i++) {
+        const event = profile.timeline[i];
+        if (!matchedInMember.has(event.id)) {
+          const cluster = [event];
+          for (let j = i + 1; j < profile.timeline.length; j++) {
+            const candidate = profile.timeline[j];
+            if (matchedInMember.has(candidate.id)) continue;
+            if (
+              compareStructuredEventContainment(event, candidate) !== 'none' ||
+              Boolean(detectDuplicateEvent([event], candidate))
+            ) {
+              cluster.push(candidate);
+              matchedInMember.add(candidate.id);
+            }
+          }
+          if (cluster.length > 1) {
+            matchedInMember.add(event.id);
+            const sortedCluster = [...cluster].sort((a, b) => b.date.localeCompare(a.date));
+            duplicateTimelineEvents.push({
+              title: sortedCluster[0].title,
+              date: sortedCluster[0].date,
+              count: sortedCluster.length,
+              memberNames: [member.name],
+              eventIds: sortedCluster.map((item) => item.id),
+            });
+            continue;
+          }
+        }
+
+        if (matchedInMember.has(event.id)) continue;
         const diagSig = (event.diagnoses || []).map(normalizeMedicalText).sort().join('|');
         const sig = `${event.date}_${normalizeMedicalText(event.facility || '')}_${diagSig}`;
         const existingEvents = eventSignatureMap.get(sig) || [];
@@ -456,29 +491,10 @@ export async function cleanupWorkspaceDuplicates(
 
       if (!timeline || timeline.length <= 1) continue;
 
-      const uniqueEventsMap = new Map<string, HealthEvent>();
-      let memberMergedCount = 0;
-
-      for (const event of timeline) {
-        const diagSig = (event.diagnoses || []).map(normalizeMedicalText).sort().join('|');
-        const sig = `${event.date}_${normalizeMedicalText(event.facility || '')}_${diagSig}`;
-
-        const existing = uniqueEventsMap.get(sig);
-        if (!existing) {
-          uniqueEventsMap.set(sig, event);
-        } else {
-          // Đã có sự kiện trùng, tiến hành hợp nhất thông minh vào bản độc nhất
-          const merged = mergeHealthEvents(existing, event);
-          uniqueEventsMap.set(sig, merged);
-          memberMergedCount++;
-          mergedEvents++;
-        }
-      }
+      const { timeline: nextTimeline, mergedCount: memberMergedCount } = consolidateTimelineEvents(timeline);
 
       if (memberMergedCount > 0) {
-        const nextTimeline = Array.from(uniqueEventsMap.values()).sort(
-          (l, r) => l.date.localeCompare(r.date) || l.recordedAt.localeCompare(r.recordedAt)
-        );
+        mergedEvents += memberMergedCount;
         const nextProfile: HealthProfile = {
           ...profile,
           timeline: nextTimeline,

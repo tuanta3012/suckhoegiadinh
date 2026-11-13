@@ -416,7 +416,7 @@ async function listFolderContentsRecursively(folderId: string): Promise<DriveFil
 
 function cacheWorkspaceForAdmin(workspace: HealthDriveWorkspace): void {
   const userEmail = getSignedInGoogleEmail();
-  if (!userEmail || workspace.family.adminEmail?.trim().toLowerCase() !== userEmail) return;
+  if (!userEmail || typeof localStorage === 'undefined' || workspace.family.adminEmail?.trim().toLowerCase() !== userEmail) return;
   try {
     const cacheKey = `health_ws_cache_${encodeURIComponent(userEmail)}`;
     localStorage.setItem(cacheKey, JSON.stringify({
@@ -592,14 +592,41 @@ async function openSharedHealthWorkspace(
   return workspace;
 }
 
+function isMissingWorkspaceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /file not found|\b404\b|not found|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json|không còn trong danh sách|không có trong danh sách/i.test(message);
+}
+
+function pickBestDiscoveredWorkspace(
+  workspaces: HealthDriveWorkspace[],
+  signedInEmail: string,
+): HealthDriveWorkspace | null {
+  if (workspaces.length === 0) return null;
+  if (workspaces.length === 1) return workspaces[0];
+  const cleanUserEmail = normalizedEmail(signedInEmail);
+  return [...workspaces].sort((a, b) => {
+    const aOwned = normalizedEmail(a.family.adminEmail) === cleanUserEmail ? 1 : 0;
+    const bOwned = normalizedEmail(b.family.adminEmail) === cleanUserEmail ? 1 : 0;
+    if (aOwned !== bOwned) return bOwned - aOwned;
+
+    const aMembers = a.family.members?.length || 0;
+    const bMembers = b.family.members?.length || 0;
+    if (aMembers !== bMembers) return bMembers - aMembers;
+
+    const aUpdated = Date.parse(a.family.updatedAt || a.family.createdAt || '') || 0;
+    const bUpdated = Date.parse(b.family.updatedAt || b.family.createdAt || '') || 0;
+    return bUpdated - aUpdated;
+  })[0];
+}
+
 export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspace | null> {
   const userEmail = getSignedInGoogleEmail();
   if (!userEmail) return null;
 
-  const normalizedEmail = userEmail.trim().toLowerCase();
-  const cacheKey = `health_ws_cache_${encodeURIComponent(normalizedEmail)}`;
+  const cleanUserEmail = normalizedEmail(userEmail);
+  const cacheKey = `health_ws_cache_${encodeURIComponent(cleanUserEmail)}`;
 
-  // 1. Siêu tốc: Kiểm tra localStorage trước (Tốc độ Sheets)
+  // 1. Siêu tốc: Kiểm tra localStorage trước
   const cached = typeof localStorage !== 'undefined' ? localStorage.getItem(cacheKey) : null;
   if (cached) {
     try {
@@ -608,7 +635,9 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
         return await openSharedHealthWorkspace(rootFolderId, familyFileId, userEmail);
       }
     } catch (e) {
-      localStorage.removeItem(cacheKey);
+      if (isMissingWorkspaceError(e) && typeof localStorage !== 'undefined') {
+        localStorage.removeItem(cacheKey);
+      }
     }
   }
 
@@ -645,10 +674,12 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
         }
         return opened;
       } catch (e) {
-        console.warn('[Discovery] Thư mục trong Firestore Index không còn tồn tại:', indexed.rootFolderId, e);
-        // Xóa index đã lỗi khỏi Firestore & LocalStorage để lần sau không quét lại
-        void unregisterHealthWorkspace(indexed.rootFolderId).catch(() => {});
-        if (typeof localStorage !== 'undefined') localStorage.removeItem(cacheKey);
+        console.warn('[Discovery] Lỗi mở thư mục từ Firestore Index:', indexed.rootFolderId, e);
+        // Chỉ hủy liên kết trên Firestore/Cache khi thư mục hoặc family.json thực sự không còn
+        if (isMissingWorkspaceError(e)) {
+          void unregisterHealthWorkspace(indexed.rootFolderId).catch(() => {});
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(cacheKey);
+        }
       }
     }
   } catch (error) {
@@ -683,13 +714,13 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
     console.warn('[Discovery] Lỗi tra cứu lời mời chia sẻ Firestore cho Thành viên:', error);
   }
 
-  // 3. Auto-discover folders previously stamped by this app.
+  // 3. Auto-discover folders previously stamped by this app (owned by Admin OR sharedWithMe).
   try {
     const folders: DriveFile[] = [];
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams({
-        q: `mimeType = '${FOLDER_MIME}' and trashed = false and sharedWithMe = true and appProperties has { key='app_id' and value='${HEALTH_APP_ID}' }`,
+        q: `mimeType = '${FOLDER_MIME}' and trashed = false and appProperties has { key='app_id' and value='${HEALTH_APP_ID}' }`,
         fields: `nextPageToken,files(${FILE_FIELDS},appProperties)`,
         pageSize: '1000',
         supportsAllDrives: 'true',
@@ -710,10 +741,7 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
         console.warn(`[Discovery] Không thể mở thư mục đã đóng dấu ${folder.id}:`, error);
       }
     }
-    if (matched.length > 1) {
-      throw new Error('Tìm thấy nhiều thư mục Sức khỏe Gia đình đã đóng dấu. Hãy nhờ Admin kiểm tra các kho trùng.');
-    }
-    const discovered = matched[0];
+    const discovered = pickBestDiscoveredWorkspace(matched, userEmail);
     if (discovered) {
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(cacheKey, JSON.stringify({
@@ -721,53 +749,47 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
           familyFileId: discovered.familyFileId,
         }));
       }
+      if (normalizedEmail(discovered.family.adminEmail) === cleanUserEmail) {
+        void registerHealthWorkspaceRelay(discovered.rootFolderId, discovered.familyFileId, userEmail).catch(() => {});
+      }
       return discovered;
     }
   } catch (error) {
     console.warn('[Discovery] Không thể quét thư mục đã đóng dấu:', error);
   }
 
-  // 4. Fallback: Quét Drive (Chậm nhất, chỉ chạy khi Firestore không có thông tin và người dùng có thể là Admin)
+  // 4. Fallback: Quét Drive (Khi Firestore chưa có bản ghi và tài khoản là Admin sở hữu thư mục)
   try {
     const foldersToInspect = await listFiles('root', LEGACY_WORKSPACE_FOLDER_NAMES, FOLDER_MIME);
     if (foldersToInspect.length === 0) return null;
 
-    // Fast-path inspection: Look for family.json directly in root candidates & auto-deduplicate
-    const inspectionResults = await Promise.all(
-      foldersToInspect.map(async (folder) => {
-        try {
-          const manifest = await resolveSingleFamilyManifestFile(folder.id);
-          return manifest ? { folder, manifestId: manifest.id } : null;
-        } catch {
-          return null;
+    const candidateWorkspaces: HealthDriveWorkspace[] = [];
+    for (const folder of foldersToInspect) {
+      try {
+        const manifest = await resolveSingleFamilyManifestFile(folder.id);
+        if (!manifest) continue;
+        const opened = await openSharedHealthWorkspace(folder.id, manifest.id, userEmail);
+        if (normalizedEmail(opened.family.adminEmail) === cleanUserEmail) {
+          if (folder.name !== WORKSPACE_FOLDER_NAME) {
+            void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
+              console.warn('[Google Drive] Could not normalize legacy folder name.', error);
+            });
+          }
+          candidateWorkspaces.push(opened);
         }
-      })
-    );
-
-    const foundWithManifest = inspectionResults.find((r) => r !== null);
-    if (foundWithManifest) {
-      const { folder, manifestId } = foundWithManifest;
-      if (folder.name !== WORKSPACE_FOLDER_NAME) {
-        void renameDriveFolder(folder.id, WORKSPACE_FOLDER_NAME).catch((error) => {
-          console.warn('[Google Drive] Could not normalize legacy folder name.', error);
-        });
+      } catch {
+        // Ignore inaccessible or malformed candidates
       }
-      
-      const opened = await openSharedHealthWorkspace(folder.id, manifestId, userEmail);
-      
-      // Đăng ký lại vào Firestore & localStorage nếu là Admin để lần sau tìm nhanh qua Registry
-      if (userEmail && opened.family.adminEmail?.trim().toLowerCase() === userEmail.trim().toLowerCase()) {
-        const payload = { rootFolderId: opened.rootFolderId, familyFileId: opened.familyFileId };
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(cacheKey, JSON.stringify(payload));
-        }
-        void registerHealthWorkspaceRelay(opened.rootFolderId, opened.familyFileId, userEmail).catch(() => {});
-        return opened;
-      }
+    }
 
-      // Nếu không phải Admin và không có Registry, chúng ta không tự động mở để tránh nhầm lẫn
-      console.warn('[Discovery] Tìm thấy thư mục Drive nhưng không có Registry Firestore và tài khoản không phải Admin.');
-      return null;
+    const best = pickBestDiscoveredWorkspace(candidateWorkspaces, userEmail);
+    if (best) {
+      const payload = { rootFolderId: best.rootFolderId, familyFileId: best.familyFileId };
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(cacheKey, JSON.stringify(payload));
+      }
+      void registerHealthWorkspaceRelay(best.rootFolderId, best.familyFileId, userEmail).catch(() => {});
+      return best;
     }
   } catch (error) {
     console.warn('[Discovery] Lỗi khi quét thư mục Drive:', error);

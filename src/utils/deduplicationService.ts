@@ -8,6 +8,7 @@ import type {
   Medication,
 } from '../types';
 import { cleanHospitalizationRecord } from './healthEventType';
+import { standardizeMetricKey } from './healthRecordService';
 
 /**
  * Tính mã băm SHA-256 của tệp để định danh nội dung chính xác
@@ -100,6 +101,18 @@ export function normalizeModalityKey(modality: string): string {
     || 'chandan_hinhanh';
 }
 
+function resolveCanonicalMetricKey(metric: Partial<HealthMetric>): string {
+  const name = metric.name?.trim() || '';
+  const unit = metric.unit?.trim() || '';
+  const normalizedName = normalizeMetricName(name);
+  if (metric.standardKey && metric.standardKey.trim()) {
+    return standardizeMetricKey(metric.standardKey.trim(), unit, name);
+  }
+  const stdFromName = standardizeMetricKey(normalizedName || name, unit, name);
+  const rawUpper = (normalizedName || name).trim().toUpperCase();
+  return stdFromName && stdFromName !== rawUpper ? stdFromName : (normalizedName || stdFromName);
+}
+
 /**
  * Khử trùng lặp nội dung BÊN TRONG của một sự kiện y tế (diagnoses, medications, metrics)
  */
@@ -152,26 +165,11 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
       if (!name || typeof m.value !== 'number' || !Number.isFinite(m.value)) continue;
 
       let stdKey = m.standardKey ? m.standardKey.trim().toUpperCase() : undefined;
-      
-      // Sanitization: Fix common OCR mapping errors
       if (stdKey) {
-        // 1. Fix accidental suffixes (e.g., NEU_1 -> NEU_#, LYM_# -> LYM_#)
-        stdKey = stdKey.replace(/_(\d|#)$/, '_#').replace(/_$/, '');
-        if (stdKey === 'NEU' || stdKey === 'LYM' || stdKey === 'MONO' || stdKey === 'EOS' || stdKey === 'BASO') {
-          // If it was just 'NEU', usually it means NEU_PCT or NEU_# depending on unit
-          // But for now just leave it or map to a base key
-        }
-
-        // 2. Fix Urine vs Blood collisions
-        const isUrine = name.toLowerCase().includes('nước tiểu') || name.toLowerCase().includes('cặn lắng');
-        if (isUrine) {
-          if (stdKey === 'AST' && name.toLowerCase().includes('trụ')) stdKey = undefined; // 'Trụ' is not AST
-          if (stdKey === 'WBC') stdKey = 'URINE_LEU';
-          if (stdKey === 'RBC') stdKey = 'URINE_RBC_SED';
-        }
+        stdKey = standardizeMetricKey(stdKey, m.unit || '', name);
       }
 
-      const key = stdKey || normalizeMetricName(name);
+      const key = resolveCanonicalMetricKey({ ...m, name, standardKey: stdKey });
       const existing = metricMap.get(key);
       if (!existing || (!existing.refRange && m.refRange)) {
         metricMap.set(key, { ...m, name, standardKey: stdKey });
@@ -302,6 +300,88 @@ export interface EventDuplicateMatch {
   reasons: string[];
 }
 
+const CLINICAL_EPISODE_WINDOW_DAYS = 14;
+
+function parseIsoDateMs(dateStr?: string): number | null {
+  if (typeof dateStr !== 'string') return null;
+  const trimmed = dateStr.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const utc = Date.UTC(year, month, day);
+  return Number.isFinite(utc) ? utc : null;
+}
+
+function getIsoDateDayDiff(leftDate?: string, rightDate?: string): number | null {
+  const leftMs = parseIsoDateMs(leftDate);
+  const rightMs = parseIsoDateMs(rightDate);
+  if (leftMs === null || rightMs === null) return null;
+  return Math.round(Math.abs(leftMs - rightMs) / 86_400_000);
+}
+
+export function areFacilitiesCompatible(leftFacility?: string, rightFacility?: string): boolean {
+  const left = removeVietnameseAccents(normalizeMedicalText(leftFacility || ''));
+  const right = removeVietnameseAccents(normalizeMedicalText(rightFacility || ''));
+  if (!left || !right) return false;
+  if (left === right || left.includes(right) || right.includes(left)) return true;
+
+  const stopWords = new Set(['benh', 'vien', 'phong', 'kham', 'trung', 'tam', 'y', 'te', 'co', 'so', 'tnhh', 'tp', 'hcm', 'ha', 'noi', 'viet', 'nam']);
+  const leftTokens = left.split(' ').filter((token) => token.length >= 2 && !stopWords.has(token));
+  const rightTokens = new Set(right.split(' ').filter((token) => token.length >= 2 && !stopWords.has(token)));
+  if (leftTokens.length === 0 || rightTokens.size === 0) return false;
+
+  const sharedTokens = leftTokens.filter((token) => rightTokens.has(token));
+  const minTokenCount = Math.min(leftTokens.length, rightTokens.size);
+  return sharedTokens.length >= 2 && sharedTokens.length / minTokenCount >= 0.6;
+}
+
+function getEventTypeMergePriority(type?: HealthEvent['type']): number {
+  switch (type) {
+    case 'comprehensive_exam':
+      return 5;
+    case 'discharge':
+      return 4;
+    case 'medical_report':
+      return 3;
+    case 'prescription':
+    case 'vaccination':
+      return 2;
+    case 'test_result':
+    case 'imaging':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function isMasterClinicalEventType(type?: HealthEvent['type']): boolean {
+  return type === 'comprehensive_exam' || type === 'discharge' || type === 'medical_report';
+}
+
+function isSubReportEventType(type?: HealthEvent['type']): boolean {
+  return type === 'test_result' || type === 'imaging';
+}
+
+function isComplementaryEpisodePair(leftType?: HealthEvent['type'], rightType?: HealthEvent['type']): boolean {
+  return Boolean(
+    (isMasterClinicalEventType(leftType) && isSubReportEventType(rightType)) ||
+    (isMasterClinicalEventType(rightType) && isSubReportEventType(leftType)),
+  );
+}
+
+function collectMetricSignatureSet(event: Partial<HealthEvent>): Set<string> {
+  const metricSet = new Set<string>();
+  for (const metric of event.metrics || []) {
+    if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
+    const key = resolveCanonicalMetricKey(metric);
+    if (!key) continue;
+    metricSet.add(`metric:${key}:${Number(metric.value).toFixed(2)}`);
+  }
+  return metricSet;
+}
+
 /**
  * Phát hiện sự kiện y tế trùng lặp trong dòng thời gian
  */
@@ -310,15 +390,17 @@ export function detectDuplicateEvent(
   incoming: Partial<HealthEvent>,
   ignoreEventId?: string
 ): EventDuplicateMatch | null {
-  if (!timeline || timeline.length === 0 || !incoming.date) return null;
+  if (!timeline || timeline.length === 0) return null;
 
-  const incomingDate = incoming.date.trim();
-  const incomingFacility = normalizeMedicalText(incoming.facility || '');
+  const incomingDate = typeof incoming.date === 'string' ? incoming.date.trim() : '';
+  if (!incomingDate && !incoming.sourceFileId) return null;
+
   const incomingTitle = normalizeMedicalText(incoming.title || '');
   const incomingDiagnoses = (incoming.diagnoses || []).map(normalizeMedicalText);
   const incomingMedications = (incoming.medications || []).map((m) =>
     normalizeMedicationName(m.name)
   );
+  const incomingMetrics = collectMetricSignatureSet(incoming);
 
   let bestMatch: EventDuplicateMatch | null = null;
 
@@ -328,46 +410,71 @@ export function detectDuplicateEvent(
     let score = 0;
     const reasons: string[] = [];
 
-    // 1. Kiểm tra cùng tệp nguồn (Source File Match)
-    if (incoming.sourceFileId && event.sourceFileId && incoming.sourceFileId === event.sourceFileId) {
+    // 1. Kiểm tra cùng tệp nguồn (Source File Match) - luôn nhận diện dù ngày có khác nhau
+    const sameSourceFile = Boolean(
+      incoming.sourceFileId && event.sourceFileId && incoming.sourceFileId === event.sourceFileId
+    );
+    if (sameSourceFile) {
       score += 65;
       reasons.push('Trùng khớp tệp tài liệu gốc trên Google Drive');
     }
 
-    // 2. Kiểm tra ngày khám (Date Match)
-    if (event.date === incomingDate) {
+    const dayDiff = incomingDate ? getIsoDateDayDiff(event.date, incomingDate) : null;
+    const sameDate = Boolean(incomingDate && event.date === incomingDate);
+    const withinEpisodeWindow =
+      !sameDate &&
+      dayDiff !== null &&
+      dayDiff > 0 &&
+      dayDiff <= CLINICAL_EPISODE_WINDOW_DAYS;
+
+    if (!sameDate && !withinEpisodeWindow && !sameSourceFile) {
+      continue;
+    }
+
+    const facilityMatch = areFacilitiesCompatible(event.facility, incoming.facility);
+    const containment = compareStructuredEventContainment(event, incoming);
+
+    const eventMetrics = collectMetricSignatureSet(event);
+    let sharedMetricCount = 0;
+    for (const item of incomingMetrics) {
+      if (eventMetrics.has(item)) sharedMetricCount += 1;
+    }
+
+    if (sameDate) {
       score += 40;
       reasons.push(`Cùng ngày khám (${incomingDate})`);
-
-      // 3. Cùng cơ sở y tế (Facility Match)
-      if (incomingFacility && event.facility) {
-        const existingFacility = normalizeMedicalText(event.facility);
-        if (
-          existingFacility === incomingFacility ||
-          existingFacility.includes(incomingFacility) ||
-          incomingFacility.includes(existingFacility)
-        ) {
-          score += 25;
-          reasons.push(`Cùng cơ sở y tế: "${event.facility}"`);
-        }
+    } else if (withinEpisodeWindow) {
+      const hasStrongEpisodeLink =
+        containment !== 'none' ||
+        (sharedMetricCount >= 4 && (facilityMatch || isComplementaryEpisodePair(event.type, incoming.type)));
+      if (!hasStrongEpisodeLink && !sameSourceFile) {
+        continue;
       }
+      score += 30;
+      reasons.push(`Cùng đợt khám trong ${dayDiff} ngày (${event.date} & ${incomingDate})`);
+    }
 
-      // 4. Cùng loại hồ sơ (Type Match) hoặc loại bổ trợ (VD: khám tổng quát + xét nghiệm máu/chẩn đoán hình ảnh)
-      if (incoming.type && event.type) {
-        if (incoming.type === event.type) {
-          score += 15;
-          reasons.push(`Cùng loại tài liệu (${event.type})`);
-        } else if (
-          (incoming.type === 'comprehensive_exam' && (event.type === 'test_result' || event.type === 'imaging')) ||
-          (event.type === 'comprehensive_exam' && (incoming.type === 'test_result' || incoming.type === 'imaging'))
-        ) {
-          score += 15;
-          reasons.push(`Kết quả xét nghiệm/chẩn đoán hình ảnh bổ trợ cho hồ sơ khám (${incoming.type} & ${event.type})`);
-        }
+    if (facilityMatch) {
+      score += 25;
+      reasons.push(`Cùng cơ sở y tế: "${event.facility}"`);
+    }
+
+    if (incoming.type && event.type) {
+      if (incoming.type === event.type) {
+        score += 15;
+        reasons.push(`Cùng loại tài liệu (${event.type})`);
+      } else if (isComplementaryEpisodePair(event.type, incoming.type)) {
+        score += 20;
+        reasons.push(`Tài liệu cận lâm sàng bổ trợ cho hồ sơ khám (${incoming.type} & ${event.type})`);
       }
-    } else {
-      // Khác ngày: khó có thể là sự kiện trùng lặp hoàn toàn
-      continue;
+    }
+
+    if (sharedMetricCount >= 4) {
+      score += 35;
+      reasons.push(`Trùng ${sharedMetricCount} chỉ số xét nghiệm giống hệt giá trị`);
+    } else if (sharedMetricCount >= 2) {
+      score += 20;
+      reasons.push(`Trùng ${sharedMetricCount} chỉ số xét nghiệm`);
     }
 
     // 5. Kiểm tra chẩn đoán trùng lặp (Diagnosis Overlap)
@@ -399,13 +506,17 @@ export function detectDuplicateEvent(
       }
     }
 
+    if (containment !== 'none' && score < 75) {
+      score = 75;
+      reasons.push('Nội dung y khoa được bao trùm hoặc tương đương');
+    }
+
     // Đánh giá ngưỡng trùng lặp
     const isDifferentSourceFile = Boolean(
       incoming.sourceFileId &&
       event.sourceFileId &&
       incoming.sourceFileId !== event.sourceFileId
     );
-    // Nếu là 2 tệp nguồn khác nhau cùng đợt khám (VD: khám tổng quát + xét nghiệm máu), ghép dữ liệu khi hệ số tương đồng >= 75
     const requiredScore = isDifferentSourceFile ? 75 : 60;
 
     if (score >= requiredScore) {
@@ -436,10 +547,21 @@ export function mergeHealthEvents(
   const cleanExisting = cleanAndDeduplicateEventData(existing);
   const cleanIncoming = cleanAndDeduplicateEventData(incoming);
 
+  // Chọn bản chính (Master dossier: comprehensive_exam > discharge > medical_report > test_result/imaging)
+  const existingPriority = getEventTypeMergePriority(cleanExisting.type);
+  const incomingPriority = getEventTypeMergePriority(cleanIncoming.type);
+  const existingItemCount = collectStructuredClinicalItems(cleanExisting).size;
+  const incomingItemCount = collectStructuredClinicalItems(cleanIncoming).size;
+  const preferIncomingAsPrimary =
+    incomingPriority > existingPriority ||
+    (incomingPriority === existingPriority && incomingItemCount > existingItemCount);
+  const primary = preferIncomingAsPrimary ? cleanIncoming : cleanExisting;
+  const secondary = preferIncomingAsPrimary ? cleanExisting : cleanIncoming;
+
   // 1. Gộp chẩn đoán (không trùng lặp)
   const diagSeen = new Set<string>();
   const mergedDiagnoses: string[] = [];
-  for (const d of [...cleanExisting.diagnoses, ...cleanIncoming.diagnoses]) {
+  for (const d of [...primary.diagnoses, ...secondary.diagnoses]) {
     const norm = normalizeMedicalText(d);
     if (!diagSeen.has(norm)) {
       diagSeen.add(norm);
@@ -449,11 +571,11 @@ export function mergeHealthEvents(
 
   // 2. Gộp đơn thuốc (cập nhật hoặc bổ sung thuốc mới)
   const medMap = new Map<string, Medication>();
-  for (const med of cleanExisting.medications) {
+  for (const med of primary.medications) {
     const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
     medMap.set(key, med);
   }
-  for (const med of cleanIncoming.medications) {
+  for (const med of secondary.medications) {
     const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
     const prev = medMap.get(key);
     if (!prev) {
@@ -461,39 +583,43 @@ export function mergeHealthEvents(
     } else {
       medMap.set(key, {
         name: med.name.length >= prev.name.length ? med.name : prev.name,
-        dosage: med.dosage || prev.dosage,
-        frequency: med.frequency || prev.frequency,
-        duration: med.duration || prev.duration,
+        dosage: prev.dosage || med.dosage,
+        frequency: prev.frequency || med.frequency,
+        duration: prev.duration || med.duration,
       });
     }
   }
 
-  // 3. Gộp chỉ số đo (Metrics) - Ưu tiên key theo standardKey nếu có
+  // 3. Gộp chỉ số đo (Metrics) - Chuẩn hóa key để không trùng tên biến thể
   const metricMap = new Map<string, HealthMetric>();
-  for (const m of [...cleanExisting.metrics, ...cleanIncoming.metrics]) {
-    const key = m.standardKey
-      ? m.standardKey.trim().toUpperCase()
-      : normalizeMetricName(m.name);
-    const existing = metricMap.get(key);
-    if (!existing || (!existing.refRange && m.refRange)) {
-      metricMap.set(key, m);
+  for (const m of [...primary.metrics, ...secondary.metrics]) {
+    const key = resolveCanonicalMetricKey(m);
+    const current = metricMap.get(key);
+    if (!current || (!current.refRange && m.refRange) || (!current.standardKey && m.standardKey)) {
+      metricMap.set(key, {
+        ...current,
+        ...m,
+        name: current?.name && current.name.length >= m.name.length ? current.name : m.name,
+        standardKey: m.standardKey || current?.standardKey,
+        refRange: m.refRange || current?.refRange,
+      });
     }
   }
 
   // 4. Gộp kết quả chẩn đoán hình ảnh (Imaging Results: Siêu âm, X-quang, CT, MRI, ECG...)
   const imgMap = new Map<string, ImagingResult>();
-  for (const img of [...(cleanExisting.imagingResults || []), ...(cleanIncoming.imagingResults || [])]) {
+  for (const img of [...(primary.imagingResults || []), ...(secondary.imagingResults || [])]) {
     const modality = img.modality?.trim() || '';
     const findings = img.findings?.trim() || '';
     const conclusion = img.conclusion?.trim() || '';
     if (!modality && !findings && !conclusion) continue;
 
     const key = normalizeModalityKey(modality);
-    const existing = imgMap.get(key);
-    if (!existing) {
+    const current = imgMap.get(key);
+    if (!current) {
       imgMap.set(key, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
     } else {
-      let mergedFindings = existing.findings || '';
+      let mergedFindings = current.findings || '';
       if (findings && findings !== mergedFindings) {
         if (!mergedFindings) mergedFindings = findings;
         else if (!mergedFindings.includes(findings) && !findings.includes(mergedFindings)) {
@@ -502,9 +628,9 @@ export function mergeHealthEvents(
           mergedFindings = findings;
         }
       }
-      const mergedConclusion = conclusion.length > (existing.conclusion || '').length ? conclusion : (existing.conclusion || '');
+      const mergedConclusion = conclusion.length > (current.conclusion || '').length ? conclusion : (current.conclusion || '');
       imgMap.set(key, {
-        modality: existing.modality || modality,
+        modality: current.modality || modality,
         findings: mergedFindings,
         conclusion: mergedConclusion,
       });
@@ -512,41 +638,41 @@ export function mergeHealthEvents(
   }
 
   // 5. Gộp Khám thể lực (Physical Exam)
-  const mergedPhysicalExam = cleanExisting.physicalExam || cleanIncoming.physicalExam
+  const mergedPhysicalExam = primary.physicalExam || secondary.physicalExam
     ? {
-        height_cm: cleanIncoming.physicalExam?.height_cm ?? cleanExisting.physicalExam?.height_cm,
-        weight_kg: cleanIncoming.physicalExam?.weight_kg ?? cleanExisting.physicalExam?.weight_kg,
-        bmi: cleanIncoming.physicalExam?.bmi ?? cleanExisting.physicalExam?.bmi,
-        bp_mmHg: cleanIncoming.physicalExam?.bp_mmHg || cleanExisting.physicalExam?.bp_mmHg,
-        pulse_bpm: cleanIncoming.physicalExam?.pulse_bpm ?? cleanExisting.physicalExam?.pulse_bpm,
-        classification: cleanIncoming.physicalExam?.classification || cleanExisting.physicalExam?.classification,
+        height_cm: primary.physicalExam?.height_cm ?? secondary.physicalExam?.height_cm,
+        weight_kg: primary.physicalExam?.weight_kg ?? secondary.physicalExam?.weight_kg,
+        bmi: primary.physicalExam?.bmi ?? secondary.physicalExam?.bmi,
+        bp_mmHg: primary.physicalExam?.bp_mmHg || secondary.physicalExam?.bp_mmHg,
+        pulse_bpm: primary.physicalExam?.pulse_bpm ?? secondary.physicalExam?.pulse_bpm,
+        classification: primary.physicalExam?.classification || secondary.physicalExam?.classification,
       }
     : undefined;
 
   // 6. Lời dặn & Ghi chú (làm sạch trùng lặp)
-  let mergedAdvice = cleanExisting.advice;
-  if (cleanIncoming.advice && cleanIncoming.advice !== cleanExisting.advice) {
-    mergedAdvice = cleanExisting.advice
-      ? Array.from(new Set([...cleanExisting.advice.split('\n'), ...cleanIncoming.advice.split('\n')]))
+  let mergedAdvice = primary.advice;
+  if (secondary.advice && secondary.advice !== primary.advice) {
+    mergedAdvice = primary.advice
+      ? Array.from(new Set([...primary.advice.split('\n'), ...secondary.advice.split('\n')]))
           .filter(Boolean)
           .join('\n')
-      : cleanIncoming.advice;
+      : secondary.advice;
   }
 
-  let mergedNotes = cleanExisting.notes;
-  if (cleanIncoming.notes && cleanIncoming.notes !== cleanExisting.notes) {
-    const rawNotes = [...(cleanExisting.notes?.split('\n') || []), ...(cleanIncoming.notes?.split('\n') || [])]
+  let mergedNotes = primary.notes;
+  if (secondary.notes && secondary.notes !== primary.notes) {
+    const rawNotes = [...(primary.notes?.split('\n') || []), ...(secondary.notes?.split('\n') || [])]
       .map(n => n.trim())
       .filter(n => n && !n.includes('Có dữ liệu được trích xuất'));
     mergedNotes = Array.from(new Set(rawNotes)).join('\n') || undefined;
   }
 
   // 7. Gộp danh sách các tệp nguồn liên kết (additionalSources)
-  const existingSources = cleanExisting.additionalSources || (cleanExisting.sourceFileId ? [{ driveFileId: cleanExisting.sourceFileId, fileName: cleanExisting.sourceFileName }] : []);
-  const incomingSources = cleanIncoming.additionalSources || (cleanIncoming.sourceFileId ? [{ driveFileId: cleanIncoming.sourceFileId, fileName: cleanIncoming.sourceFileName }] : []);
-  
+  const primarySources = primary.additionalSources || (primary.sourceFileId ? [{ driveFileId: primary.sourceFileId, fileName: primary.sourceFileName }] : []);
+  const secondarySources = secondary.additionalSources || (secondary.sourceFileId ? [{ driveFileId: secondary.sourceFileId, fileName: secondary.sourceFileName }] : []);
+
   const sourcesMap = new Map<string, { driveFileId: string; fileName: string }>();
-  for (const s of [...existingSources, ...incomingSources]) {
+  for (const s of [...primarySources, ...secondarySources]) {
     if (s.driveFileId && !sourcesMap.has(s.driveFileId)) {
       sourcesMap.set(s.driveFileId, s);
     }
@@ -554,26 +680,30 @@ export function mergeHealthEvents(
   const mergedSources = Array.from(sourcesMap.values());
 
   return {
-    ...cleanExisting,
-    title: cleanExisting.title || cleanIncoming.title,
-    date: cleanIncoming.date || cleanExisting.date,
-    type: cleanExisting.type === 'comprehensive_exam' ? cleanExisting.type : (cleanIncoming.type || cleanExisting.type),
-    facility: cleanIncoming.facility || cleanExisting.facility,
-    additionalSources: mergedSources.length > 1 ? mergedSources : cleanExisting.additionalSources,
+    ...primary,
+    id: cleanExisting.id,
+    sourceFileId: primary.sourceFileId || secondary.sourceFileId,
+    sourceFileName: primary.sourceFileName || secondary.sourceFileName,
+    title: primary.title || secondary.title,
+    date: primary.date || secondary.date,
+    type: primary.type || secondary.type,
+    facility: primary.facility || secondary.facility,
+    doctorName: primary.doctorName || secondary.doctorName,
+    additionalSources: mergedSources.length > 1 ? mergedSources : primary.additionalSources,
     physicalExam: mergedPhysicalExam,
     diagnoses: mergedDiagnoses,
     medications: Array.from(medMap.values()),
     metrics: Array.from(metricMap.values()),
     imagingResults: Array.from(imgMap.values()),
-    vaccinations: cleanIncoming.vaccinations?.length ? cleanIncoming.vaccinations : cleanExisting.vaccinations,
-    hospitalization: cleanHospitalizationRecord(cleanIncoming.hospitalization) ||
-      cleanHospitalizationRecord(cleanExisting.hospitalization),
+    vaccinations: primary.vaccinations?.length ? primary.vaccinations : secondary.vaccinations,
+    hospitalization: cleanHospitalizationRecord(primary.hospitalization) ||
+      cleanHospitalizationRecord(secondary.hospitalization),
     advice: mergedAdvice,
     notes: mergedNotes,
-    nextFollowUp: cleanIncoming.nextFollowUp || cleanExisting.nextFollowUp,
-    patientName: cleanIncoming.patientName || cleanExisting.patientName,
-    patientBirthDate: cleanIncoming.patientBirthDate || cleanExisting.patientBirthDate,
-    patientGender: cleanIncoming.patientGender || cleanExisting.patientGender,
+    nextFollowUp: primary.nextFollowUp || secondary.nextFollowUp,
+    patientName: primary.patientName || secondary.patientName,
+    patientBirthDate: primary.patientBirthDate || secondary.patientBirthDate,
+    patientGender: primary.patientGender || secondary.patientGender,
     recordedAt: now,
   };
 }
@@ -592,9 +722,7 @@ function collectStructuredClinicalItems(event: Partial<HealthEvent>): Set<string
   }
   for (const metric of event.metrics || []) {
     if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
-    const key = metric.standardKey
-      ? metric.standardKey.trim().toUpperCase()
-      : normalizeMetricName(metric.name);
+    const key = resolveCanonicalMetricKey(metric);
     if (!key) continue;
     items.add(`metric:${key}:${Number(metric.value).toFixed(2)}`);
   }
@@ -619,21 +747,21 @@ export function compareStructuredEventContainment(
 ): StructuredEventContainment {
   const leftDate = typeof leftEvent.date === 'string' ? leftEvent.date.trim() : '';
   const rightDate = typeof rightEvent.date === 'string' ? rightEvent.date.trim() : '';
-  if (!leftDate || leftDate !== rightDate) return 'none';
+  const dayDiff = getIsoDateDayDiff(leftDate, rightDate);
+  if (dayDiff === null || dayDiff > CLINICAL_EPISODE_WINDOW_DAYS) return 'none';
 
   const leftItems = collectStructuredClinicalItems(leftEvent);
   const rightItems = collectStructuredClinicalItems(rightEvent);
   if (leftItems.size === 0 || rightItems.size === 0) return 'none';
 
   const minSize = Math.min(leftItems.size, rightItems.size);
+  const sameFacility = areFacilitiesCompatible(leftEvent.facility, rightEvent.facility);
   if (minSize < 2) {
-    const leftFacility = normalizeMedicalText(leftEvent.facility || '');
-    const rightFacility = normalizeMedicalText(rightEvent.facility || '');
     const leftTitle = normalizeMedicalText(leftEvent.title || '');
     const rightTitle = normalizeMedicalText(rightEvent.title || '');
     const sameContext =
-      (leftFacility && rightFacility && (leftFacility.includes(rightFacility) || rightFacility.includes(leftFacility))) ||
-      (leftTitle && rightTitle && leftTitle === rightTitle);
+      sameFacility ||
+      (Boolean(leftTitle) && Boolean(rightTitle) && leftTitle === rightTitle);
     if (!sameContext) return 'none';
   }
 
@@ -645,8 +773,112 @@ export function compareStructuredEventContainment(
   const leftInRight = shared / leftItems.size;
   const rightInLeft = shared / rightItems.size;
 
-  if (leftInRight >= 0.9 && rightInLeft >= 0.9) return 'equivalent';
-  if (leftInRight >= 0.9 && rightInLeft < 0.9) return 'right_contains_left';
-  if (rightInLeft >= 0.9 && leftInRight < 0.9) return 'left_contains_right';
+  if (dayDiff === 0) {
+    if (leftInRight >= 0.9 && rightInLeft >= 0.9) return 'equivalent';
+    if (leftInRight >= 0.9 && rightInLeft < 0.9) return 'right_contains_left';
+    if (rightInLeft >= 0.9 && leftInRight < 0.9) return 'left_contains_right';
+    return 'none';
+  }
+
+  // Khác ngày trong cùng đợt khám (<= 14 ngày): kiểm tra chặt theo chỉ số định lượng trùng & cơ sở y tế / vai trò hồ sơ
+  const leftMetricItems = collectMetricSignatureSet(leftEvent);
+  const rightMetricItems = collectMetricSignatureSet(rightEvent);
+  let sharedMetrics = 0;
+  for (const item of leftMetricItems) {
+    if (rightMetricItems.has(item)) sharedMetrics += 1;
+  }
+  const leftMetricsInRight = leftMetricItems.size > 0 ? sharedMetrics / leftMetricItems.size : 0;
+  const rightMetricsInLeft = rightMetricItems.size > 0 ? sharedMetrics / rightMetricItems.size : 0;
+
+  const hasStrongEvidence =
+    sharedMetrics >= 4 ||
+    (sameFacility && shared >= 3);
+  if (!hasStrongEvidence) return 'none';
+
+  const leftMaster = isMasterClinicalEventType(leftEvent.type);
+  const rightMaster = isMasterClinicalEventType(rightEvent.type);
+  const leftContainedByRight =
+    leftInRight >= 0.85 ||
+    (sharedMetrics >= 4 && leftMetricsInRight >= 0.85 && rightItems.size >= leftItems.size);
+  const rightContainedByLeft =
+    rightInLeft >= 0.85 ||
+    (sharedMetrics >= 4 && rightMetricsInLeft >= 0.85 && leftItems.size >= rightItems.size);
+
+  if (
+    leftContainedByRight &&
+    rightContainedByLeft &&
+    (sameFacility || sharedMetrics >= 6) &&
+    leftInRight >= 0.9 &&
+    rightInLeft >= 0.9
+  ) {
+    return 'equivalent';
+  }
+  if (
+    leftContainedByRight &&
+    (!rightContainedByLeft || (!leftMaster && rightMaster) || rightItems.size > leftItems.size)
+  ) {
+    return 'right_contains_left';
+  }
+  if (
+    rightContainedByLeft &&
+    (!leftContainedByRight || (leftMaster && !rightMaster) || leftItems.size > rightItems.size)
+  ) {
+    return 'left_contains_right';
+  }
+
   return 'none';
+}
+
+export function consolidateTimelineEvents(timeline: HealthEvent[]): {
+  timeline: HealthEvent[];
+  mergedCount: number;
+} {
+  if (!timeline || timeline.length <= 1) {
+    return { timeline: timeline ? [...timeline] : [], mergedCount: 0 };
+  }
+
+  const prioritizedTimeline = [...timeline].sort(
+    (left, right) =>
+      getEventTypeMergePriority(right.type) - getEventTypeMergePriority(left.type) ||
+      right.date.localeCompare(left.date) ||
+      left.recordedAt.localeCompare(right.recordedAt),
+  );
+
+  const consolidated: HealthEvent[] = [];
+  let mergedCount = 0;
+
+  for (const event of prioritizedTimeline) {
+    const duplicate = detectDuplicateEvent(consolidated, event);
+    const matchIndex = duplicate
+      ? consolidated.findIndex((item) => item.id === duplicate.matchedEvent.id)
+      : consolidated.findIndex((item) => {
+          if (compareStructuredEventContainment(item, event) !== 'none') return true;
+          if (item.date !== event.date || !areFacilitiesCompatible(item.facility, event.facility)) {
+            return false;
+          }
+          const leftDiags = [...(item.diagnoses || [])].map(normalizeMedicalText).filter(Boolean).sort();
+          const rightDiags = [...(event.diagnoses || [])].map(normalizeMedicalText).filter(Boolean).sort();
+          if (leftDiags.length > 0 && leftDiags.length === rightDiags.length) {
+            return leftDiags.every((diag, idx) => diag === rightDiags[idx]);
+          }
+          return Boolean(
+            item.title &&
+              event.title &&
+              normalizeMedicalText(item.title) === normalizeMedicalText(event.title),
+          );
+        });
+
+    if (matchIndex === -1) {
+      consolidated.push(event);
+    } else {
+      consolidated[matchIndex] = mergeHealthEvents(consolidated[matchIndex], event);
+      mergedCount += 1;
+    }
+  }
+
+  consolidated.sort(
+    (left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt),
+  );
+
+  return { timeline: consolidated, mergedCount };
 }

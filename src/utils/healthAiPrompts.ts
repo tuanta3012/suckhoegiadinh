@@ -69,7 +69,7 @@ BẮT BUỘC TUÂN THỦ CÁC NGUYÊN TẮC BÓC TÁCH TỐI ƯU:
 
 QUY TẮC PHÂN LOẠI & TRÍCH XUẤT ĐA DẠNG (POLYMORPHIC SCHEMA):
 1. PHÂN LOẠI TÀI LIỆU (type) — BẮT BUỘC đọc tiêu đề chính bên trong trang đầu VÀ toàn bộ nội dung tài liệu để phân loại đúng mục đích khám/chữa bệnh:
-   - "comprehensive_exam": Sổ/Phiếu khám sức khỏe định kỳ tổng quát, khám đoàn thể. Nếu tài liệu có tiêu đề hoặc tên tệp như "Khám sức khỏe định kỳ", "Khám tổng quát", "Khám sức khỏe năm ...", PHẢI chọn loại này dù kèm nhiều phiếu xét nghiệm, siêu âm hoặc ECG.
+   - "comprehensive_exam": Hồ sơ/Sổ/Phiếu khám sức khỏe định kỳ, sức khỏe tổng quát, khám đoàn thể. Nếu tiêu đề hoặc tên tệp là "Hồ sơ sức khỏe định kỳ...", "Khám sức khỏe định kỳ", "Khám tổng quát", "Khám sức khỏe năm ...", BẮT BUỘC chọn "comprehensive_exam" dù bên trong có nhiều phiếu xét nghiệm, siêu âm, X-quang hoặc ECG.
    - "test_result": Phiếu kết quả xét nghiệm huyết học, sinh hóa, miễn dịch, nước tiểu... (nếu chỉ là phiếu xét nghiệm thì PHẢI chọn "test_result", tuyệt đối không chọn "discharge").
    - "imaging": Kết quả chẩn đoán hình ảnh (Siêu âm tuyến giáp/ổ bụng/tim, X-quang, CT, MRI, Điện tâm đồ ECG, nội soi...).
    - "prescription": Đơn thuốc, toa thuốc điều trị ngoại trú/nội trú.
@@ -139,7 +139,7 @@ Dưới đây là danh sách ${events.length} sự kiện y tế đã thu thập
 ${JSON.stringify(events, null, 2)}
 
 Hãy:
-1. Chuẩn hóa lại tên sự kiện, loại sự kiện (type), chẩn đoán y khoa theo danh pháp chuẩn.
+1. Chuẩn hóa lại tên sự kiện, loại sự kiện (type), chẩn đoán y khoa theo danh pháp chuẩn. Hồ sơ/Sổ khám sức khỏe định kỳ hoặc tổng quát ("Hồ sơ sức khỏe định kỳ...", "Khám sức khỏe tổng quát") phải giữ type là "comprehensive_exam", KHÔNG hạ xuống "imaging" hay "test_result" chỉ vì có kèm siêu âm/xét nghiệm.
 2. Kiểm tra và bổ sung logic định dạng ngày tháng, liều lượng thuốc, chỉ số sinh tồn.
 3. Sắp xếp thông minh theo trình tự thời gian và mức độ ưu tiên quan trọng.
 4. Trả về DUY NHẤT một JSON:

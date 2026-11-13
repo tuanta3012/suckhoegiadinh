@@ -87,4 +87,45 @@ describe('classifyHealthEventType', () => {
   it('preserves a supported model classification when no stronger document clues exist', () => {
     expect(classifyHealthEventType({ title: 'Hồ sơ y tế', type: 'vaccination' })).toBe('vaccination');
   });
+
+  it('classifies "Hồ sơ sức khỏe định kỳ năm 2026" as comprehensive_exam even if model guessed imaging', () => {
+    expect(classifyHealthEventType({
+      title: 'Hồ sơ sức khỏe định kỳ năm 2026',
+      type: 'imaging',
+      facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+      diagnoses: ['Đa polyp túi mật', 'Nang giáp keo hai thùy', 'Tăng acid uric máu', 'Đạm niệu (+)'],
+      metrics: [
+        { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+        { name: 'Tổng phân tích nước tiểu – PRO', value: 0.15, unit: 'G/L' },
+      ],
+      imagingResults: [{ modality: 'Siêu âm tuyến giáp', findings: 'Nang keo', conclusion: 'TIRADS 1' }],
+    })).toBe('comprehensive_exam');
+  });
+
+  it('classifies multi-specialty dossiers without checkup keywords in title as comprehensive_exam', () => {
+    expect(classifyHealthEventType({
+      title: 'Kết quả khám bệnh tổng hợp',
+      type: 'imaging',
+      physicalExam: { bp_mmHg: '120/80', weight_kg: 68 },
+      diagnoses: ['Tăng acid uric máu', 'Gan nhiễm mỡ'],
+      metrics: [
+        { name: 'Acid Uric', value: 520, unit: 'µmol/L' },
+        { name: 'Cholesterol', value: 5.4, unit: 'mmol/L' },
+      ],
+      imagingResults: [{ modality: 'Siêu âm bụng', findings: '', conclusion: 'Gan nhiễm mỡ độ 1' }],
+    })).toBe('comprehensive_exam');
+  });
+
+  it('keeps standalone lab slips with Z00.0 diagnosis as test_result', () => {
+    expect(classifyHealthEventType({
+      title: 'Phiếu kết quả xét nghiệm tổng quát',
+      type: 'test_result',
+      facility: 'Bệnh Viện Đại Học Y Dược TP.HCM - Phòng Khám Bệnh Viện Đại Học Y Dược 1',
+      diagnoses: ['Z00.0 - Khám sức khỏe tổng quát'],
+      metrics: [
+        { name: 'HBsAb định lượng', value: 1000, unit: 'IU/L' },
+        { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+      ],
+    })).toBe('test_result');
+  });
 });

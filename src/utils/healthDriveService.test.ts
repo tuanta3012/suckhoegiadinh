@@ -3,6 +3,7 @@ import {
   ensureDriveFolderAccess,
   deleteDriveFile,
   deleteDriveFamilyMember,
+  findExistingHealthWorkspace,
   openHealthWorkspace,
   openAssignedHealthWorkspace,
   resolveSingleFamilyManifestFile,
@@ -11,16 +12,21 @@ import {
   updateDriveFamilyMember,
 } from './healthDriveService';
 import {
+  findAdminWorkspaceRelay,
   listHealthWorkspaceAssignments,
   publishHealthWorkspaceAssignments,
+  readHealthAssignedFolder,
+  readHealthWorkspaceAssignment,
   removeHealthWorkspaceAssignment,
   registerHealthWorkspaceRelay,
+  unregisterHealthWorkspace,
 } from './workspaceShareRelay';
 
 vi.mock('./workspaceShareRelay', () => ({
   findAdminWorkspaceRelay: vi.fn(),
   listHealthWorkspaceAssignments: vi.fn(),
   publishHealthWorkspaceAssignments: vi.fn(),
+  readHealthAssignedFolder: vi.fn(),
   readHealthWorkspaceAssignment: vi.fn(),
   registerHealthWorkspaceRelay: vi.fn(),
   removeHealthWorkspaceAssignment: vi.fn(),
@@ -717,5 +723,137 @@ describe('resolveSingleFamilyManifestFile', () => {
     expect(deletedIds).toContain('file-empty-1');
     expect(deletedIds).toContain('file-empty-2');
     expect(deletedIds).not.toContain('file-with-data');
+  });
+
+  describe('findExistingHealthWorkspace', () => {
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.mocked(readHealthAssignedFolder).mockResolvedValue(null);
+      vi.mocked(findAdminWorkspaceRelay).mockResolvedValue(null);
+      vi.mocked(readHealthWorkspaceAssignment).mockResolvedValue(null);
+      vi.mocked(registerHealthWorkspaceRelay).mockResolvedValue(undefined);
+      vi.mocked(unregisterHealthWorkspace).mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('does not unregister Firestore relay on transient network/auth errors', async () => {
+      vi.mocked(findAdminWorkspaceRelay).mockResolvedValue({
+        rootFolderId: 'relay-folder-1',
+        familyFileId: 'relay-family-1',
+      });
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: 'Backend Error' } }), { status: 500 }),
+      );
+
+      await findExistingHealthWorkspace();
+
+      expect(unregisterHealthWorkspace).not.toHaveBeenCalled();
+    });
+
+    it('unregisters Firestore relay only when the indexed workspace returns 404/missing', async () => {
+      vi.mocked(findAdminWorkspaceRelay).mockResolvedValue({
+        rootFolderId: 'missing-folder-1',
+        familyFileId: 'missing-family-1',
+      });
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: 'File not found: missing-folder-1' } }), { status: 404 }),
+      );
+
+      await findExistingHealthWorkspace();
+
+      expect(unregisterHealthWorkspace).toHaveBeenCalledWith('missing-folder-1');
+    });
+
+    it('discovers Admin-owned stamped folders (without sharedWithMe filter) and picks the populated workspace', async () => {
+      const queries: string[] = [];
+      const emptyFamily = {
+        schemaVersion: 1,
+        adminEmail: 'user@example.com',
+        rawFilesFolderId: 'raw-empty',
+        profilesFolderId: 'prof-empty',
+        members: [],
+        createdAt: '2026-10-01T00:00:00Z',
+        updatedAt: '2026-10-01T00:00:00Z',
+      };
+      const populatedFamily = {
+        schemaVersion: 1,
+        adminEmail: 'user@example.com',
+        rawFilesFolderId: 'raw-real',
+        profilesFolderId: 'prof-real',
+        members: [
+          { id: 'm1', name: 'Admin Member', role: 'other', email: 'user@example.com', driveFolderId: 'df1', profileFileId: 'pf1' },
+        ],
+        createdAt: '2026-10-02T00:00:00Z',
+        updatedAt: '2026-11-10T00:00:00Z',
+      };
+
+      globalThis.fetch = vi.fn().mockImplementation(async (rawUrl: string) => {
+        const url = new URL(rawUrl);
+        if (url.pathname.endsWith('/files') && url.searchParams.has('q')) {
+          const q = url.searchParams.get('q') || '';
+          queries.push(q);
+          if (q.includes('appProperties')) {
+            return new Response(JSON.stringify({
+              files: [
+                { id: 'folder-empty', name: 'Suc khoe gia dinh', mimeType: 'application/vnd.google-apps.folder', appProperties: { app_id: 'com.suckhoegiadinh.app' } },
+                { id: 'folder-real', name: 'Suc khoe gia dinh', mimeType: 'application/vnd.google-apps.folder', appProperties: { app_id: 'com.suckhoegiadinh.app' } },
+              ],
+            }), { status: 200 });
+          }
+          if (q.includes("'folder-empty' in parents")) {
+            return new Response(JSON.stringify({
+              files: [{ id: 'family-empty', name: 'family.json', mimeType: 'application/json' }],
+            }), { status: 200 });
+          }
+          if (q.includes("'folder-real' in parents")) {
+            return new Response(JSON.stringify({
+              files: [{ id: 'family-real', name: 'family.json', mimeType: 'application/json' }],
+            }), { status: 200 });
+          }
+        }
+        if (url.pathname.endsWith('/folder-empty')) {
+          return new Response(JSON.stringify({
+            id: 'folder-empty',
+            name: 'Suc khoe gia dinh',
+            mimeType: 'application/vnd.google-apps.folder',
+            appProperties: { app_id: 'com.suckhoegiadinh.app' },
+          }), { status: 200 });
+        }
+        if (url.pathname.endsWith('/folder-real')) {
+          return new Response(JSON.stringify({
+            id: 'folder-real',
+            name: 'Suc khoe gia dinh',
+            mimeType: 'application/vnd.google-apps.folder',
+            appProperties: { app_id: 'com.suckhoegiadinh.app' },
+          }), { status: 200 });
+        }
+        if (url.pathname.endsWith('/family-empty') && url.searchParams.get('alt') === 'media') {
+          return new Response(JSON.stringify(emptyFamily), { status: 200 });
+        }
+        if (url.pathname.endsWith('/family-empty')) {
+          return new Response(JSON.stringify({ id: 'family-empty', name: 'family.json', mimeType: 'application/json', parents: ['folder-empty'] }), { status: 200 });
+        }
+        if (url.pathname.endsWith('/family-real') && url.searchParams.get('alt') === 'media') {
+          return new Response(JSON.stringify(populatedFamily), { status: 200 });
+        }
+        if (url.pathname.endsWith('/family-real')) {
+          return new Response(JSON.stringify({ id: 'family-real', name: 'family.json', mimeType: 'application/json', parents: ['folder-real'] }), { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const found = await findExistingHealthWorkspace();
+
+      expect(queries[0]).toContain("appProperties has { key='app_id'");
+      expect(queries[0]).not.toContain('sharedWithMe = true');
+      expect(found?.rootFolderId).toBe('folder-real');
+      expect(found?.family.members).toHaveLength(1);
+      expect(registerHealthWorkspaceRelay).toHaveBeenCalledWith('folder-real', 'family-real', 'user@example.com');
+    });
   });
 });

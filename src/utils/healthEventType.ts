@@ -68,14 +68,39 @@ export function hasMeaningfulHospitalization(value: unknown): boolean {
   return cleanHospitalizationRecord(value) !== undefined;
 }
 
+export function hasMeaningfulPhysicalExam(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Boolean(
+    (typeof record.height_cm === 'number' && Number.isFinite(record.height_cm)) ||
+    (typeof record.weight_kg === 'number' && Number.isFinite(record.weight_kg)) ||
+    (typeof record.bmi === 'number' && Number.isFinite(record.bmi)) ||
+    (typeof record.pulse_bpm === 'number' && Number.isFinite(record.pulse_bpm)) ||
+    isMeaningfulFieldText(record.bp_mmHg) ||
+    isMeaningfulFieldText(record.classification),
+  );
+}
+
+function isPlaceholderPageText(page: string): boolean {
+  const normalized = normalizeText(page);
+  return (
+    !normalized ||
+    normalized === 'trang bia anh' ||
+    normalized === 'trang khong co van ban' ||
+    normalized === 'trang trong'
+  );
+}
+
 function extractLeadingDocumentHeader(value: Record<string, unknown>): string {
   const pageSources = Array.isArray(value.pageTexts)
     ? value.pageTexts
     : Array.isArray(value.contentIndexPages)
       ? value.contentIndexPages
       : [];
-  const firstPage = pageSources.find((page): page is string => typeof page === 'string' && page.trim().length > 0);
-  return firstPage ? firstPage.slice(0, 500) : '';
+  const meaningfulPages = pageSources
+    .filter((page): page is string => typeof page === 'string' && !isPlaceholderPageText(page))
+    .slice(0, 2);
+  return meaningfulPages.join('\n').slice(0, 1200);
 }
 
 function extractFullDocumentBody(value: Record<string, unknown>): string {
@@ -101,6 +126,13 @@ function extractFullDocumentBody(value: Record<string, unknown>): string {
 
 const COMPREHENSIVE_PATTERNS = [
   /\bkham suc khoe\b/,
+  /\bsuc khoe dinh ky\b/,
+  /\bsuc khoe tong quat\b/,
+  /\bho so kham suc khoe\b/,
+  /\bho so kham dinh ky\b/,
+  /\bphieu kham suc khoe\b/,
+  /\bket qua kham suc khoe\b/,
+  /\btong ket suc khoe\b/,
   /\bso kham suc khoe\b/,
   /\bkham tong quat\b/,
   /\bkham dinh ky\b/,
@@ -200,14 +232,20 @@ export function classifyHealthEventType(
   }));
   const fullContent = `${bodyText} ${structuredText}`.trim();
 
-  const hasMetrics = Array.isArray(value.metrics) && value.metrics.length > 0;
+  const metricsCount = Array.isArray(value.metrics) ? value.metrics.length : 0;
+  const diagnosesCount = Array.isArray(value.diagnoses) ? value.diagnoses.length : 0;
+  const hasMetrics = metricsCount > 0;
   const hasImaging = Array.isArray(value.imagingResults) && value.imagingResults.length > 0;
   const hasMeds = Array.isArray(value.medications) && value.medications.length > 0;
   const hasVax = Array.isArray(value.vaccinations) && value.vaccinations.length > 0;
   const hasHosp = hasMeaningfulHospitalization(value.hospitalization);
+  const hasPhysicalExam = hasMeaningfulPhysicalExam(value.physicalExam);
 
-  // 1. Khám sức khỏe định kỳ / tổng quát
+  // 1. Khám sức khỏe định kỳ / tổng quát (ưu tiên cao nhất khi tiêu đề/header hoặc nội dung kết hợp)
   if (matchesAny(titleAndHeader, COMPREHENSIVE_PATTERNS)) {
+    return 'comprehensive_exam';
+  }
+  if (matchesAny(fullContent, COMPREHENSIVE_PATTERNS) && hasMetrics && (hasImaging || hasPhysicalExam)) {
     return 'comprehensive_exam';
   }
 
@@ -226,21 +264,34 @@ export function classifyHealthEventType(
     return 'discharge';
   }
 
-  // 5. Tiêu đề / header trang đầu nói rõ Xét nghiệm vs Chẩn đoán hình ảnh
+  // 5. Tiêu đề / header trang đầu nói rõ Xét nghiệm vs Chẩn đoán hình ảnh vs Khám bệnh
   const titleImaging = matchesAny(`${fileLabel} ${titleLabel}`, IMAGING_PATTERNS);
   const titleLab = matchesAny(`${fileLabel} ${titleLabel}`, TEST_RESULT_PATTERNS);
+  const titleMedicalReport = matchesAny(`${fileLabel} ${titleLabel}`, MEDICAL_REPORT_PATTERNS);
   const headerImaging = matchesAny(headerLabel, IMAGING_PATTERNS);
   const headerLab = matchesAny(headerLabel, TEST_RESULT_PATTERNS);
 
   if (titleLab && !titleImaging) return 'test_result';
-  if (titleImaging && !titleLab) return 'imaging';
+  if (titleImaging && !titleLab && !hasPhysicalExam) return 'imaging';
+  if (titleMedicalReport && !titleImaging && !titleLab) {
+    return hasMetrics && hasImaging && (hasPhysicalExam || diagnosesCount >= 2)
+      ? 'comprehensive_exam'
+      : 'medical_report';
+  }
+
   if (headerLab && !headerImaging && !hasImaging) return 'test_result';
-  if (headerImaging && !headerLab) return 'imaging';
+  if (headerImaging && !headerLab && !hasMetrics && !hasPhysicalExam) return 'imaging';
+
+  // Hồ sơ đa chuyên khoa (có cả nhiều chỉ số xét nghiệm lẫn chẩn đoán hình ảnh và khám lâm sàng/nhiều chẩn đoán)
+  if (!titleImaging && hasMetrics && hasImaging && (hasPhysicalExam || (metricsCount >= 2 && diagnosesCount >= 2))) {
+    return 'comprehensive_exam';
+  }
 
   if (titleImaging || headerImaging || hasImaging) {
     if (hasMetrics && !hasImaging) return 'test_result';
-    if (hasImaging && !hasMetrics) return 'imaging';
+    if (hasImaging && !hasMetrics && !matchesAny(titleAndHeader, MEDICAL_REPORT_PATTERNS)) return 'imaging';
     if (matchesAny(titleAndHeader, TEST_RESULT_PATTERNS)) return 'test_result';
+    if (matchesAny(titleAndHeader, MEDICAL_REPORT_PATTERNS)) return 'medical_report';
     return 'imaging';
   }
 
@@ -253,9 +304,6 @@ export function classifyHealthEventType(
   }
 
   // 6. Đánh giá theo toàn bộ nội dung văn bản + dữ liệu cấu trúc
-  if (matchesAny(fullContent, COMPREHENSIVE_PATTERNS) && hasMetrics && (hasImaging || Boolean(value.physicalExam))) {
-    return 'comprehensive_exam';
-  }
   if (matchesAny(fullContent, VACCINATION_PATTERNS)) return 'vaccination';
   if (matchesAny(fullContent, DISCHARGE_PATTERNS)) return 'discharge';
   if (matchesAny(fullContent, PRESCRIPTION_PATTERNS) || (hasMeds && !hasMetrics && !hasImaging)) {

@@ -827,7 +827,16 @@ export async function refineAndOrganizeMemberData(
     });
 
     const durationMs = getDuration();
-    const finalTimeline = Array.isArray(data.organizedTimeline) ? data.organizedTimeline : events;
+    const rawTimeline = Array.isArray(data.organizedTimeline) ? data.organizedTimeline : events;
+    const finalTimeline = rawTimeline.map((event) => {
+      if (!event || typeof event !== 'object') return event;
+      const normalizedType =
+        classifyHealthEventType(
+          event as Partial<HealthEvent> & Record<string, unknown>,
+          event.sourceFileName,
+        ) || event.type;
+      return { ...event, type: normalizedType };
+    });
     const notes = Array.isArray(data.refinementNotes) ? data.refinementNotes : ['Đã chuẩn hóa dữ liệu.'];
     digitizationLogger.log(
       'info',

@@ -152,4 +152,86 @@ describe('cleanupWorkspaceDuplicates', () => {
 
     expect(deleteFile).not.toHaveBeenCalled();
   });
+
+  it('merges an earlier standalone lab slip into a comprehensive checkup within the clinical episode window and trashes the redundant lab raw file', async () => {
+    const rawFiles: DriveFile[] = [
+      { id: 'file-lab', name: 'xet-nghiem-08-06.pdf', mimeType: 'application/pdf', createdTime: '2026-06-08T10:00:00Z', md5Checksum: 'c'.repeat(32) },
+      { id: 'file-checkup', name: 'ho-so-2026.pdf', mimeType: 'application/pdf', createdTime: '2026-06-11T10:00:00Z', md5Checksum: 'd'.repeat(32) },
+    ];
+    const sharedMetrics = [
+      { name: 'HBsAb định lượng', value: 1000, unit: 'IU/L' },
+      { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+      { name: 'Định lượng HDL-C', value: 0.99, unit: 'mmol/L' },
+      { name: 'PRO (Nước tiểu)', value: 0.15, unit: 'G/L' },
+    ];
+    const labEvent: HealthEvent = {
+      id: 'ev-lab',
+      sourceFileId: 'file-lab',
+      sourceFileName: 'xet-nghiem-08-06.pdf',
+      type: 'test_result',
+      title: 'Phiếu kết quả xét nghiệm tổng quát',
+      date: '2026-06-08',
+      facility: 'Bệnh Viện Đại Học Y Dược TP.HCM - Phòng Khám Bệnh Viện Đại Học Y Dược 1',
+      diagnoses: ['Z00.0 - Khám sức khỏe tổng quát'],
+      medications: [],
+      metrics: sharedMetrics,
+      recordedAt: '2026-06-08T12:00:00.000Z',
+    };
+    const checkupEvent: HealthEvent = {
+      id: 'ev-checkup',
+      sourceFileId: 'file-checkup',
+      sourceFileName: 'ho-so-2026.pdf',
+      type: 'comprehensive_exam',
+      title: 'Hồ sơ sức khỏe định kỳ năm 2026',
+      date: '2026-06-11',
+      facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+      diagnoses: ['Tăng acid uric máu', 'Đạm niệu (+)', 'Nang giáp keo hai thùy'],
+      medications: [],
+      metrics: [
+        { name: 'HBsAb định lượng', value: 1000, unit: 'IU/L' },
+        { name: 'Định lượng Acid Uric', value: 933.88, unit: 'µmol/L' },
+        { name: 'Định lượng HDL-C', value: 0.99, unit: 'mmol/L' },
+        { name: 'Tổng phân tích nước tiểu – PRO', value: 0.15, unit: 'G/L' },
+        { name: 'Định lượng Glucose', value: 5.2, unit: 'mmol/L' },
+      ],
+      imagingResults: [{ modality: 'Siêu âm tuyến giáp', findings: 'Nang keo', conclusion: 'TIRADS 1' }],
+      recordedAt: '2026-06-11T15:00:00.000Z',
+    };
+    let savedProfile: HealthProfile = {
+      schemaVersion: 2,
+      member,
+      timeline: [labEvent, checkupEvent],
+      sources: [
+        { ...makeSource('file-lab'), fileName: 'xet-nghiem-08-06.pdf' },
+        { ...makeSource('file-checkup'), fileName: 'ho-so-2026.pdf' },
+      ],
+      summary: { latestDiagnoses: [], latestMetrics: {} },
+      createdAt: labEvent.recordedAt,
+      updatedAt: checkupEvent.recordedAt,
+    };
+    const deleteFile = vi.fn(async () => undefined);
+
+    const result = await cleanupWorkspaceDuplicates(
+      workspace,
+      async () => savedProfile,
+      async (_fileId, value) => {
+        savedProfile = value;
+        return value;
+      },
+      async () => rawFiles,
+      deleteFile,
+    );
+
+    expect(result.deletedRawFiles).toBe(1);
+    expect(result.mergedEvents).toBe(1);
+    expect(deleteFile).toHaveBeenCalledWith('file-lab');
+    expect(savedProfile.timeline).toHaveLength(1);
+    expect(savedProfile.timeline[0].type).toBe('comprehensive_exam');
+    expect(savedProfile.timeline[0].title).toBe('Hồ sơ sức khỏe định kỳ năm 2026');
+    expect(savedProfile.timeline[0].date).toBe('2026-06-11');
+    expect(savedProfile.timeline[0].additionalSources?.map((s) => s.driveFileId)).toEqual(
+      expect.arrayContaining(['file-checkup', 'file-lab']),
+    );
+    expect(savedProfile.sources.find((s) => s.driveFileId === 'file-lab')?.rawDeletedAt).toBeTruthy();
+  });
 });
