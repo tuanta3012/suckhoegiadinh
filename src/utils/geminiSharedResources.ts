@@ -1,5 +1,6 @@
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
+import { GoogleGenAI } from '@google/genai';
 
 const LOCAL_AI_KEYS_STORAGE_KEY = 'health_local_ai_resources_keys_v1';
 
@@ -74,11 +75,31 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
 
   const url = buildApiUrl('/api/gemini/test-key');
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: cleanKey }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cleanKey }),
+    });
+  } catch (e) {
+    // Direct client-side test fallback for standalone APKs / offline mode when backend is unreachable
+    try {
+      const ai = new GoogleGenAI({ apiKey: cleanKey });
+      await ai.models.generateContent({
+        model: 'gemini-3.5-flash-lite',
+        contents: 'OK',
+        config: { maxOutputTokens: 16 },
+      });
+      return { valid: true, workingModel: 'gemini-3.5-flash-lite' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/429|quota/i.test(msg)) {
+        return { valid: true, workingModel: 'gemini-3.5-flash-lite', quotaExhausted: true };
+      }
+      return { valid: false };
+    }
+  }
 
-  return readApiJson(response, 'Server Gemini (test-key)');
+  return await readApiJson(response, 'Server Gemini (test-key)');
 }

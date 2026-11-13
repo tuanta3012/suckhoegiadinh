@@ -4,7 +4,6 @@ import {
   AlertOctagon,
   AlertTriangle,
   Calendar,
-  CheckCircle2,
   Clock,
   Compass,
   FileHeart,
@@ -39,9 +38,9 @@ function AnalysisBullet({
   children: React.ReactNode;
 }) {
   return (
-    <li className="break-words pl-0.5 leading-relaxed">
-      <strong className="font-extrabold">{label}:</strong> {children}
-    </li>
+    <div className="break-words leading-relaxed text-slate-800 text-xs sm:text-sm">
+      <strong className="font-extrabold text-slate-900">{label}:</strong> {children}
+    </div>
   );
 }
 
@@ -58,14 +57,14 @@ export function AiDeepAnalysisCard({
 }: AiDeepAnalysisCardProps) {
   if (!analysis && !aiAnalysis) {
     return (
-      <div className="rounded-2xl border border-emerald-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="rounded-2xl border border-emerald-200/80 bg-white p-3.5 sm:p-5 shadow-2xs space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+            <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
               <Sparkles className="w-4 h-4" />
             </div>
             <div className="min-w-0">
-              <h4 className="font-extrabold text-slate-900 text-sm truncate">
+              <h4 className="font-extrabold text-slate-900 text-xs sm:text-sm truncate">
                 Phân tích Y khoa Chuyên sâu (AI Deep-Dive)
               </h4>
               <p className="text-[11px] text-slate-500 truncate">
@@ -76,7 +75,7 @@ export function AiDeepAnalysisCard({
         </div>
 
         {isAnalyzing || isRefining ? (
-          <div className="rounded-xl bg-emerald-50/70 border border-emerald-200/80 p-3.5 space-y-2">
+          <div className="rounded-xl bg-emerald-50/70 border border-emerald-200/80 p-3 space-y-2">
             <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
               <span className="flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 animate-spin text-emerald-600 shrink-0" />
@@ -88,8 +87,8 @@ export function AiDeepAnalysisCard({
             </div>
           </div>
         ) : error ? (
-          <div className="rounded-xl bg-rose-50 border border-rose-100 p-3.5 space-y-3">
-            <div className="flex items-start gap-2.5 text-xs text-rose-800 font-medium leading-relaxed">
+          <div className="rounded-xl bg-rose-50 border border-rose-100 p-3 space-y-2.5">
+            <div className="flex items-start gap-2 text-xs text-rose-800 font-medium leading-relaxed">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
               <p>{error}</p>
             </div>
@@ -97,7 +96,7 @@ export function AiDeepAnalysisCard({
               <button
                 type="button"
                 onClick={onRetry}
-                className="py-2 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
+                className="py-1.5 px-3.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs transition-all active:scale-95 flex items-center justify-center gap-1.5"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Thử lại phân tích</span>
@@ -105,22 +104,27 @@ export function AiDeepAnalysisCard({
             )}
           </div>
         ) : (
-          <div className="space-y-3">
-            <ul className="list-disc space-y-1.5 pl-5 text-xs text-slate-600">
+          <div className="space-y-2.5">
+            <div className="text-xs text-slate-600">
               <AnalysisBullet label="Tóm tắt">
                 {narrativeSummary ||
-                  'Hệ thống tự động tổng hợp và phân tích 4 lớp y khoa sau khi hoàn tất tải lên tài liệu khám bệnh.'}
+                  'Nhấn nút "AI Y Khoa Chuyên Sâu" bên dưới để kích hoạt hệ thống tổng hợp chỉ số & phân tích 4 lớp y khoa cho hồ sơ thành viên.'}
               </AnalysisBullet>
-            </ul>
+            </div>
             {onRetry && (
-              <div>
+              <div className="flex justify-center pt-2">
                 <button
                   type="button"
+                  disabled={isAnalyzing || isRefining}
                   onClick={onRetry}
-                  className="inline-flex items-center justify-center gap-2 py-2 px-4 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-bold transition-all active:scale-95 cursor-pointer"
+                  className="inline-flex items-center justify-center gap-1.5 py-2 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-xs transition-all active:scale-95 cursor-pointer disabled:opacity-50"
                 >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Kích hoạt phân tích ngay</span>
+                  {isAnalyzing || isRefining ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>{isAnalyzing || isRefining ? 'Đang phân tích...' : 'Phân tích AI Chuyên sâu'}</span>
                 </button>
               </div>
             )}
@@ -152,63 +156,70 @@ export function AiDeepAnalysisCard({
     : 'Chưa có';
 
   return (
-    <div className="rounded-3xl border border-emerald-200/80 bg-white p-5 sm:p-7 shadow-sm space-y-6">
+    <div className="rounded-2xl border border-emerald-200/80 bg-white p-3 sm:p-5 shadow-2xs space-y-3.5">
       {/* Header Banner: Health Score & Model Info */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2.5 border-b border-slate-100">
+        <div className="flex items-center gap-2.5">
           <div
-            className={`w-12 h-12 rounded-2xl border flex flex-col items-center justify-center font-black text-base shadow-xs shrink-0 ${scoreColor}`}
+            className={`w-11 h-11 rounded-xl border flex flex-col items-center justify-center font-black text-sm shadow-2xs shrink-0 ${scoreColor}`}
           >
             <span>{healthScore ?? '—'}</span>
-            <span className="text-[8px] font-bold uppercase tracking-wider text-slate-500">Điểm AI</span>
+            <span className="text-[7.5px] font-extrabold uppercase tracking-wider text-slate-500">Điểm AI</span>
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h4 className="font-extrabold text-slate-900 text-sm sm:text-base truncate">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <h4 className="font-extrabold text-slate-900 text-xs sm:text-sm truncate">
                 Phân tích Sức khỏe 4 Lớp
               </h4>
               <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[9px] font-bold shrink-0">
                 AI Chuẩn hóa
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 truncate mt-0.5">
+            <p className="text-[10.5px] text-slate-500 truncate mt-0.5">
               Cập nhật: {formattedDate}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold">
-            <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-            <span>AI Y khoa Chuyên sâu</span>
-          </span>
-          {isAnalyzing && (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold">
-              <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
-              <span>Đang phân tích...</span>
-            </span>
+        <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-center sm:justify-start">
+          {onRetry && (
+            <button
+              type="button"
+              disabled={isAnalyzing || isRefining}
+              onClick={onRetry}
+              title="Bấm để kích hoạt phân tích Y khoa Chuyên sâu 4 Lớp"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-extrabold shadow-xs transition-all cursor-pointer disabled:opacity-60"
+            >
+              {isAnalyzing || isRefining ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              <span>{isAnalyzing || isRefining ? 'Đang phân tích AI...' : 'AI Y khoa Chuyên sâu'}</span>
+            </button>
           )}
         </div>
       </div>
 
       {/* Overall Medical Assessment */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-emerald-50/70 to-teal-50/50 border border-emerald-100">
-        <h5 className="font-bold text-slate-900 text-xs uppercase tracking-wide flex items-center gap-1.5 mb-1.5 text-emerald-900">
-          <FileHeart className="w-4 h-4 text-emerald-600" />
+      <div className="p-3 sm:p-4 rounded-xl bg-gradient-to-r from-emerald-50/80 to-teal-50/60 border border-emerald-200/60 shadow-2xs space-y-1.5">
+        <h5 className="font-extrabold text-slate-900 text-xs uppercase tracking-wide flex items-center gap-1.5 text-emerald-900">
+          <FileHeart className="w-4 h-4 text-emerald-600 shrink-0" />
           <span>Đánh giá Tổng quan Bác sĩ Gia đình AI:</span>
         </h5>
-        <ul className="list-disc space-y-1.5 pl-5 text-xs sm:text-sm text-slate-800">
+        <div className="space-y-1.5 text-xs sm:text-sm text-slate-800">
           <AnalysisBullet label="Tổng quan">{overallAssessment || narrativeSummary}</AnalysisBullet>
-        </ul>
+        </div>
       </div>
 
+      {/* Critical Alerts */}
       {(criticalAlerts.length > 0 || criticalCorrelations.length > 0) && (
-        <div className="rounded-2xl border-2 border-rose-300 bg-rose-50 p-4 sm:p-5 text-rose-950 shadow-sm">
-          <h5 className="mb-2 flex items-center gap-2 text-sm font-extrabold">
-            <AlertOctagon className="h-5 w-5 shrink-0 text-rose-700" />
+        <div className="rounded-xl border border-rose-300 bg-rose-50/90 p-3 sm:p-4 text-rose-950 space-y-2 shadow-2xs">
+          <h5 className="flex items-center gap-1.5 text-xs sm:text-sm font-extrabold text-rose-900">
+            <AlertOctagon className="h-4.5 w-4.5 shrink-0 text-rose-700" />
             <span>Cảnh báo quan trọng</span>
           </h5>
-          <ul className="list-disc space-y-2 pl-5 text-xs sm:text-sm">
+          <div className="space-y-1.5 text-xs sm:text-sm">
             {criticalAlerts.map((alert, idx) => (
               <AnalysisBullet key={idx} label="Cảnh báo">{alert}</AnalysisBullet>
             ))}
@@ -217,7 +228,7 @@ export function AiDeepAnalysisCard({
                 {item.findings}
               </AnalysisBullet>
             ))}
-          </ul>
+          </div>
         </div>
       )}
 
@@ -225,44 +236,44 @@ export function AiDeepAnalysisCard({
 
       {/* LAYER 1: Cross-Parameter Correlations */}
       {crossCorrelations.length > 0 && (
-        <details className="group rounded-2xl border border-slate-200 bg-white">
-          <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-xs font-extrabold leading-snug text-slate-900 [&::-webkit-details-marker]:hidden">
-            <GitCommit className="w-4 h-4 text-purple-600" />
-            <span className="min-w-0 flex-1">Lớp 1 · Tương quan chỉ số ({crossCorrelations.length})</span>
-            <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:hidden">Xem</span>
-            <span className="ml-auto hidden text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:inline">Thu gọn</span>
+        <details className="group rounded-xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-3 sm:px-4 sm:py-3 text-xs font-extrabold text-slate-900 hover:bg-slate-50 transition-colors [&::-webkit-details-marker]:hidden">
+            <GitCommit className="w-4 h-4 text-purple-600 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Lớp 1 · Tương quan chỉ số ({crossCorrelations.length})</span>
+            <span className="ml-auto text-[10px] font-semibold text-slate-500 group-open:hidden shrink-0">Xem</span>
+            <span className="ml-auto hidden text-[10px] font-semibold text-slate-500 group-open:inline shrink-0">Thu gọn</span>
           </summary>
-          <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
+          <div className="grid gap-2.5 border-t border-slate-100 p-2.5 sm:p-4 sm:grid-cols-2 bg-slate-50/30">
             {crossCorrelations.map((item, idx) => (
               <div
                 key={idx}
-                className={`min-w-0 p-4 rounded-2xl border text-xs space-y-2 ${
+                className={`min-w-0 p-3 sm:p-3.5 rounded-xl border text-xs space-y-2 bg-white shadow-2xs ${
                   item.severity === 'critical'
-                    ? 'bg-rose-50/80 border-rose-200 text-rose-950'
+                    ? 'border-rose-200 text-rose-950'
                     : item.severity === 'warning'
-                    ? 'bg-amber-50/80 border-amber-200 text-amber-950'
-                    : 'bg-slate-50 border-slate-200 text-slate-900'
+                    ? 'border-amber-200 text-amber-950'
+                    : 'border-slate-200 text-slate-900'
                 }`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-1 flex-wrap">
                   <div className="flex flex-wrap gap-1">
                     {item.parameters.map((p, i) => (
-                      <span key={i} className="px-2 py-0.5 rounded-md bg-white border border-slate-200 font-bold text-[11px]">
+                      <span key={i} className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200/80 font-bold text-[10.5px]">
                         {p}
                       </span>
                     ))}
                   </div>
                   {item.severity === 'critical' ? (
-                    <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white font-bold text-[10px]">🔴 Quan trọng</span>
+                    <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white font-bold text-[9.5px]">🔴 Quan trọng</span>
                   ) : item.severity === 'warning' ? (
-                    <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold text-[10px]">🟡 Theo dõi</span>
+                    <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold text-[9.5px]">🟡 Theo dõi</span>
                   ) : (
-                    <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">🔵 Thông tin</span>
+                    <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[9.5px]">🔵 Thông tin</span>
                   )}
                 </div>
-                <ul className="list-disc space-y-1 pl-5 text-xs">
+                <div className="text-xs">
                   <AnalysisBullet label="Nhận định">{item.findings}</AnalysisBullet>
-                </ul>
+                </div>
               </div>
             ))}
           </div>
@@ -271,20 +282,20 @@ export function AiDeepAnalysisCard({
 
       {/* LAYER 2: Velocity & Trend Tracking */}
       {velocityTrends.length > 0 && (
-        <details className="group rounded-2xl border border-slate-200 bg-white">
-          <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-xs font-extrabold leading-snug text-slate-900 [&::-webkit-details-marker]:hidden">
-            <TrendingUp className="w-4 h-4 text-blue-600" />
-            <span className="min-w-0 flex-1">Lớp 2 · Xu hướng theo thời gian ({velocityTrends.length})</span>
-            <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:hidden">Xem</span>
-            <span className="ml-auto hidden text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:inline">Thu gọn</span>
+        <details className="group rounded-xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-3 sm:px-4 sm:py-3 text-xs font-extrabold text-slate-900 hover:bg-slate-50 transition-colors [&::-webkit-details-marker]:hidden">
+            <TrendingUp className="w-4 h-4 text-blue-600 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Lớp 2 · Xu hướng theo thời gian ({velocityTrends.length})</span>
+            <span className="ml-auto text-[10px] font-semibold text-slate-500 group-open:hidden shrink-0">Xem</span>
+            <span className="ml-auto hidden text-[10px] font-semibold text-slate-500 group-open:inline shrink-0">Thu gọn</span>
           </summary>
-          <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
+          <div className="grid gap-2.5 border-t border-slate-100 p-2.5 sm:p-4 sm:grid-cols-2 bg-slate-50/30">
             {velocityTrends.map((item, idx) => (
-              <div key={idx} className="min-w-0 p-4 rounded-2xl border border-slate-200 bg-slate-50/80 text-xs space-y-2">
-                <div className="flex items-center justify-between font-bold text-slate-900">
-                  <span className="text-sm font-extrabold text-slate-900">{item.metricName}</span>
+              <div key={idx} className="min-w-0 p-3 sm:p-3.5 rounded-xl border border-slate-200 bg-white text-xs space-y-1.5 shadow-2xs">
+                <div className="flex items-center justify-between font-bold text-slate-900 flex-wrap gap-1">
+                  <span className="text-xs font-extrabold text-slate-900">{item.metricName}</span>
                   <span
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                       item.trendDirection === 'increasing'
                         ? 'bg-amber-100 text-amber-800'
                         : item.trendDirection === 'decreasing'
@@ -293,19 +304,19 @@ export function AiDeepAnalysisCard({
                     }`}
                   >
                     {item.trendDirection === 'increasing'
-                      ? '📈 Có xu hướng tăng'
+                      ? '📈 Tăng'
                       : item.trendDirection === 'decreasing'
-                      ? '📉 Có xu hướng giảm'
-                      : '➖ Giữ ổn định'}
+                      ? '📉 Giảm'
+                      : '➖ Ổn định'}
                   </span>
                 </div>
-                <ul className="list-disc space-y-1 pl-5 text-slate-700">
+                <div className="text-xs text-slate-800">
                   <AnalysisBullet label="Diễn biến">{item.velocityDescription}</AnalysisBullet>
-                </ul>
+                </div>
                 {item.riskProjection && (
-                  <ul className="list-disc border-t border-slate-200/60 pt-2 pl-5 text-[11px] text-slate-500">
+                  <div className="border-t border-slate-100 pt-1.5 text-xs text-slate-600">
                     <AnalysisBullet label="Dự báo">{item.riskProjection}</AnalysisBullet>
-                  </ul>
+                  </div>
                 )}
               </div>
             ))}
@@ -315,26 +326,26 @@ export function AiDeepAnalysisCard({
 
       {/* LAYER 3: Chronic Disease Surveillance */}
       {(chronicSurveillance.length > 0 || (medicalHistory && (medicalHistory.chronicConditions.length > 0 || medicalHistory.surgeries.length > 0))) && (
-        <details className="group rounded-2xl border border-slate-200 bg-white">
-          <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-xs font-extrabold leading-snug text-slate-900 [&::-webkit-details-marker]:hidden">
-            <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <span className="min-w-0 flex-1">Lớp 3 · Theo dõi bệnh mạn tính ({chronicSurveillance.length})</span>
-            <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:hidden">Xem</span>
-            <span className="ml-auto hidden text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:inline">Thu gọn</span>
+        <details className="group rounded-xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-3 sm:px-4 sm:py-3 text-xs font-extrabold text-slate-900 hover:bg-slate-50 transition-colors [&::-webkit-details-marker]:hidden">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Lớp 3 · Theo dõi bệnh mạn tính ({chronicSurveillance.length})</span>
+            <span className="ml-auto text-[10px] font-semibold text-slate-500 group-open:hidden shrink-0">Xem</span>
+            <span className="ml-auto hidden text-[10px] font-semibold text-slate-500 group-open:inline shrink-0">Thu gọn</span>
           </summary>
-          <div className="space-y-4 border-t border-slate-100 p-4">
+          <div className="space-y-3 border-t border-slate-100 p-2.5 sm:p-4 bg-slate-50/30">
 
           {/* Display surgeries / fixed baseline conditions if available */}
           {medicalHistory && (medicalHistory.surgeries.length > 0 || medicalHistory.chronicConditions.length > 0) && (
-            <div className="flex flex-wrap gap-2 text-xs">
+            <div className="flex flex-wrap gap-1.5 text-xs">
               {medicalHistory.surgeries.map((s, i) => (
-                <span key={i} className="px-3 py-1 rounded-xl bg-purple-50 border border-purple-200 text-purple-900 font-medium">
-                  ✂️ Tiền sử phẫu thuật: <strong>{s.procedure}</strong> ({s.year || 'Đã ghi nhận'})
+                <span key={i} className="px-2.5 py-1 rounded-lg bg-purple-50 border border-purple-200 text-purple-900 font-medium">
+                  ✂️ Phẫu thuật: <strong>{s.procedure}</strong> ({s.year || 'Đã ghi nhận'})
                 </span>
               ))}
               {medicalHistory.chronicConditions.map((c, i) => (
-                <span key={i} className="px-3 py-1 rounded-xl bg-teal-50 border border-teal-200 text-teal-900 font-medium">
-                  🩺 Bệnh mạn/nang: <strong>{c.condition}</strong>
+                <span key={i} className="px-2.5 py-1 rounded-lg bg-teal-50 border border-teal-200 text-teal-900 font-medium">
+                  🩺 Mạn/nang: <strong>{c.condition}</strong>
                 </span>
               ))}
             </div>
@@ -342,17 +353,17 @@ export function AiDeepAnalysisCard({
 
           <div className="grid gap-2.5 sm:grid-cols-2">
             {chronicSurveillance.map((item, idx) => (
-              <div key={idx} className="min-w-0 p-4 rounded-2xl border border-teal-200/80 bg-teal-50/40 text-xs space-y-2">
-                <div className="flex items-center justify-between">
+              <div key={idx} className="min-w-0 p-3 sm:p-3.5 rounded-xl border border-teal-200/80 bg-white text-xs space-y-1.5 shadow-2xs">
+                <div className="flex items-center justify-between gap-1 flex-wrap">
                   <span className="font-extrabold text-slate-900">{item.conditionName}</span>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
-                    🟢 {item.status === 'stable_benign' ? 'Ổn định / Lành tính' : 'Theo dõi định kỳ'}
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[9.5px]">
+                    🟢 {item.status === 'stable_benign' ? 'Ổn định' : 'Theo dõi định kỳ'}
                   </span>
                 </div>
-                <ul className="list-disc space-y-1 pl-5 text-slate-700">
+                <div className="space-y-1 text-slate-800">
                   <AnalysisBullet label="Theo dõi">{item.comparisonOverTime}</AnalysisBullet>
                   <AnalysisBullet label="Khuyến nghị">{item.recommendation}</AnalysisBullet>
-                </ul>
+                </div>
               </div>
             ))}
           </div>
@@ -362,32 +373,31 @@ export function AiDeepAnalysisCard({
 
       {/* LAYER 4: Actionable Health Roadmap */}
       {roadmap && (
-        <details className="group rounded-2xl border border-slate-200 bg-white">
-          <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-xs font-extrabold leading-snug text-slate-900 [&::-webkit-details-marker]:hidden">
-            <Compass className="w-4 h-4 text-rose-600" />
-            <span className="min-w-0 flex-1">Lớp 4 · Kế hoạch hành động</span>
-            <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:hidden">Xem</span>
-            <span className="ml-auto hidden text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:inline">Thu gọn</span>
+        <details className="group rounded-xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-3 sm:px-4 sm:py-3 text-xs font-extrabold text-slate-900 hover:bg-slate-50 transition-colors [&::-webkit-details-marker]:hidden">
+            <Compass className="w-4 h-4 text-rose-600 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Lớp 4 · Kế hoạch hành động</span>
+            <span className="ml-auto text-[10px] font-semibold text-slate-500 group-open:hidden shrink-0">Xem</span>
+            <span className="ml-auto hidden text-[10px] font-semibold text-slate-500 group-open:inline shrink-0">Thu gọn</span>
           </summary>
-          <div className="space-y-4 border-t border-slate-100 p-4">
+          <div className="space-y-3 border-t border-slate-100 p-2.5 sm:p-4 bg-slate-50/30">
 
-          {/* Tầng 1: Cảnh báo đỏ */}
-          {/* Tầng 2: Chỉ định Khám chuyên khoa */}
+          {/* Specialist Referrals */}
           {roadmap.specialistReferrals && roadmap.specialistReferrals.length > 0 && (
-            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs space-y-2">
+            <div className="p-3 rounded-xl bg-white border border-slate-200 text-xs space-y-2 shadow-2xs">
               <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                <Stethoscope className="w-4 h-4 text-indigo-600" />
+                <Stethoscope className="w-4 h-4 text-indigo-600 shrink-0" />
                 <span>Khuyến nghị Khám Chuyên khoa:</span>
               </span>
               <div className="grid gap-2 sm:grid-cols-2">
                 {roadmap.specialistReferrals.map((item, idx) => (
-                  <div key={idx} className="p-2.5 rounded-xl bg-white border border-slate-200 flex items-start gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-500 mt-1.5 shrink-0" />
-                    <div className="min-w-0">
+                  <div key={idx} className="p-2.5 rounded-lg bg-slate-50 border border-slate-200/80 flex items-start gap-2">
+                    <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 mt-1.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
                       <span className="font-bold text-indigo-950 block">{item.specialty}</span>
-                      <ul className="list-disc pl-4 text-[11px] text-slate-600">
+                      <div className="text-[11px] text-slate-600">
                         <AnalysisBullet label="Lý do">{item.reason}</AnalysisBullet>
-                      </ul>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -395,48 +405,48 @@ export function AiDeepAnalysisCard({
             </div>
           )}
 
-          {/* Tầng 3: Lộ trình Mốc Thời gian 3-6-12 tháng */}
+          {/* Time Bound Plan */}
           {roadmap.timeBoundPlan && (
-            <div className="grid gap-2.5 sm:grid-cols-3 text-sm">
+            <div className="grid gap-2.5 sm:grid-cols-3 text-xs">
               {roadmap.timeBoundPlan.next3Months && roadmap.timeBoundPlan.next3Months.length > 0 && (
-                <div className="p-3 rounded-2xl bg-emerald-50/80 border border-emerald-200 space-y-1">
+                <div className="p-3 rounded-xl bg-emerald-50/90 border border-emerald-200 space-y-1 shadow-2xs">
                   <span className="font-bold text-emerald-900 flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                    <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                     <span>Lộ trình 3 tháng tới:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1.5 text-emerald-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
+                  <div className="space-y-1 text-emerald-950 leading-relaxed">
                     {roadmap.timeBoundPlan.next3Months.map((act, i) => (
                       <AnalysisBullet key={i} label="Kế hoạch">{act}</AnalysisBullet>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
 
               {roadmap.timeBoundPlan.next6Months && roadmap.timeBoundPlan.next6Months.length > 0 && (
-                <div className="p-3 rounded-2xl bg-blue-50/80 border border-blue-200 space-y-1">
+                <div className="p-3 rounded-xl bg-blue-50/90 border border-blue-200 space-y-1 shadow-2xs">
                   <span className="font-bold text-blue-900 flex items-center gap-1">
-                    <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                    <Calendar className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                     <span>Lộ trình 6 tháng tới:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1.5 text-blue-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
+                  <div className="space-y-1 text-blue-950 leading-relaxed">
                     {roadmap.timeBoundPlan.next6Months.map((act, i) => (
                       <AnalysisBullet key={i} label="Kế hoạch">{act}</AnalysisBullet>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
 
               {roadmap.timeBoundPlan.next12Months && roadmap.timeBoundPlan.next12Months.length > 0 && (
-                <div className="p-3 rounded-2xl bg-purple-50/80 border border-purple-200 space-y-1">
+                <div className="p-3 rounded-xl bg-purple-50/90 border border-purple-200 space-y-1 shadow-2xs">
                   <span className="font-bold text-purple-900 flex items-center gap-1">
-                    <HeartPulse className="w-3.5 h-3.5 text-purple-600" />
+                    <HeartPulse className="w-3.5 h-3.5 text-purple-600 shrink-0" />
                     <span>Tái khám 12 tháng:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1.5 text-purple-950 text-xs sm:text-sm pl-0.5 leading-relaxed">
+                  <div className="space-y-1 text-purple-950 leading-relaxed">
                     {roadmap.timeBoundPlan.next12Months.map((act, i) => (
                       <AnalysisBullet key={i} label="Kế hoạch">{act}</AnalysisBullet>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
             </div>
@@ -447,40 +457,40 @@ export function AiDeepAnalysisCard({
 
       {/* SCHEMA V2 AI ANALYSIS BLOCK (Action Roadmap & Critical Alerts) */}
       {aiAnalysis && (
-        <details className="group rounded-2xl border border-slate-200 bg-white">
-          <summary className="flex cursor-pointer list-none items-center gap-2 p-4 text-xs font-extrabold leading-snug text-slate-900 [&::-webkit-details-marker]:hidden">
-            <Compass className="w-4 h-4 text-emerald-600" />
-            <span className="min-w-0 flex-1">Khuyến nghị & giám sát bổ sung</span>
-            <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:hidden">Xem</span>
-            <span className="ml-auto hidden text-[10px] font-semibold normal-case tracking-normal text-slate-500 group-open:inline">Thu gọn</span>
+        <details className="group rounded-xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-3 sm:px-4 sm:py-3 text-xs font-extrabold text-slate-900 hover:bg-slate-50 transition-colors [&::-webkit-details-marker]:hidden">
+            <Compass className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Khuyến nghị & giám sát bổ sung</span>
+            <span className="ml-auto text-[10px] font-semibold text-slate-500 group-open:hidden shrink-0">Xem</span>
+            <span className="ml-auto hidden text-[10px] font-semibold text-slate-500 group-open:inline shrink-0">Thu gọn</span>
           </summary>
-          <div className="space-y-4 border-t border-slate-100 p-4">
+          <div className="space-y-3 border-t border-slate-100 p-2.5 sm:p-4 bg-slate-50/30">
 
           {aiAnalysis.chronicConditionsTracking && aiAnalysis.chronicConditionsTracking.length > 0 && (
-            <div className="p-3.5 rounded-2xl bg-teal-50/80 border border-teal-200 text-xs space-y-1">
+            <div className="p-3 rounded-xl bg-teal-50/90 border border-teal-200 text-xs space-y-1 shadow-2xs">
               <span className="font-bold text-teal-950 flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-teal-600" />
-                <span>Giám sát Bệnh lý Mạn tính (chronicConditionsTracking):</span>
+                <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
+                <span>Giám sát Bệnh lý Mạn tính:</span>
               </span>
-              <ul className="list-disc list-inside space-y-1 font-medium text-teal-900 pl-1">
+              <div className="space-y-1 font-medium text-teal-900">
                 {aiAnalysis.chronicConditionsTracking.map((item, idx) => (
                   <AnalysisBullet key={idx} label="Theo dõi">{item}</AnalysisBullet>
                 ))}
-              </ul>
+              </div>
             </div>
           )}
 
           {aiAnalysis.actionRoadmap && (
             <div className="grid gap-2.5 sm:grid-cols-2 text-xs">
               {aiAnalysis.actionRoadmap.specialistConsultation && aiAnalysis.actionRoadmap.specialistConsultation.length > 0 && (
-                <div className="p-3 rounded-2xl bg-indigo-50/80 border border-indigo-200 space-y-1">
+                <div className="p-3 rounded-xl bg-indigo-50/90 border border-indigo-200 space-y-1 shadow-2xs">
                   <span className="font-bold text-indigo-900 flex items-center gap-1.5">
-                    <Stethoscope className="w-4 h-4 text-indigo-600" />
+                    <Stethoscope className="w-4 h-4 text-indigo-600 shrink-0" />
                     <span>Chỉ định Chuyên khoa Khám:</span>
                   </span>
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     {aiAnalysis.actionRoadmap.specialistConsultation.map((spec, idx) => (
-                      <span key={idx} className="px-2.5 py-1 rounded-lg bg-white border border-indigo-200 text-indigo-950 font-bold text-[11px]">
+                      <span key={idx} className="px-2 py-0.5 rounded-md bg-white border border-indigo-200 text-indigo-950 font-bold text-[10.5px]">
                         🩺 {spec}
                       </span>
                     ))}
@@ -489,32 +499,32 @@ export function AiDeepAnalysisCard({
               )}
 
               {aiAnalysis.actionRoadmap.dietaryModifications && aiAnalysis.actionRoadmap.dietaryModifications.length > 0 && (
-                <div className="p-3 rounded-2xl bg-amber-50/80 border border-amber-200 space-y-1">
+                <div className="p-3 rounded-xl bg-amber-50/90 border border-amber-200 space-y-1 shadow-2xs">
                   <span className="font-bold text-amber-900 flex items-center gap-1.5">
-                    <Activity className="w-4 h-4 text-amber-600" />
+                    <Activity className="w-4 h-4 text-amber-600 shrink-0" />
                     <span>Hướng dẫn Dinh dưỡng & Lối sống:</span>
                   </span>
-                  <ul className="list-disc list-inside space-y-1.5 text-amber-950 text-xs sm:text-sm pl-0.5 font-medium leading-relaxed">
+                  <div className="space-y-1 text-amber-950 leading-relaxed font-medium">
                     {aiAnalysis.actionRoadmap.dietaryModifications.map((diet, idx) => (
                       <AnalysisBullet key={idx} label="Khuyến nghị">{diet}</AnalysisBullet>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
 
               {aiAnalysis.actionRoadmap.followUpSchedule && (
-                <div className="sm:col-span-2 p-3 rounded-2xl bg-emerald-50/80 border border-emerald-200 flex items-start gap-2">
-                  <Clock className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <ul className="list-disc pl-4 text-emerald-950 text-xs">
+                <div className="sm:col-span-2 p-3 rounded-xl bg-emerald-50/90 border border-emerald-200 flex items-start gap-2 shadow-2xs">
+                  <Clock className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="text-emerald-950 text-xs">
                     <AnalysisBullet label="Lịch tái khám">{aiAnalysis.actionRoadmap.followUpSchedule}</AnalysisBullet>
-                  </ul>
+                  </div>
                 </div>
               )}
               </div>
             )}
           </div>
-            </details>
-          )}
+        </details>
+      )}
     </div>
   );
 }

@@ -819,14 +819,14 @@ export function HealthDashboard({
         'queue_finish',
         failedCount > 0
           ? `Hoàn tất hàng đợi: ${completedCount}/${finalTotal} tệp xử lý xong, ${failedCount} tệp lỗi cần chạy lại.`
-          : `Đã số hóa thành công toàn bộ ${finalTotal} tệp trong hàng đợi! Bắt đầu kích hoạt chuỗi phân tích chuyên sâu tự động...`,
+          : `Đã số hóa thành công toàn bộ ${finalTotal} tệp trong hàng đợi! Bạn có thể bấm "AI Y khoa Chuyên sâu" khi sẵn sàng tổng hợp.`,
         { totalFiles: finalTotal, completedFiles: completedCount, failedFiles: failedCount }
       );
       if (currentStatus) {
         showToast(
           failedCount > 0
             ? `Đã xử lý ${completedCount}/${finalTotal} tệp. ${failedCount} tệp lỗi vẫn được giữ lại để chạy lại OCR.`
-            : `Đã nhập dữ liệu xong toàn bộ ${finalTotal} tệp! Bắt đầu tự động chuẩn hóa & phân tích 4 lớp...`,
+            : `Đã nhập dữ liệu xong ${finalTotal} tệp vào hồ sơ! Bấm nút "AI Y khoa Chuyên sâu" để cập nhật tổng kết.`,
           failedCount > 0 ? 'info' : 'success',
         );
         void updateBatchNotificationComplete({
@@ -839,9 +839,6 @@ export function HealthDashboard({
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
       batchStagingMemberIdRef.current = undefined;
-      if (completedCount > 0) {
-        void runFamilyDoctorSummaryAfterQueue();
-      }
     }
   }
   async function stageFilesAndStart(

@@ -19,6 +19,7 @@ import { getValidGoogleAccessToken } from './googleDriveService';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
+import { GoogleGenAI } from '@google/genai';
 import {
   isApprovedMedicalCitationUrl,
   type HealthAssistantCitation,
@@ -77,6 +78,121 @@ export function cleanErrorMessage(rawMessage?: string): string {
   }
 
   return msg;
+}
+
+async function callGeminiClientSide<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+  const keys = await getSharedGeminiKeysForRequest();
+  if (keys.length === 0) {
+    throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI" trước khi sử dụng.');
+  }
+
+  const apiKey = keys[0];
+  const ai = new GoogleGenAI({ apiKey });
+  const model = endpoint === 'analyze-comprehensive' ? 'gemini-3.6-flash' : 'gemini-3.5-flash-lite';
+
+  let promptText = '';
+  if (endpoint === 'refine-and-organize') {
+    promptText = `Bạn là chuyên gia y tế chuẩn hóa danh pháp. Hãy chuẩn hóa danh pháp và sắp xếp thời gian cho các sự kiện y tế của thành viên. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "organizedTimeline": [...], "refinementNotes": [...]}`;
+  } else if (endpoint === 'summarize') {
+    promptText = `Bạn là bác sĩ gia đình AI. Hãy viết bản tổng kết toàn diện hồ sơ sức khỏe. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "summary": "..."}`;
+  } else if (endpoint === 'ask-assistant') {
+    promptText = `Bạn là trợ lý y tế gia đình AI bằng tiếng Việt. Dữ liệu câu hỏi và hồ sơ: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "answer": "...", "citations": []}`;
+  } else if (endpoint === 'analyze-comprehensive') {
+    promptText = `Bạn là hội đồng bác sĩ AI chuyên sâu. Phân tích 4 lớp y khoa. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "result": {"healthScore": 85, "overallAssessment": "...", "crossCorrelations": [], "velocityTrends": [], "chronicSurveillance": [], "roadmap": {"criticalAlerts": [], "specialistReferrals": [], "timeBoundPlan": {"next3Months": [], "next6Months": [], "next12Months": []}}}, "aiAnalysis": {"overviewSummary": "...", "criticalAlerts": [], "chronicConditionsTracking": [], "actionRoadmap": {"specialistConsultation": [], "dietaryModifications": [], "followUpSchedule": "..."}}}`;
+  } else {
+    throw new Error(`Unknown endpoint: ${endpoint}`);
+  }
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: promptText,
+    config: { responseMimeType: 'application/json' },
+  });
+
+  const text = response.text || '{}';
+  const cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+  const parsed = JSON.parse(cleaned);
+  return parsed as T;
+}
+
+async function extractClientSideHealthEvent(
+  file: File,
+  member: FamilyMember,
+  mimeType: string,
+  base64Data: string,
+  onProgress?: (update: ExtractionProgressUpdate) => void,
+): Promise<{ extracted: Partial<HealthEvent>; modelUsed?: string; totalPages?: number; processedPages?: number }> {
+  const keys = await getSharedGeminiKeysForRequest();
+  if (keys.length === 0) {
+    throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI".');
+  }
+  const apiKey = keys[0];
+  const ai = new GoogleGenAI({ apiKey });
+  const modelUsed = 'gemini-3.5-flash-lite (client)';
+
+  onProgress?.({ stage: 'waiting_for_model', progressPercent: 60, message: 'Gemini đang đọc và phân tích tài liệu...', modelUsed });
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3.5-flash-lite',
+    contents: [
+      {
+        inlineData: {
+          data: base64Data,
+          mimeType,
+        },
+      },
+      {
+        text: `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam. Trích xuất thông tin y tế thành JSON bao gồm: title, date, type, facility, doctorName, physicalExam, diagnoses, medications, metrics, imagingResults, vaccinations, hospitalization, advice, nextFollowUp, notes, patientName, patientBirthDate, patientGender.`,
+      },
+    ],
+    config: { responseMimeType: 'application/json' },
+  });
+
+  const rawText = response.text || '{}';
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(rawText.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
+  } catch {
+    parsed = {};
+  }
+
+  const extracted = normalizeExtractedEvent(parsed, file.name);
+  onProgress?.({ stage: 'completed', progressPercent: 100, message: 'Hoàn tất số hóa tài liệu y tế!', modelUsed, partialEvent: extracted });
+  return { extracted, modelUsed, totalPages: 1, processedPages: 1 };
+}
+
+async function callGeminiStreamClientSide(
+  endpoint: string,
+  body: Record<string, unknown>,
+  onChunk: (chunk: string) => void,
+): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  const keys = await getSharedGeminiKeysForRequest();
+  if (keys.length === 0) {
+    throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI".');
+  }
+  const apiKey = keys[0];
+  const ai = new GoogleGenAI({ apiKey });
+  const question = typeof body.question === 'string' ? body.question : '';
+  const member = body.member;
+  const profile = body.profile;
+
+  const promptText = `Bạn là trợ lý y tế gia đình AI bằng tiếng Việt. Câu hỏi: "${question}". Thành viên: ${JSON.stringify(member)}. Hồ sơ: ${JSON.stringify(profile)}. Hãy trả lời chi tiết, chính xác và đồng cảm.`;
+
+  const streamResponse = await ai.models.generateContentStream({
+    model: 'gemini-3.5-flash-lite',
+    contents: promptText,
+  });
+
+  let fullText = '';
+  for await (const chunk of streamResponse) {
+    const text = chunk.text || '';
+    if (text) {
+      fullText += text;
+      onChunk(text);
+    }
+  }
+
+  return { answer: fullText, citations: [] };
 }
 
 async function callGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
@@ -150,20 +266,32 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
         await new Promise((res) => setTimeout(res, backoff));
         continue;
       }
+      if (isFetchError) {
+        try {
+          digitizationLogger.log('warn', 'api', `Backend unreachable for ${endpoint}. Falling back to client-side GoogleGenAI execution.`);
+          return await callGeminiClientSide<T>(endpoint, body);
+        } catch (clientErr) {
+          console.warn('[Gemini Client Fallback] Failed:', clientErr);
+        }
+      }
       break;
     }
   }
 
-  const durationMs = getDuration();
-  const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
-  digitizationLogger.log(
-    'error',
-    'api',
-    `Gemini server thất bại ở tác vụ ${endpoint}: ${errorMessage}`,
-    { endpoint },
-    durationMs,
-  );
-  throw lastError instanceof Error ? lastError : new Error(errorMessage);
+  try {
+    return await callGeminiClientSide<T>(endpoint, body);
+  } catch (clientErr) {
+    const durationMs = getDuration();
+    const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
+    digitizationLogger.log(
+      'error',
+      'api',
+      `Gemini server thất bại ở tác vụ ${endpoint}: ${errorMessage}`,
+      { endpoint },
+      durationMs,
+    );
+    throw lastError instanceof Error ? lastError : new Error(errorMessage);
+  }
 }
 
 // ============================================================================
@@ -315,19 +443,28 @@ async function extractServerHealthEvent(
 
   const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      base64Data,
-      mimeType,
-      member,
-      fileName: file.name,
-      stream: true,
-      clientGeminiKeys,
-      isAutoDetect: options?.isAutoDetect ?? false,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        base64Data,
+        mimeType,
+        member,
+        fileName: file.name,
+        stream: true,
+        clientGeminiKeys,
+        isAutoDetect: options?.isAutoDetect ?? false,
+      }),
+    });
+  } catch (fetchErr) {
+    if (fetchErr instanceof TypeError || (fetchErr instanceof Error && /failed to fetch|networkerror|load failed/i.test(fetchErr.message))) {
+      digitizationLogger.log('warn', 'api', 'Backend unreachable for OCR. Falling back to client-side GoogleGenAI extraction.');
+      return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress);
+    }
+    throw fetchErr;
+  }
 
   if (!response.ok) {
     await readApiJson<never>(response, 'Server Gemini (extract-health-event)');
@@ -629,11 +766,20 @@ async function callGeminiStream(
 
   const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
+    });
+  } catch (fetchErr) {
+    if (fetchErr instanceof TypeError || (fetchErr instanceof Error && /failed to fetch|networkerror|load failed/i.test(fetchErr.message))) {
+      digitizationLogger.log('warn', 'api', 'Backend unreachable for stream. Falling back to client-side GoogleGenAI stream.');
+      return await callGeminiStreamClientSide(endpoint, body, onChunk);
+    }
+    throw fetchErr;
+  }
 
   if (!response.ok) {
     await readApiJson<never>(response, `Server Gemini (${endpoint})`);
