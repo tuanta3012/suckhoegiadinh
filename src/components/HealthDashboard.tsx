@@ -9,6 +9,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronUp,
   Clock,
   Cloud,
   Copy,
@@ -134,13 +135,14 @@ import {
   getHealthMetricInfo,
   getHealthMetricRangeStatus,
   getHealthMetricStandardKey,
+  partitionHealthMetricsForDisplay,
 } from '../utils/healthMetricService';
 import {
   analyzeComprehensiveHealth,
-  askHealthAssistant,
   extractHealthEvent,
   extractHealthEventWithProgress,
   refineAndOrganizeMemberData,
+  streamHealthAssistant,
   summarizeHealthProfile,
   type ExtractionProgressUpdate,
 } from '../utils/geminiService';
@@ -192,8 +194,10 @@ import { formatDateVN, formatDateTimeVN, normalizeVietnameseProperName } from '.
 import { DatePickerVN } from './DatePickerVN';
 import {
   findMemberByOcrPatientName,
+  hasSameNameMemberConflict,
   isOcrSubjectMatchedToMember,
   isRecognizablePatientName,
+  sanitizeOcrPatientName,
 } from '../utils/ocrSubjectRouting';
 import {
   updateBatchNotificationProgress,
@@ -215,14 +219,20 @@ interface HealthDashboardProps {
   onLogout: () => void;
   showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
 }
+interface QueueItemContext {
+  runId: number;
+  itemToken: string;
+}
 interface DigitizationDraft {
   source: DriveFile;
   extracted: Partial<HealthEvent>;
   contentIndexPages: string[];
   contentIndexComplete: boolean;
   sourceContributions?: NonNullable<HealthSource['sourceContributions']>;
+  queueContext?: QueueItemContext;
 }
 interface ChatMessage {
+  id?: string;
   role: 'user' | 'assistant';
   text: string;
   timestamp?: string;
@@ -232,7 +242,7 @@ const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
 const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
 const LOCAL_PROFILES_KEY = 'health_offline_profiles_v2';
 const APK_LOCAL_OWNER_KEY = 'apk-local-device';
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 const UPDATE_SERVER_URL =
   'https://raw.githubusercontent.com/tuanta3012/suckhoegiadinh/refs/heads/main/version.json';
 const EXTRACTION_NOTIFICATION_PHASES: Record<ExtractionProgressUpdate['stage'], string> = {
@@ -478,6 +488,7 @@ export function HealthDashboard({
     error: string | null;
     totalPages?: number;
     processedPages?: number;
+    queueContext?: QueueItemContext;
   }>({
     isOpen: false,
     file: null,
@@ -491,6 +502,7 @@ export function HealthDashboard({
     error: null,
     totalPages: undefined,
     processedPages: undefined,
+    queueContext: undefined,
   });
   const [showUploadMemberPicker, setShowUploadMemberPicker] = useState(false);
   const [isCameraTriggerActive, setIsCameraTriggerActive] = useState(false);
@@ -504,6 +516,7 @@ export function HealthDashboard({
   const chatRequestIdRef = useRef(0);
   const [selectedMetric, setSelectedMetric] = useState('');
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
+  const [expandedMetricEventIds, setExpandedMetricEventIds] = useState<Record<string, boolean>>({});
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
@@ -539,11 +552,29 @@ export function HealthDashboard({
   const [queueStatus, setQueueStatus] = useState<{ current: number; total: number } | null>(null);
   const queueStatusRef = useRef<{ current: number; total: number } | null>(null);
   const batchFailureCountRef = useRef(0);
+  const activeQueueRunIdRef = useRef<number | null>(null);
+  const activeQueueItemTokenRef = useRef<string | null>(null);
+  const completedQueueTokensRef = useRef<Set<string>>(new Set());
+  const queueErrorAdvanceTimerRef = useRef<number | null>(null);
+  const activeUploadOpRef = useRef<string | null>(null);
+  const isUploadingRef = useRef(false);
   const [queueElapsedSeconds, setQueueElapsedSeconds] = useState(0);
   const queueStartedAtRef = useRef<number | null>(null);
   const updateQueueStatus = useCallback((next: { current: number; total: number } | null) => {
     queueStatusRef.current = next;
     setQueueStatus(next);
+  }, []);
+  const beginUploadOp = useCallback((opToken: string) => {
+    activeUploadOpRef.current = opToken;
+    isUploadingRef.current = true;
+    setIsUploading(true);
+  }, []);
+  const endUploadOp = useCallback((opToken: string) => {
+    if (activeUploadOpRef.current === opToken) {
+      activeUploadOpRef.current = null;
+      isUploadingRef.current = false;
+      setIsUploading(false);
+    }
   }, []);
   useEffect(() => {
     if (!queueStatus) {
@@ -591,6 +622,7 @@ export function HealthDashboard({
       setIsChatting(false);
       setSelectedMetric('');
       setTimelineFilter('all');
+      setExpandedMetricEventIds({});
     }
   }, [selectedMemberId]);
   useEffect(() => {
@@ -602,6 +634,7 @@ export function HealthDashboard({
       setIsChatting(false);
       setSelectedMetric('');
       setTimelineFilter('all');
+      setExpandedMetricEventIds({});
     }
   }, [workspace?.rootFolderId]);
   const normalizedUserEmail = userEmail?.trim().toLowerCase() || null;
@@ -668,8 +701,8 @@ export function HealthDashboard({
     selectedMemberIdRef.current = selectedMemberId;
   }, [selectedMemberId]);
   useEffect(() => {
-    uploadQueueRef.current = uploadQueue;
-  }, [uploadQueue]);
+    isUploadingRef.current = isUploading;
+  }, [isUploading]);
   function persistOcrRecoveryJob(
     driveFileId: string,
     status: OcrRecoveryJob['status'],
@@ -728,9 +761,9 @@ export function HealthDashboard({
         ...currentProfile,
         timeline: organizedTimeline,
       };
-      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-3.6-flash
+      // 2. Tự động Phân tích 4 Lớp Y Khoa Chuyên Sâu bằng gemini-4-hydrogen
       const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
-      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-3.6-flash');
+      const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-4-hydrogen');
       
       const updated: HealthProfile = {
         ...refinedProfile,
@@ -789,10 +822,27 @@ export function HealthDashboard({
       progressPercent,
     });
   }
-  function processNextInQueue() {
-    const queue = uploadQueueRef.current.length > 0 ? uploadQueueRef.current : uploadQueue;
+  function processNextInQueue(expectedContext?: QueueItemContext) {
+    if (!expectedContext) return;
+    if (
+      activeQueueRunIdRef.current !== expectedContext.runId ||
+      activeQueueItemTokenRef.current !== expectedContext.itemToken ||
+      completedQueueTokensRef.current.has(expectedContext.itemToken)
+    ) {
+      return;
+    }
+    completedQueueTokensRef.current.add(expectedContext.itemToken);
+    if (queueErrorAdvanceTimerRef.current !== null) {
+      window.clearTimeout(queueErrorAdvanceTimerRef.current);
+      queueErrorAdvanceTimerRef.current = null;
+    }
+    activeQueueItemTokenRef.current = null;
+
+    const queue = uploadQueueRef.current;
     const currentStatus = queueStatusRef.current;
-    if (queue.length > 0 && currentStatus) {
+    if (!currentStatus) return;
+
+    if (queue.length > 0) {
       const nextFile = queue[0];
       const pendingUploadId = pendingUploadIdsRef.current.shift();
       if (pendingUploadId) processingPendingUploadIdsRef.current.add(pendingUploadId);
@@ -802,6 +852,12 @@ export function HealthDashboard({
       const nextCurrent = currentStatus.current + 1;
       const nextStatus = { current: nextCurrent, total: currentStatus.total };
       updateQueueStatus(nextStatus);
+      const nextItemToken = `${expectedContext.runId}:${nextCurrent}`;
+      activeQueueItemTokenRef.current = nextItemToken;
+      const nextQueueContext: QueueItemContext = {
+        runId: expectedContext.runId,
+        itemToken: nextItemToken,
+      };
       digitizationLogger.log(
         'info',
         'queue_advance',
@@ -813,13 +869,21 @@ export function HealthDashboard({
       void beginDigitization(nextFile, {
         memberId: batchStagingMemberIdRef.current,
         pendingUploadId,
+        queueContext: nextQueueContext,
       });
     } else {
-      const finalTotal = currentStatus?.total || 1;
+      const finalTotal = currentStatus.total || 1;
       const failedCount = batchFailureCountRef.current;
       const completedCount = Math.max(0, finalTotal - failedCount);
       uploadQueueRef.current = [];
       pendingUploadIdsRef.current = [];
+      setUploadQueue([]);
+      activeQueueRunIdRef.current = null;
+      activeQueueItemTokenRef.current = null;
+      completedQueueTokensRef.current.clear();
+      activeUploadOpRef.current = null;
+      isUploadingRef.current = false;
+      setIsUploading(false);
       digitizationLogger.log(
         failedCount > 0 ? 'warn' : 'info',
         'queue_finish',
@@ -828,20 +892,18 @@ export function HealthDashboard({
           : `Đã số hóa thành công toàn bộ ${finalTotal} tệp trong hàng đợi! Bạn có thể bấm "AI Y khoa Chuyên sâu" khi sẵn sàng tổng hợp.`,
         { totalFiles: finalTotal, completedFiles: completedCount, failedFiles: failedCount }
       );
-      if (currentStatus) {
-        showToast(
-          failedCount > 0
-            ? `Đã xử lý ${completedCount}/${finalTotal} tệp. ${failedCount} tệp lỗi vẫn được giữ lại để chạy lại OCR.`
-            : `Đã nhập dữ liệu xong ${finalTotal} tệp vào hồ sơ! Bấm nút "AI Y khoa Chuyên sâu" để cập nhật tổng kết.`,
-          failedCount > 0 ? 'info' : 'success',
-        );
-        void updateBatchNotificationComplete({
-          total: finalTotal,
-          memberName: selectedMember?.name,
-          failedCount,
-        });
-        batchFailureCountRef.current = 0;
-      }
+      showToast(
+        failedCount > 0
+          ? `Đã xử lý ${completedCount}/${finalTotal} tệp. ${failedCount} tệp lỗi vẫn được giữ lại để chạy lại OCR.`
+          : `Đã nhập dữ liệu xong ${finalTotal} tệp vào hồ sơ! Bấm nút "AI Y khoa Chuyên sâu" để cập nhật tổng kết.`,
+        failedCount > 0 ? 'info' : 'success',
+      );
+      void updateBatchNotificationComplete({
+        total: finalTotal,
+        memberName: selectedMember?.name,
+        failedCount,
+      });
+      batchFailureCountRef.current = 0;
       updateQueueStatus(null);
       pickedMemberIdForBatchRef.current = undefined;
       batchStagingMemberIdRef.current = undefined;
@@ -852,8 +914,16 @@ export function HealthDashboard({
     memberId?: string,
   ): Promise<void> {
     if (files.length === 0) return;
+    if (
+      queueStatusRef.current ||
+      activeQueueRunIdRef.current !== null ||
+      isUploadingRef.current
+    ) {
+      showToast('Đang có hàng đợi xử lý tài liệu chạy. Hãy đợi hoàn tất hoặc bấm "Dừng xử lý".', 'info');
+      return;
+    }
     if (files.some((file) => file.size > MAX_UPLOAD_BYTES)) {
-      showToast('Mỗi tệp phải nhỏ hơn hoặc bằng 25 MB.', 'error');
+      showToast('Mỗi tệp phải nhỏ hơn hoặc bằng 30 MB.', 'error');
       return;
     }
     const initialWorkspace = workspaceRef.current;
@@ -997,6 +1067,16 @@ export function HealthDashboard({
     }
     const firstPendingId = queuedIds[0];
     if (firstPendingId) processingPendingUploadIdsRef.current.add(firstPendingId);
+    if (queueErrorAdvanceTimerRef.current !== null) {
+      window.clearTimeout(queueErrorAdvanceTimerRef.current);
+      queueErrorAdvanceTimerRef.current = null;
+    }
+    const runId = Date.now();
+    const firstItemToken = `${runId}:1`;
+    activeQueueRunIdRef.current = runId;
+    activeQueueItemTokenRef.current = firstItemToken;
+    completedQueueTokensRef.current.clear();
+    const firstQueueContext: QueueItemContext = { runId, itemToken: firstItemToken };
     uploadQueueRef.current = files.slice(1);
     pendingUploadIdsRef.current = queuedIds.slice(1);
     setUploadQueue(files.slice(1));
@@ -1022,6 +1102,7 @@ export function HealthDashboard({
     void beginDigitization(files[0], {
       memberId: memberId || targetMember.id,
       pendingUploadId: firstPendingId,
+      queueContext: firstQueueContext,
     });
   }
   async function getPendingUpload(operationId: string): Promise<PendingUpload | undefined> {
@@ -1133,6 +1214,9 @@ export function HealthDashboard({
         syncOnResumeInFlightRef.current ||
         isLoading ||
         isUploading ||
+        isUploadingRef.current ||
+        queueStatusRef.current !== null ||
+        activeQueueRunIdRef.current !== null ||
         (typeof navigator !== 'undefined' && !navigator.onLine)
       ) return;
       syncOnResumeInFlightRef.current = true;
@@ -2672,14 +2756,26 @@ export function HealthDashboard({
       memberId?: string;
       pendingUploadId?: string;
       uploadedFile?: PendingUpload['uploadedFile'];
+      queueContext?: QueueItemContext;
     },
   ) {
     const pendingUploadId = options?.pendingUploadId;
+    const queueContext = options?.queueContext;
+    const opToken = queueContext?.itemToken || `single_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (!workspaceRef.current) {
       if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
       showToast('Hãy kết nối Google Drive trước khi tải tài liệu.', 'error');
       return;
     }
+    if (
+      queueContext &&
+      (activeQueueRunIdRef.current !== queueContext.runId ||
+        activeQueueItemTokenRef.current !== queueContext.itemToken)
+    ) {
+      if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
+      return;
+    }
+    beginUploadOp(opToken);
     const currentWorkspace = workspaceRef.current;
     const isLocalOnlyWorkspace =
       currentWorkspace.rootFolderId === 'local_offline_workspace' &&
@@ -2692,18 +2788,28 @@ export function HealthDashboard({
         if (pendingUploadId) {
           processingPendingUploadIdsRef.current.delete(pendingUploadId);
           showToast('Tài liệu đã được lưu trên thiết bị và sẽ được thử tải lên khi Drive có thể truy cập.', 'info');
-          setQueueStatus(null);
+          activeQueueRunIdRef.current = null;
+          activeQueueItemTokenRef.current = null;
+          completedQueueTokensRef.current.clear();
+          updateQueueStatus(null);
           batchStagingMemberIdRef.current = undefined;
           setUploadQueue([]);
           uploadQueueRef.current = [];
           pendingUploadIdsRef.current = [];
+          endUploadOp(opToken);
           return;
         }
         digitizationLogger.log('error', 'drive', 'Lỗi xác thực Google Drive trước khi upload');
         showToast('Phiên Google Drive đã hết hạn hoặc chưa được cấp quyền. Vui lòng kết nối lại Drive.', 'error');
-        setIsUploading(false);
-        setQueueStatus(null);
+        activeQueueRunIdRef.current = null;
+        activeQueueItemTokenRef.current = null;
+        completedQueueTokensRef.current.clear();
+        updateQueueStatus(null);
         batchStagingMemberIdRef.current = undefined;
+        setUploadQueue([]);
+        uploadQueueRef.current = [];
+        pendingUploadIdsRef.current = [];
+        endUploadOp(opToken);
         return;
       }
     }
@@ -2740,8 +2846,8 @@ export function HealthDashboard({
         setSelectedMemberId(memberId);
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Lỗi khi tạo hồ sơ đầu tiên.', 'error');
-        setIsUploading(false);
-        processNextInQueue();
+        endUploadOp(opToken);
+        processNextInQueue(queueContext);
         return;
       }
     }
@@ -2773,19 +2879,20 @@ export function HealthDashboard({
           );
           // Vẫn cho chạy tiếp nếu đây là tệp đầu tiên của thành viên mới
           if (members.length > 1) {
-            processNextInQueue();
+            endUploadOp(opToken);
+            processNextInQueue(queueContext);
             return;
           }
         }
       }
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      showToast('Tệp vượt quá giới hạn cho phép 25 MB.', 'error');
-      processNextInQueue();
+      showToast('Tệp vượt quá giới hạn cho phép 30 MB.', 'error');
+      endUploadOp(opToken);
+      processNextInQueue(queueContext);
       return;
     }
     let existingDriveFileId: string | undefined = options?.uploadedFile?.id;
-    setIsUploading(true);
     setDigitizationError('');
     setShowQuickActionModal(false);
     // Bắt đầu cập nhật tiến trình cho tệp hiện tại
@@ -2804,6 +2911,7 @@ export function HealthDashboard({
       error: null,
       totalPages: 1,
       processedPages: 0,
+      queueContext,
     });
     notifyBatchProgress(file.name, effectiveMember.name, 'Chuẩn bị', 10);
     // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload
@@ -2892,8 +3000,8 @@ export function HealthDashboard({
             showToast(`Tệp "${file.name}" trùng nội dung đã OCR và lưu JSON ${memberMsg}; bỏ qua bản lặp.`, 'info');
             await completePendingUpload(pendingUploadId);
             processingPendingUploadIdsRef.current.delete(pendingUploadId || '');
-            setIsUploading(false);
-            processNextInQueue();
+            endUploadOp(opToken);
+            processNextInQueue(queueContext);
             return;
           }
           showToast(`Tệp "${file.name}" trùng chính xác nguồn đã có; sẽ tiếp tục OCR từ bản hiện có.`, 'info');
@@ -2904,15 +3012,21 @@ export function HealthDashboard({
       }
     }
     let preExtractedResult: Awaited<ReturnType<typeof extractHealthEventWithProgress>> | undefined;
+    const isAutoDetectMode = pickedMemberIdForBatchRef.current === undefined;
     const activeProfileForContainment = profilesRef.current[effectiveMember.id] || profiles[effectiveMember.id];
+    const containmentCandidateProfiles = isAutoDetectMode
+      ? Object.values(profilesRef.current)
+      : [activeProfileForContainment].filter(Boolean);
     const canPreflightContainment = !options?.forceUpload &&
       !existingDriveFileId &&
-      Boolean(activeProfileForContainment?.sources.some((source) =>
-        source.status === 'processed' &&
-        !source.rawDeletedAt &&
-        source.contentIndexComplete &&
-        source.contentIndexPages?.length,
-      ));
+      containmentCandidateProfiles.some((profile) =>
+        Boolean(profile?.sources.some((source) =>
+          source.status === 'processed' &&
+          !source.rawDeletedAt &&
+          source.contentIndexComplete &&
+          source.contentIndexPages?.length,
+        )),
+      );
     if (canPreflightContainment) {
       try {
         notifyBatchProgress(file.name, effectiveMember.name, 'Đang đối chiếu OCR trước khi lưu raw', 30);
@@ -2928,18 +3042,29 @@ export function HealthDashboard({
               update.progressPercent,
             );
           },
-          { isAutoDetect: pickedMemberIdForBatchRef.current === undefined },
+          { isAutoDetect: isAutoDetectMode },
         );
         const { hash } = await computeFileFingerprint(processedFile);
+        const containmentMember = (
+          isAutoDetectMode && isRecognizablePatientName(preExtractedResult.extracted.patientName)
+            ? findMemberByOcrPatientName(
+                preExtractedResult.extracted.patientName,
+                workspaceRef.current?.family.members || members,
+                preExtractedResult.extracted.patientBirthDate,
+                preExtractedResult.extracted.patientGender,
+              ).matched
+            : undefined
+        ) || effectiveMember;
         const integrated = await tryIntegrateContainedDocument(
-          effectiveMember,
+          containmentMember,
           processedFile,
           hash,
           preExtractedResult,
+          queueContext,
         );
         if (integrated) {
           await completePendingUpload(pendingUploadId);
-          setIsUploading(false);
+          endUploadOp(opToken);
           return;
         }
       } catch (error) {
@@ -2995,7 +3120,7 @@ export function HealthDashboard({
           progressPercent: 35,
           progressMessage: 'Tài liệu đã lưu an toàn trên thiết bị. Đang số hóa bằng Gemini...',
         }));
-        await runDocumentExtraction(processedFile, effectiveMember, localFile.id, preExtractedResult);
+        await runDocumentExtraction(processedFile, effectiveMember, localFile.id, preExtractedResult, queueContext);
       } else if (existingDriveFileId) {
         // Tệp đã có trên Google Drive: Tái sử dụng tệp gốc, KHÔNG tạo bản sao trùng lặp trên Drive
         digitizationLogger.log(
@@ -3035,7 +3160,7 @@ export function HealthDashboard({
         } else if (pendingUploadId) {
           await completePendingUpload(pendingUploadId);
         }
-        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId, preExtractedResult);
+        await runDocumentExtraction(processedFile, effectiveMember, existingDriveFileId, preExtractedResult, queueContext);
         const reusedUploaded: DriveFile = {
           ...(options?.uploadedFile || {}),
           id: existingDriveFileId,
@@ -3088,31 +3213,35 @@ export function HealthDashboard({
         profilesRef.current = { ...profilesRef.current, [effectiveMember.id]: savedProfile };
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: savedProfile }));
         await completePendingUpload(pendingUploadId);
-        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id, preExtractedResult);
+        await runDocumentExtraction(processedFile, effectiveMember, uploaded.id, preExtractedResult, queueContext);
       }
     } catch (error) {
       batchFailureCountRef.current += 1;
       const msg = error instanceof Error
         ? error.message
         : 'Không thể hoàn tất lưu tài liệu vào Google Drive hoặc hồ sơ thành viên.';
-      
-      // Nếu lỗi do mạng, vẫn thử cho qua để xử lý tệp tiếp theo sau vài giây
+
       setTrackerState((prev) => ({
         ...prev,
         step: 'error',
         progressMessage: 'Lỗi trong quá trình xử lý',
         error: msg,
       }));
-      
-      if (queueStatusRef.current || uploadQueueRef.current.length > 0 || uploadQueue.length > 0) {
-        setTimeout(() => {
+
+      if (
+        queueContext &&
+        activeQueueRunIdRef.current === queueContext.runId &&
+        activeQueueItemTokenRef.current === queueContext.itemToken &&
+        queueStatusRef.current !== null
+      ) {
+        queueErrorAdvanceTimerRef.current = window.setTimeout(() => {
           setTrackerState(prev => ({ ...prev, isOpen: false }));
-          processNextInQueue();
-        }, 3000);
+          processNextInQueue(queueContext);
+        }, 2500);
       }
       if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
     } finally {
-      setIsUploading(false);
+      endUploadOp(opToken);
       if (pendingUploadId) processingPendingUploadIdsRef.current.delete(pendingUploadId);
     }
   }
@@ -3130,6 +3259,10 @@ export function HealthDashboard({
         cancelled ||
         pendingUploadDrainInFlightRef.current ||
         isUploading ||
+        isUploadingRef.current ||
+        queueStatusRef.current !== null ||
+        activeQueueRunIdRef.current !== null ||
+        activeUploadOpRef.current !== null ||
         uploadQueueRef.current.length > 0 ||
         processingPendingUploadIdsRef.current.size > 0 ||
         (typeof navigator !== 'undefined' && !navigator.onLine)
@@ -3142,16 +3275,17 @@ export function HealthDashboard({
         const assignedRootId = localStorage.getItem(
           `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
         );
+        const latestWorkspace = workspaceRef.current || workspace;
         for (const operation of pending) {
-          if (cancelled) return;
+          if (cancelled || queueStatusRef.current !== null || activeQueueRunIdRef.current !== null) return;
           if (
-            operation.workspaceRootId !== workspace.rootFolderId &&
-            (operation.workspaceRootId !== 'local_offline_workspace' || assignedRootId !== workspace.rootFolderId)
+            operation.workspaceRootId !== latestWorkspace.rootFolderId &&
+            (operation.workspaceRootId !== 'local_offline_workspace' || assignedRootId !== latestWorkspace.rootFolderId)
           ) continue;
           if (processingPendingUploadIdsRef.current.has(operation.id)) continue;
           const targetMember =
-            workspace.family.members.find((member) => member.id === operation.member.id) ||
-            findMemberForEmail(workspace.family.members, operation.member.email);
+            latestWorkspace.family.members.find((member) => member.id === operation.member.id) ||
+            findMemberForEmail(latestWorkspace.family.members, operation.member.email);
           if (!targetMember) continue;
           processingPendingUploadIdsRef.current.add(operation.id);
           const file = await fileFromPendingUpload(operation);
@@ -3183,7 +3317,7 @@ export function HealthDashboard({
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [driveAuthorized, isUploading, uploadQueue.length, userEmail, workspace?.family.members, workspace?.rootFolderId, showToast]);
+  }, [driveAuthorized, isUploading, uploadQueue.length, userEmail, workspace?.rootFolderId, showToast]);
   function applyExtractionProgress(update: ExtractionProgressUpdate) {
     setTrackerState((prev) => {
       const nextStep: TrackerStep =
@@ -3213,6 +3347,7 @@ export function HealthDashboard({
     member: FamilyMember,
     driveFileId?: string,
     preExtractedResult?: Awaited<ReturnType<typeof extractHealthEventWithProgress>>,
+    queueContext?: QueueItemContext,
   ) {
     let latestProgress = 45;
     try {
@@ -3248,6 +3383,7 @@ export function HealthDashboard({
         extracted: result.extracted,
         contentIndexPages: result.contentIndexPages,
         contentIndexComplete: result.contentIndexComplete,
+        queueContext,
       };
       setTrackerState((previous) => ({
         ...previous,
@@ -3265,10 +3401,10 @@ export function HealthDashboard({
         if (latestProfile) {
           const unresolvedProfile: HealthProfile = {
             ...latestProfile,
-            sources: latestProfile.sources.map((source) =>
-              source.driveFileId === driveFileId
-                ? { ...source, subjectStatus: 'unresolved' }
-                : source,
+            sources: latestProfile.sources.map((sourceItem) =>
+              sourceItem.driveFileId === driveFileId
+                ? { ...sourceItem, subjectStatus: 'unresolved' }
+                : sourceItem,
             ),
             updatedAt: new Date().toISOString(),
           };
@@ -3292,10 +3428,10 @@ export function HealthDashboard({
         if (latestProfile) {
           const unresolvedProfile: HealthProfile = {
             ...latestProfile,
-            sources: latestProfile.sources.map((source) =>
-              source.driveFileId === driveFileId
-                ? { ...source, subjectStatus: 'unresolved' }
-                : source,
+            sources: latestProfile.sources.map((sourceItem) =>
+              sourceItem.driveFileId === driveFileId
+                ? { ...sourceItem, subjectStatus: 'unresolved' }
+                : sourceItem,
             ),
             updatedAt: new Date().toISOString(),
           };
@@ -3318,7 +3454,7 @@ export function HealthDashboard({
         batchFailureCountRef.current += 1;
         setTrackerState((previous) => ({
           ...previous,
-          isOpen: true,
+          isOpen: !queueContext,
           step: 'error',
           progressMessage: 'Không thể lưu kết quả OCR.',
           error: workspaceRef.current?.rootFolderId === 'local_offline_workspace'
@@ -3326,7 +3462,7 @@ export function HealthDashboard({
             : 'Tài liệu đã được tải lên Drive nhưng chưa lưu được vào hồ sơ.',
         }));
         notifyBatchProgress(file.name, targetMember.name, 'Lỗi lưu kết quả');
-        processNextInQueue();
+        processNextInQueue(queueContext);
         return;
       }
     } catch (error) {
@@ -3346,7 +3482,7 @@ export function HealthDashboard({
           : 'Tài liệu đã lưu trên Drive. Bạn có thể nhập thủ công hoặc thử lại.',
         'info',
       );
-      processNextInQueue();
+      processNextInQueue(queueContext);
     }
   }
   async function findOrCreateOcrMember(
@@ -3356,13 +3492,16 @@ export function HealthDashboard({
     const currentWorkspace = workspaceRef.current;
     if (!currentWorkspace) throw new Error('Không tìm thấy Workspace để gán tài liệu OCR.');
     const currentMembers = currentWorkspace.family.members;
-    const findEmptyPlaceholder = () => {
+    const findEmptyPlaceholder = (requireZeroSources = false) => {
       return currentMembers.find((candidate) => {
         const profile = profilesRef.current[candidate.id] || profiles[candidate.id];
         const isPlaceholder = candidate.name === 'Thành viên mới' ||
           candidate.name === 'Gia đình' ||
           candidate.name.toLowerCase().includes('thanh vien');
-        const isEmpty = !profile || (profile.timeline.length === 0 && profile.sources.length <= 1);
+        const isEmpty = !profile || (
+          profile.timeline.length === 0 &&
+          (requireZeroSources ? profile.sources.length === 0 : profile.sources.length <= 1)
+        );
         return isPlaceholder && isEmpty;
       });
     };
@@ -3380,9 +3519,8 @@ export function HealthDashboard({
         `Khớp chủ thể bệnh nhân "${patientName}" với thành viên gia đình: "${matched.name}" (${matched.id})`,
         { patientName, matchedMemberId: matched.id, matchedMemberName: matched.name }
       );
-      // Nếu có thành viên rỗng 'Thành viên mới' thừa phát sinh trong quá trình chuẩn bị hàng đợi,
-      // tự động dọn dẹp để không làm rác danh sách gia đình
-      const emptyPlaceholder = findEmptyPlaceholder();
+      // Chỉ dọn placeholder rỗng hoàn toàn (0 timeline, 0 sources) để không xóa nhầm tệp chờ xử lý
+      const emptyPlaceholder = findEmptyPlaceholder(true);
       if (emptyPlaceholder && emptyPlaceholder.id !== matched.id && isWorkspaceAdmin) {
         try {
           const { workspace: cleanedWs } = await deleteDriveFamilyMember(currentWorkspace, emptyPlaceholder.id);
@@ -3399,8 +3537,10 @@ export function HealthDashboard({
       }
       return matched;
     }
-    // Nếu không có ứng viên nào và tên là hợp lệ -> Tự động đổi tên thành viên rỗng hoặc tạo thành viên mới
-    if (candidates.length === 0 && isRecognizablePatientName(patientName)) {
+    // Nếu không có ứng viên nào, không trùng tên với thành viên đã có (tránh tạo bản sao khi lệch ngày sinh/giới tính)
+    // và tên hợp lệ -> Tự động đổi tên thành viên rỗng hoặc tạo thành viên mới
+    const hasSameNameConflict = hasSameNameMemberConflict(patientName, currentMembers);
+    if (candidates.length === 0 && !hasSameNameConflict && isRecognizablePatientName(patientName)) {
       digitizationLogger.log(
         'info',
         'subject_auto_create',
@@ -3409,7 +3549,8 @@ export function HealthDashboard({
       );
       
       try {
-        const normalizedName = normalizeVietnameseProperName(patientName);
+        const cleanedPatientName = sanitizeOcrPatientName(patientName) || patientName;
+        const normalizedName = normalizeVietnameseProperName(cleanedPatientName);
         const emptyPlaceholder = findEmptyPlaceholder();
         let targetMember: FamilyMember;
         let updatedWorkspace: HealthDriveWorkspace;
@@ -3695,6 +3836,7 @@ export function HealthDashboard({
     file: File,
     fileHash: string,
     result: Awaited<ReturnType<typeof extractHealthEventWithProgress>>,
+    queueContext?: QueueItemContext,
   ): Promise<boolean> {
     if (
       !/^[a-f0-9]{64}$/i.test(fileHash) ||
@@ -3757,6 +3899,7 @@ export function HealthDashboard({
         uploadedAt: new Date().toISOString(),
         disposition: 'included',
       }],
+      queueContext,
     };
 
     const saved = await saveExtractedDocumentAutomatically(draft, member, true);
@@ -3902,7 +4045,7 @@ export function HealthDashboard({
       if (!saved) throw new Error('Đã tạo thành viên nhưng chưa lưu được dữ liệu OCR. Hãy thử lại.');
       setIdentityResolutionDraft(null);
       setPendingSubjectMember(null);
-      processNextInQueue();
+      processNextInQueue(draft.queueContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Không thể tạo thành viên và gán dữ liệu OCR.';
       setDigitizationError(message);
@@ -3924,7 +4067,7 @@ export function HealthDashboard({
       setIdentityResolutionDraft(null);
       setPendingSubjectMember(null);
       showToast(`Đã gán tài liệu vào hồ sơ của ${targetMember.name}.`, 'success');
-      processNextInQueue();
+      processNextInQueue(draft.queueContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Không thể gán dữ liệu OCR vào hồ sơ thành viên.';
       setDigitizationError(message);
@@ -3934,6 +4077,17 @@ export function HealthDashboard({
     }
   }
   function handleCancelBatchQueue() {
+    if (queueErrorAdvanceTimerRef.current !== null) {
+      window.clearTimeout(queueErrorAdvanceTimerRef.current);
+      queueErrorAdvanceTimerRef.current = null;
+    }
+    activeQueueRunIdRef.current = null;
+    activeQueueItemTokenRef.current = null;
+    completedQueueTokensRef.current.clear();
+    activeUploadOpRef.current = null;
+    isUploadingRef.current = false;
+    setIsUploading(false);
+    processingPendingUploadIdsRef.current.clear();
     uploadQueueRef.current = [];
     pendingUploadIdsRef.current = [];
     setUploadQueue([]);
@@ -3945,6 +4099,7 @@ export function HealthDashboard({
     showToast('Đã dừng toàn bộ hàng đợi xử lý.', 'info');
   }
   function deferUnresolvedSubject() {
+    const draftContext = identityResolutionDraft?.queueContext;
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
     setDigitizationError('');
@@ -3954,17 +4109,21 @@ export function HealthDashboard({
         : 'Tài liệu vẫn được giữ trên Drive và chưa gán vào hồ sơ nào. Có thể chạy lại OCR sau.',
       'info',
     );
-    processNextInQueue();
+    processNextInQueue(draftContext);
   }
   async function retryDigitization() {
     const file = trackerState.file;
     const member = members.find((item) => item.id === trackerState.memberId);
     if (!file || !member) return;
     if (!trackerState.driveFile) {
-      void beginDigitization(file, { forceUpload: true });
+      void beginDigitization(file, {
+        forceUpload: true,
+        queueContext: trackerState.queueContext,
+      });
       return;
     }
-    setIsUploading(true);
+    const opToken = trackerState.queueContext?.itemToken || `retry_${Date.now()}`;
+    beginUploadOp(opToken);
     setDigitizationError('');
     setTrackerState((prev) => ({
       ...prev,
@@ -3997,7 +4156,7 @@ export function HealthDashboard({
         );
         setProfiles((prev) => ({ ...prev, [member.id]: savedProfile }));
       }
-      await runDocumentExtraction(file, member, trackerState.driveFile.id);
+      await runDocumentExtraction(file, member, trackerState.driveFile.id, undefined, trackerState.queueContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Không thể chuẩn bị tài liệu để thử OCR.';
       setDigitizationError(message);
@@ -4008,10 +4167,14 @@ export function HealthDashboard({
         error: message,
       }));
     } finally {
-      setIsUploading(false);
+      endUploadOp(opToken);
     }
   }
   async function resumeInterruptedOcr(job: OcrRecoveryJob) {
+    if (queueStatusRef.current || activeQueueRunIdRef.current !== null || isUploadingRef.current) {
+      showToast('Hãy đợi hàng đợi tải lên hiện tại hoàn tất rồi chạy lại OCR.', 'info');
+      return;
+    }
     const member = members.find((candidate) =>
       profiles[candidate.id]?.sources.some((source) => source.driveFileId === job.driveFileId),
     );
@@ -4022,13 +4185,14 @@ export function HealthDashboard({
       showToast('Không tìm thấy nguồn tài liệu trong hồ sơ Drive. Hãy tải lại hồ sơ gia đình rồi thử lại.', 'error');
       return;
     }
-    setIsUploading(true);
+    const opToken = `resume_${job.driveFileId}_${Date.now()}`;
+    beginUploadOp(opToken);
     try {
       const blob = job.driveFileId.startsWith('local_file_')
         ? await fileFromLocalSource(job.driveFileId, offlineOwnerKey || 'apk-local-device')
         : await downloadDriveFile(job.driveFileId);
       if (blob.size > MAX_UPLOAD_BYTES) {
-        throw new Error('Tài liệu trên Drive vượt quá giới hạn 25 MB.');
+        throw new Error('Tài liệu trên Drive vượt quá giới hạn 30 MB.');
       }
       const file = new File([blob], source.fileName, { type: source.mimeType });
       const driveFile: DriveFile = {
@@ -4050,6 +4214,7 @@ export function HealthDashboard({
         modelUsed: 'gemini-3.5-flash-lite',
         partialExtracted: {},
         error: null,
+        queueContext: undefined,
       });
       persistOcrRecoveryJob(job.driveFileId, 'processing', 45);
       await runDocumentExtraction(file, member, job.driveFileId);
@@ -4057,7 +4222,7 @@ export function HealthDashboard({
       persistOcrRecoveryJob(job.driveFileId, 'interrupted', job.progressPercent);
       showToast(error instanceof Error ? error.message : 'Không thể khôi phục OCR từ Google Drive.', 'error');
     } finally {
-      setIsUploading(false);
+      endUploadOp(opToken);
     }
   }
   function handleFileUploadTrigger() {
@@ -4208,7 +4373,8 @@ export function HealthDashboard({
     const nextEvent = options.event || cleanAndDeduplicateEventData(rawEvent);
     try {
       const currentProfiles = profilesRef.current;
-      const sourceOwner = members.find((member) =>
+      const latestMembers = workspaceRef.current?.family.members || members;
+      const sourceOwner = latestMembers.find((member) =>
         currentProfiles[member.id]?.sources.some(
           (source) => source.driveFileId === draft.source.id && !source.relocatedToMemberId,
         ),
@@ -4234,11 +4400,19 @@ export function HealthDashboard({
           candidate.fileName === item.fileName,
         ) === index,
       );
+      const resolvedProcessedPages = Math.max(
+        sourceBase.processedPages || 0,
+        sourceBase.totalPages || 0,
+        contentIndex.pages.length || 0,
+        1,
+      );
       const targetSource: HealthSource = {
         ...sourceBase,
         status: priorSource?.status || 'pending',
         subjectStatus: undefined,
         relocatedToMemberId: undefined,
+        totalPages: sourceBase.totalPages || Math.max(contentIndex.pages.length || 0, 1),
+        processedPages: resolvedProcessedPages,
         contentIndexPages: sourceBase.contentIndexComplete
           ? sourceBase.contentIndexPages
           : contentIndex.pages,
@@ -4251,7 +4425,14 @@ export function HealthDashboard({
        try {
          await moveDriveFileToMember(draft.source.id, effectiveMember);
          driveFileMoved = true;
-         const targetWithSource = addHealthSource(effectiveProfile, targetSource);
+         const targetWithSource = effectiveProfile.sources.some((s) => s.driveFileId === draft.source.id)
+           ? {
+               ...effectiveProfile,
+               sources: effectiveProfile.sources.map((s) =>
+                 s.driveFileId === draft.source.id ? { ...s, ...targetSource } : s,
+               ),
+             }
+           : addHealthSource(effectiveProfile, targetSource);
          effectiveProfile = await saveHealthProfile(effectiveMember.profileFileId, targetWithSource);
          currentProfiles[effectiveMember.id] = effectiveProfile;
          profilesRef.current = currentProfiles;
@@ -4295,6 +4476,19 @@ export function HealthDashboard({
         currentProfiles[effectiveMember.id] = effectiveProfile;
         profilesRef.current = currentProfiles;
         setProfiles((previous) => ({ ...previous, [effectiveMember.id]: effectiveProfile! }));
+      } else {
+        effectiveProfile = {
+          ...effectiveProfile,
+          sources: effectiveProfile.sources.map((source) =>
+            source.driveFileId === draft.source.id
+              ? {
+                  ...source,
+                  ...targetSource,
+                  status: source.status,
+                }
+              : source,
+          ),
+        };
       }
       const existingMatch = matchedEventId
         ? effectiveProfile.timeline.find((item) => item.id === matchedEventId)
@@ -4308,7 +4502,16 @@ export function HealthDashboard({
         );
         const updatedSources = effectiveProfile.sources.map((item) =>
           item.driveFileId === draft.source.id
-            ? { ...item, status: 'processed' as const, subjectStatus: undefined, digitizedAt: new Date().toISOString() }
+            ? {
+                ...item,
+                status: 'processed' as const,
+                subjectStatus: undefined,
+                digitizedAt: new Date().toISOString(),
+                processedPages: Math.max(item.processedPages || 0, item.totalPages || 0, resolvedProcessedPages),
+                contentIndexPages: item.contentIndexComplete ? item.contentIndexPages : targetSource.contentIndexPages,
+                contentIndexComplete: item.contentIndexComplete || targetSource.contentIndexComplete,
+                sourceContributions: targetSource.sourceContributions,
+              }
             : item
         );
         const nextProfile: HealthProfile = {
@@ -4340,8 +4543,10 @@ export function HealthDashboard({
           `Đã hợp nhất dữ liệu vào hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
-        setActiveTab('timeline');
-        processNextInQueue();
+        if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
+          setActiveTab('timeline');
+        }
+        processNextInQueue(draft.queueContext);
         return true;
       } else if (duplicateResolution === 'replace' && existingMatch) {
         // 2. Ghi đè toàn bộ sự kiện cũ bằng dữ liệu mới nhất
@@ -4355,7 +4560,16 @@ export function HealthDashboard({
         );
         const updatedSources = effectiveProfile.sources.map((item) =>
           item.driveFileId === draft.source.id
-            ? { ...item, status: 'processed' as const, subjectStatus: undefined, digitizedAt: new Date().toISOString() }
+            ? {
+                ...item,
+                status: 'processed' as const,
+                subjectStatus: undefined,
+                digitizedAt: new Date().toISOString(),
+                processedPages: Math.max(item.processedPages || 0, item.totalPages || 0, resolvedProcessedPages),
+                contentIndexPages: item.contentIndexComplete ? item.contentIndexPages : targetSource.contentIndexPages,
+                contentIndexComplete: item.contentIndexComplete || targetSource.contentIndexComplete,
+                sourceContributions: targetSource.sourceContributions,
+              }
             : item
         );
         const nextProfile: HealthProfile = {
@@ -4387,12 +4601,28 @@ export function HealthDashboard({
           `Đã cập nhật ghi đè hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
-        setActiveTab('timeline');
-        processNextInQueue();
+        if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
+          setActiveTab('timeline');
+        }
+        processNextInQueue(draft.queueContext);
         return true;
       } else {
         // 3. Tạo sự kiện mới độc lập
-        const nextProfile = digitizeHealthSource(effectiveProfile, nextEvent);
+        const digitized = digitizeHealthSource(effectiveProfile, nextEvent);
+        const nextProfile: HealthProfile = {
+          ...digitized,
+          sources: digitized.sources.map((item) =>
+            item.driveFileId === draft.source.id
+              ? {
+                  ...item,
+                  processedPages: Math.max(item.processedPages || 0, item.totalPages || 0, resolvedProcessedPages),
+                  contentIndexPages: item.contentIndexComplete ? item.contentIndexPages : targetSource.contentIndexPages,
+                  contentIndexComplete: item.contentIndexComplete || targetSource.contentIndexComplete,
+                  sourceContributions: targetSource.sourceContributions,
+                }
+              : item,
+          ),
+        };
         const merged = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         const saveMs = saveProfileTimer();
         currentProfiles[effectiveMember.id] = merged;
@@ -4412,8 +4642,10 @@ export function HealthDashboard({
           saveMs
         );
         showToast(`Đã lưu hồ sơ sức khỏe cho ${effectiveMember.name} lên Google Drive.`, 'success');
-        setActiveTab('timeline');
-        processNextInQueue();
+        if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
+          setActiveTab('timeline');
+        }
+        processNextInQueue(draft.queueContext);
         return true;
       }
     } catch (error) {
@@ -4429,6 +4661,7 @@ export function HealthDashboard({
     if (!selectedMember || !selectedProfile || !chatInput.trim()) return;
     const question = chatInput.trim();
     const requestId = ++chatRequestIdRef.current;
+    const assistantMsgId = `assistant_${requestId}_${Date.now()}`;
     const requestMemberId = selectedMember.id;
     const requestWorkspaceRootId = workspaceRef.current?.rootFolderId;
     const requestUserEmail = authIdentityRef.current.userEmail;
@@ -4442,41 +4675,69 @@ export function HealthDashboard({
     setChatInput('');
     setChatMessages((prev) => [...prev, { role: 'user', text: question, timestamp: timeStr }]);
     setIsChatting(true);
+
+    let streamedText = '';
+    let streamedCitations: HealthAssistantCitation[] = [];
+    const upsertAssistantDraft = (nextText: string, nextCitations: HealthAssistantCitation[], finalTimestamp?: string) => {
+      setChatMessages((prev) => {
+        const existingIndex = prev.findIndex((msg) => msg.id === assistantMsgId);
+        const draftMessage: ChatMessage = {
+          id: assistantMsgId,
+          role: 'assistant',
+          text: nextText,
+          citations: nextCitations,
+          ...(finalTimestamp ? { timestamp: finalTimestamp } : {}),
+        };
+        if (existingIndex === -1) {
+          return [...prev, draftMessage];
+        }
+        return prev.map((msg, idx) => (idx === existingIndex ? draftMessage : msg));
+      });
+    };
+
     try {
-      const { answer, citations } = await askHealthAssistant(
+      const { answer, citations } = await streamHealthAssistant(
         question,
         selectedMember,
         selectedProfile,
+        (chunk) => {
+          if (!isCurrentRequest()) return;
+          streamedText += chunk;
+          upsertAssistantDraft(streamedText, streamedCitations);
+        },
         history,
+        (sources) => {
+          if (!isCurrentRequest()) return;
+          streamedCitations = sources;
+          if (streamedText) {
+            upsertAssistantDraft(streamedText, streamedCitations);
+          }
+        },
       );
       if (!isCurrentRequest()) return;
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: answer,
-          citations,
-          timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
-        },
-      ]);
+      const finalAnswer = answer.trim() || streamedText;
+      const finalCitations = citations.length > 0 ? citations : streamedCitations;
+      upsertAssistantDraft(
+        finalAnswer || 'Trợ lý AI chưa có phản hồi phù hợp. Vui lòng thử lại.',
+        finalCitations,
+        new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+      );
     } catch (error) {
       if (!isCurrentRequest()) return;
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text:
-            error instanceof Error
-              ? error.message
-              : 'Không thể kết nối trợ lý AI lúc này. Vui lòng thử lại.',
-          timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
-        },
-      ]);
+      const errorText =
+        error instanceof Error
+          ? error.message
+          : 'Không thể kết nối trợ lý AI lúc này. Vui lòng thử lại.';
+      upsertAssistantDraft(
+        streamedText ? `${streamedText}\n\n(${errorText})` : errorText,
+        streamedCitations,
+        new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+      );
     } finally {
       if (isCurrentRequest()) setIsChatting(false);
     }
   }
-  async function handleAiSummary(model: string = 'gemini-3.6-flash') {
+  async function handleAiSummary(model: string = 'gemini-4-hydrogen') {
     if (!selectedMember || !selectedProfile) return;
     setIsSummarizing(true);
     setAnalysisError('');
@@ -4489,7 +4750,7 @@ export function HealthDashboard({
       
       // Step 2: Comprehensive 4-Layer Analysis
       showToast('Đang phân tích 4 lớp y khoa chuyên sâu bằng AI...', 'info');
-      const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile, 'gemini-3.6-flash');
+      const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile, model);
       
       const updated: HealthProfile = {
         ...selectedProfile,
@@ -4620,7 +4881,7 @@ export function HealthDashboard({
     }
   }
   return (
-    <div className={`${activeTab === 'assistant' ? 'h-[100dvh] min-h-0 overflow-hidden' : 'min-h-screen'} bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900`}>
+    <div className="h-[100dvh] min-h-0 overflow-hidden bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
       {/* 1. TOP BAR CONTRACT: One row, clean zones, thumb-friendly safe area */}
       <header className="sticky top-0 z-30 shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 safe-area-header shadow-xs">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
@@ -4913,7 +5174,7 @@ export function HealthDashboard({
       {/* Main Content Area */}
       <main className={activeTab === 'assistant'
         ? 'flex-1 min-h-0 max-w-6xl w-full mx-auto px-3 sm:px-4 pt-2 sm:pt-3 assistant-viewport-content overflow-hidden flex flex-col'
-        : 'flex-1 max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-28'}>
+        : 'flex-1 min-h-0 overflow-y-auto overscroll-y-contain max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))]'}>
         {errorMessage && (() => {
           const isDriveApiDisabled =
             errorMessage.includes('drive.googleapis.com') ||
@@ -5283,7 +5544,7 @@ export function HealthDashboard({
                       medicalHistory={selectedProfile.medicalHistory}
                       narrativeSummary={selectedProfile.summary.narrative}
                       isAnalyzing={isSummarizing}
-                      onRetry={() => void handleAiSummary('gemini-3.6-flash')}
+                      onRetry={() => void handleAiSummary('gemini-4-hydrogen')}
                       onRefine={() => void handleRefineAndOrganize()}
                       isRefining={isRefining}
                       error={analysisError}
@@ -5292,17 +5553,17 @@ export function HealthDashboard({
                       const metricInfo = getHealthMetricInfo(selectedMetric);
                       return (
                         <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
-                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
+                          <div className="flex flex-col gap-3">
+                            <div className="min-w-0">
                               <h4 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
-                                <Activity className="h-4 w-4 text-teal-600" />
+                                <Activity className="h-4 w-4 text-teal-600 shrink-0" />
                                 <span>Diễn biến chỉ số sức khỏe</span>
                               </h4>
                               <p className="mt-0.5 text-xs text-slate-500">
                                 Xu hướng qua các lần khám đã ghi nhận
                               </p>
                             </div>
-                            <div className="flex max-w-full items-center gap-1 overflow-x-auto no-scrollbar">
+                            <div className="flex w-full items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
                               {metricOptions.map(({ key, label }) => (
                                 <button
                                   key={key}
@@ -5733,39 +5994,109 @@ export function HealthDashboard({
                               )}
                             </div>
                           )}
-                          {/* Metrics chips */}
-                          {event.metrics.length > 0 && (
-                            <div className="flex flex-wrap items-center gap-2 pt-1">
-                              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mr-1">
-                                Chỉ số đo:
-                              </span>
-                              {event.metrics.map((met, idx) => (
-                                (() => {
-                                  const rangeStatus = getHealthMetricRangeStatus(met, selectedMember?.gender);
-                                  const isCritical = rangeStatus === 'critical_high' || rangeStatus === 'critical_low';
-                                  const isWarning = rangeStatus === 'warning_high' || rangeStatus === 'warning_low';
-                                  return (
-                                    <span
-                                      key={idx}
-                                      aria-label={`${met.name}: ${met.value} ${met.unit}${isCritical ? ', cảnh báo nghiêm trọng' : isWarning ? ', vượt khoảng tham chiếu' : ''}`}
-                                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs tabular-nums ${
-                                        isCritical
-                                          ? 'bg-rose-100 border-rose-300 text-rose-950 font-bold'
-                                          : isWarning
-                                            ? 'bg-amber-100 border-amber-300 text-amber-950 font-bold'
-                                            : 'bg-teal-50 border-teal-200 text-teal-900 font-semibold'
-                                      }`}
-                                    >
-                                      {(isCritical || isWarning) && (
-                                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                                      )}
-                                      {met.name}: <strong>{met.value}</strong> {met.unit}
+                          {/* Metrics chips: abnormal always visible, normal collapsed by default */}
+                          {event.metrics.length > 0 && (() => {
+                            const { abnormal, normal } = partitionHealthMetricsForDisplay(
+                              event.metrics,
+                              selectedMember?.gender,
+                            );
+                            const isNormalExpanded = Boolean(expandedMetricEventIds[event.id]);
+                            const renderMetricChip = (
+                              met: typeof event.metrics[number],
+                              rangeStatus: ReturnType<typeof getHealthMetricRangeStatus>,
+                              isAbnormalChip: boolean,
+                              keyIndex: number,
+                            ) => {
+                              const isCritical = rangeStatus === 'critical_high' || rangeStatus === 'critical_low';
+                              const isWarning =
+                                isAbnormalChip ||
+                                rangeStatus === 'warning_high' ||
+                                rangeStatus === 'warning_low';
+                              return (
+                                <span
+                                  key={keyIndex}
+                                  aria-label={`${met.name}: ${met.value} ${met.unit}${isCritical ? ', cảnh báo nghiêm trọng' : isWarning ? ', vượt khoảng tham chiếu' : ''}`}
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs tabular-nums ${
+                                    isCritical
+                                      ? 'bg-rose-100 border-rose-300 text-rose-950 font-bold'
+                                      : isWarning
+                                        ? 'bg-amber-100 border-amber-300 text-amber-950 font-bold'
+                                        : 'bg-teal-50 border-teal-200 text-teal-900 font-semibold'
+                                  }`}
+                                >
+                                  {(isCritical || isWarning) && (
+                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                  )}
+                                  <span>
+                                    {met.name}: <strong>{met.value}</strong> {met.unit}
+                                    {isWarning && met.refRange ? (
+                                      <span className="ml-1 text-[11px] font-normal opacity-80">
+                                        ({met.refRange})
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                </span>
+                              );
+                            };
+
+                            return (
+                              <div className="space-y-2 pt-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mr-1">
+                                    {abnormal.length > 0 ? 'Chỉ số cần chú ý:' : 'Chỉ số đo:'}
+                                  </span>
+                                  {abnormal.map((item) =>
+                                    renderMetricChip(item.metric, item.rangeStatus, true, item.index),
+                                  )}
+                                  {abnormal.length === 0 && normal.length > 0 && !isNormalExpanded && (
+                                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-emerald-200 bg-emerald-50/70 text-emerald-800 text-xs font-semibold">
+                                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                      Trong ngưỡng bình thường ({normal.length})
                                     </span>
-                                  );
-                                })()
-                              ))}
-                            </div>
-                          )}
+                                  )}
+                                </div>
+
+                                {normal.length > 0 && isNormalExpanded && (
+                                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-teal-100 bg-teal-50/40 p-2.5">
+                                    <span className="w-full text-[11px] font-semibold text-teal-800">
+                                      Chỉ số trong ngưỡng bình thường ({normal.length}):
+                                    </span>
+                                    {normal.map((item) =>
+                                      renderMetricChip(item.metric, item.rangeStatus, false, item.index),
+                                    )}
+                                  </div>
+                                )}
+
+                                {normal.length > 0 && (
+                                  <button
+                                    type="button"
+                                    aria-expanded={isNormalExpanded}
+                                    onClick={() =>
+                                      setExpandedMetricEventIds((prev) => ({
+                                        ...prev,
+                                        [event.id]: !prev[event.id],
+                                      }))
+                                    }
+                                    className="inline-flex min-h-[44px] w-full sm:w-auto items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 active:bg-slate-200"
+                                  >
+                                    {isNormalExpanded ? (
+                                      <>
+                                        <ChevronUp className="h-4 w-4 shrink-0 text-slate-500" aria-hidden="true" />
+                                        Thu gọn {normal.length} chỉ số bình thường
+                                      </>
+                                    ) : (
+                                      <>
+                                        <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" aria-hidden="true" />
+                                        {abnormal.length > 0
+                                          ? `Xem thêm ${normal.length} chỉ số bình thường`
+                                          : `Xem chi tiết ${normal.length} chỉ số bình thường`}
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
                           {/* Imaging Results */}
                           {event.imagingResults && event.imagingResults.length > 0 && (
                             <div className="space-y-1.5 pt-1.5">
@@ -5928,7 +6259,7 @@ export function HealthDashboard({
                         </div>
                       ))
                     )}
-                    {isChatting && (
+                    {isChatting && chatMessages[chatMessages.length - 1]?.role !== 'assistant' && (
                       <div role="status" className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">
                         <LoaderCircle className="h-4 w-4 animate-spin text-emerald-600" />
                         <span>Trợ lý đang tổng hợp câu trả lời...</span>
@@ -6329,7 +6660,7 @@ export function HealthDashboard({
                     <div className="flex shrink-0 items-center gap-2">
                       <button
                         type="button"
-                        disabled={!member || isUploading}
+                        disabled={!member || isUploading || Boolean(queueStatus)}
                         onClick={() => void resumeInterruptedOcr(job)}
                         className="rounded-lg bg-emerald-700 px-2.5 py-1.5 text-[10px] font-bold text-white disabled:opacity-50"
                       >
@@ -6533,9 +6864,10 @@ export function HealthDashboard({
               return;
             }
             const isError = trackerState.step === 'error';
+            const closedContext = trackerState.queueContext;
             setTrackerState((prev) => ({ ...prev, isOpen: false }));
-            if (isError && (uploadQueueRef.current.length > 0 || uploadQueue.length > 0)) {
-              processNextInQueue();
+            if (isError && closedContext) {
+              processNextInQueue(closedContext);
             }
           }}
         />
@@ -6565,8 +6897,9 @@ export function HealthDashboard({
           profiles={profiles}
           selectedMemberId={selectedMemberId}
           onClose={() => {
+            const draftContext = digitizationDraft.queueContext;
             setDigitizationDraft(null);
-            processNextInQueue();
+            processNextInQueue(draftContext);
           }}
           onSave={(e, targetMemberId) =>
             void handleSaveDigitization(e, { targetMemberId })
@@ -6587,6 +6920,7 @@ export function HealthDashboard({
         members={members}
         profiles={profiles}
         localOwnerKey={offlineOwnerKey || 'apk-local-device'}
+        isBatchBusy={Boolean(queueStatus) || isUploading}
         onClose={() => setShowRawFilesModal(false)}
         onRefreshWorkspace={async () => {
           if (workspace) {
@@ -6594,40 +6928,50 @@ export function HealthDashboard({
           }
         }}
         onRunOcrForSource={async (member, source) => {
-          let file: File;
-          if (source.driveFileId.startsWith('local_file_')) {
-            file = await fileFromLocalSource(
-              source.driveFileId,
-              offlineOwnerKey || 'apk-local-device',
-            );
-          } else {
-          // Tải tệp từ Drive về làm File object để OCR lại
-          const token = await getGoogleAccessToken();
-          const response = await fetch(`https://www.googleapis.com/drive/v3/files/${source.driveFileId}?alt=media`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!response.ok) throw new Error('Không thể tải tệp từ Google Drive.');
-          const blob = await response.blob();
-          file = new File([blob], source.fileName, { type: source.mimeType });
+          if (queueStatusRef.current || activeQueueRunIdRef.current !== null || isUploadingRef.current) {
+            throw new Error('Hãy đợi hàng đợi xử lý hiện tại hoàn tất rồi chạy lại OCR.');
           }
-          setTrackerState({
-            isOpen: true,
-            file,
-            memberId: member.id,
-            step: 'reading_document',
-            progressPercent: 20,
-            progressMessage: `Đang chạy lại số hóa cho ${source.fileName}...`,
-            driveFile: {
-              id: source.driveFileId,
-              name: source.fileName,
-              mimeType: source.mimeType,
-              createdTime: source.uploadedAt,
-            },
-            modelUsed: 'gemini-3.5-flash-lite',
-            partialExtracted: {},
-            error: null,
-          });
-          await runDocumentExtraction(file, member, source.driveFileId);
+          const opToken = `raw_rerun_${source.driveFileId}_${Date.now()}`;
+          beginUploadOp(opToken);
+          try {
+            let file: File;
+            if (source.driveFileId.startsWith('local_file_')) {
+              file = await fileFromLocalSource(
+                source.driveFileId,
+                offlineOwnerKey || 'apk-local-device',
+              );
+            } else {
+              // Tải tệp từ Drive về làm File object để OCR lại
+              const token = await getGoogleAccessToken();
+              const response = await fetch(`https://www.googleapis.com/drive/v3/files/${source.driveFileId}?alt=media`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (!response.ok) throw new Error('Không thể tải tệp từ Google Drive.');
+              const blob = await response.blob();
+              file = new File([blob], source.fileName, { type: source.mimeType });
+            }
+            setTrackerState({
+              isOpen: true,
+              file,
+              memberId: member.id,
+              step: 'reading_document',
+              progressPercent: 20,
+              progressMessage: `Đang chạy lại số hóa cho ${source.fileName}...`,
+              driveFile: {
+                id: source.driveFileId,
+                name: source.fileName,
+                mimeType: source.mimeType,
+                createdTime: source.uploadedAt,
+              },
+              modelUsed: 'gemini-3.5-flash-lite',
+              partialExtracted: {},
+              error: null,
+              queueContext: undefined,
+            });
+            await runDocumentExtraction(file, member, source.driveFileId);
+          } finally {
+            endUploadOp(opToken);
+          }
         }}
         showToast={showToast}
       />

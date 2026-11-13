@@ -1,6 +1,7 @@
+import { Capacitor } from '@capacitor/core';
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
-import { GoogleGenAI } from '@google/genai';
+import { testGeminiApiKeyDirect } from './geminiUnifiedExecutor';
 
 const LOCAL_AI_KEYS_STORAGE_KEY = 'health_local_ai_resources_keys_v1';
 
@@ -64,8 +65,30 @@ export async function getSharedGeminiKeysForRequest(): Promise<string[]> {
   return getSharedGeminiKeys();
 }
 
+function isNativeApkRuntime(): boolean {
+  return (
+    Capacitor.isNativePlatform() ||
+    import.meta.env.VITE_APP_MODE === 'apk' ||
+    import.meta.env.VITE_APP_MODE === 'play'
+  );
+}
+
+async function runDirectGeminiKeyTest(
+  cleanKey: string,
+): Promise<{ valid: boolean; workingModel?: string; quotaExhausted?: boolean }> {
+  const direct = await testGeminiApiKeyDirect(cleanKey);
+  if (!direct.valid) {
+    throw new Error(direct.error || 'API key không hợp lệ.');
+  }
+  return {
+    valid: true,
+    workingModel: direct.workingModel,
+    ...(direct.quotaExhausted ? { quotaExhausted: true } : {}),
+  };
+}
+
 /**
- * Kiểm tra tính hợp lệ của API Key thông qua server.
+ * Kiểm tra tính hợp lệ của API Key trực tiếp trên APK hoặc qua server proxy trên Web.
  */
 export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; workingModel?: string; quotaExhausted?: boolean }> {
   const cleanKey = key.trim();
@@ -73,32 +96,31 @@ export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; w
     throw new Error('API key không được để trống.');
   }
 
-  const url = buildApiUrl('/api/gemini/test-key');
+  if (isNativeApkRuntime()) {
+    return await runDirectGeminiKeyTest(cleanKey);
+  }
 
   let response: Response;
   try {
+    const url = buildApiUrl('/api/gemini/test-key');
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: cleanKey }),
     });
-  } catch (e) {
-    // Direct client-side test fallback for standalone APKs / offline mode when backend is unreachable
-    try {
-      const ai = new GoogleGenAI({ apiKey: cleanKey });
-      await ai.models.generateContent({
-        model: 'gemini-3.5-flash-lite',
-        contents: 'OK',
-        config: { maxOutputTokens: 16 },
-      });
-      return { valid: true, workingModel: 'gemini-3.5-flash-lite' };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/429|quota/i.test(msg)) {
-        return { valid: true, workingModel: 'gemini-3.5-flash-lite', quotaExhausted: true };
-      }
-      return { valid: false };
-    }
+  } catch {
+    return await runDirectGeminiKeyTest(cleanKey);
+  }
+
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  if (
+    response.status === 404 ||
+    response.status === 502 ||
+    response.status === 503 ||
+    response.status === 504 ||
+    contentType.includes('text/html')
+  ) {
+    return await runDirectGeminiKeyTest(cleanKey);
   }
 
   return await readApiJson(response, 'Server Gemini (test-key)');

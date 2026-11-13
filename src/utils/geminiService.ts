@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core';
 import type {
   AiAnalysisBlock,
   AiDeepAnalysisResult,
@@ -13,18 +14,38 @@ import type {
 } from '../types';
 import { digitizationLogger } from './digitizationLogger';
 import { classifyHealthEventType, isHealthEventType } from './healthEventType';
-import { splitPdfIntoBatches, PdfPageBatchError } from './pdfPageBatches';
-import { mergeExtractedBatches, type ExtractedPageBatch } from './healthDocumentExtraction';
+import { parseRobustJson, sleep } from './healthRecordService';
 import { getValidGoogleAccessToken } from './googleDriveService';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
-import { GoogleGenAI } from '@google/genai';
+import { resetSharedGeminiRequestContextsForTests } from './geminiRequestContext';
+import {
+  cleanErrorMessage,
+  executeGeminiStreamWithPool,
+  executeGeminiWithPool,
+  researchHealthQuestionWithPool,
+  TASK_MODELS,
+} from './geminiUnifiedExecutor';
+import {
+  buildComprehensiveAnalysisPrompt,
+  buildRefinePrompt,
+  buildSummarizePrompt,
+  COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
+  createHealthAssistantPrompt,
+  HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+  normalizeComprehensiveAnalysisPayload,
+  SUMMARIZE_RESPONSE_SCHEMA,
+} from './healthAiPrompts';
+import { runUnifiedHealthDocumentOcr } from './healthDocumentOcrRunner';
 import {
   isApprovedMedicalCitationUrl,
+  normalizeHealthAssistantHistory,
   type HealthAssistantCitation,
   type HealthAssistantHistoryMessage,
 } from './healthAssistantContext';
+
+export { cleanErrorMessage };
 
 export interface ExtractionProgressUpdate {
   stage:
@@ -44,75 +65,108 @@ export interface ExtractionProgressUpdate {
   processedPages?: number;
 }
 
-export function cleanErrorMessage(rawMessage?: string): string {
-  if (!rawMessage) return 'Có lỗi xảy ra khi xử lý dịch vụ AI.';
-  let msg = typeof rawMessage === 'string' ? rawMessage.trim() : String(rawMessage);
-
-  for (let depth = 0; depth < 3; depth++) {
-    if ((msg.startsWith('{') && msg.endsWith('}')) || (msg.startsWith('[') && msg.endsWith(']'))) {
-      try {
-        const parsed = JSON.parse(msg);
-        if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.error === 'string') msg = parsed.error;
-          else if (typeof parsed.error?.message === 'string') msg = parsed.error.message;
-          else if (typeof parsed.message === 'string') msg = parsed.message;
-          else break;
-        } else break;
-      } catch {
-        break;
-      }
-    } else break;
-  }
-
-  if (/DEADLINE_EXCEEDED|504|Deadline expired|deadline/i.test(msg)) {
-    return 'Yêu cầu AI xử lý bị quá thời gian chờ từ máy chủ Google (504 Deadline Exceeded). Vui lòng thử lại.';
-  }
-  if (/RESOURCE_EXHAUSTED|429|quota/i.test(msg)) {
-    return 'Hạn ngạch AI tạm thời đạt giới hạn (429 Quota Exhausted). Vui lòng thử lại sau ít phút.';
-  }
-  if (/503|UNAVAILABLE|high demand|overloaded/i.test(msg)) {
-    return 'Máy chủ AI Google hiện đang bận hoặc quá tải (503 Service Unavailable). Vui lòng thử lại sau ít giây.';
-  }
-  if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg)) {
-    return 'Không thể kết nối đến máy chủ AI (Lỗi mạng hoặc kết nối). Vui lòng kiểm tra đường truyền và thử lại.';
-  }
-
-  return msg;
+export function resetClientGeminiKeyStateForTests(): void {
+  resetSharedGeminiRequestContextsForTests();
 }
 
 async function callGeminiClientSide<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
-  const keys = await getSharedGeminiKeysForRequest();
-  if (keys.length === 0) {
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+  if (clientGeminiKeys.length === 0) {
     throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI" trước khi sử dụng.');
   }
 
-  const apiKey = keys[0];
-  const ai = new GoogleGenAI({ apiKey });
-  const model = endpoint === 'analyze-comprehensive' ? 'gemini-3.6-flash' : 'gemini-3.5-flash-lite';
+  const memberObj = isRecord(body.member) ? body.member : undefined;
+  const memberName = typeof memberObj?.name === 'string' ? memberObj.name : 'Thành viên';
 
-  let promptText = '';
   if (endpoint === 'refine-and-organize') {
-    promptText = `Bạn là chuyên gia y tế chuẩn hóa danh pháp. Hãy chuẩn hóa danh pháp và sắp xếp thời gian cho các sự kiện y tế của thành viên. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "organizedTimeline": [...], "refinementNotes": [...]}`;
-  } else if (endpoint === 'summarize') {
-    promptText = `Bạn là bác sĩ gia đình AI. Hãy viết bản tổng kết toàn diện hồ sơ sức khỏe. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "summary": "..."}`;
-  } else if (endpoint === 'ask-assistant') {
-    promptText = `Bạn là trợ lý y tế gia đình AI bằng tiếng Việt. Dữ liệu câu hỏi và hồ sơ: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "answer": "...", "citations": []}`;
-  } else if (endpoint === 'analyze-comprehensive') {
-    promptText = `Bạn là hội đồng bác sĩ AI chuyên sâu. Phân tích 4 lớp y khoa. Dữ liệu đầu vào: ${JSON.stringify(body)}. Trả về DUY NHẤT một JSON hợp lệ dạng: {"success": true, "result": {"healthScore": 85, "overallAssessment": "...", "crossCorrelations": [], "velocityTrends": [], "chronicSurveillance": [], "roadmap": {"criticalAlerts": [], "specialistReferrals": [], "timeBoundPlan": {"next3Months": [], "next6Months": [], "next12Months": []}}}, "aiAnalysis": {"overviewSummary": "...", "criticalAlerts": [], "chronicConditionsTracking": [], "actionRoadmap": {"specialistConsultation": [], "dietaryModifications": [], "followUpSchedule": "..."}}}`;
-  } else {
-    throw new Error(`Unknown endpoint: ${endpoint}`);
+    const events = Array.isArray(body.events) ? body.events : [];
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'refinement',
+      contents: [{ text: buildRefinePrompt(memberName, events) }],
+      responseMimeType: 'application/json',
+      clientGeminiKeys,
+    });
+    const parsed = parseRobustJson(text) as { organizedEvents?: unknown[]; refinementNotes?: string[] };
+    return {
+      success: true,
+      organizedTimeline: Array.isArray(parsed.organizedEvents) ? parsed.organizedEvents : events,
+      refinementNotes: Array.isArray(parsed.refinementNotes) ? parsed.refinementNotes : ['Đã chuẩn hóa dữ liệu.'],
+      modelUsed,
+    } as T;
   }
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: promptText,
-    config: { responseMimeType: 'application/json' },
-  });
+  if (endpoint === 'summarize') {
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: buildSummarizePrompt(memberName, body.member, body.profile) }],
+      responseMimeType: 'application/json',
+      responseSchema: SUMMARIZE_RESPONSE_SCHEMA,
+      clientGeminiKeys,
+    });
+    const parsed = parseRobustJson(text) as { summary?: string };
+    return {
+      success: true,
+      summary: parsed.summary || text,
+      modelUsed,
+    } as T;
+  }
 
-  const text = response.text || '{}';
-  const cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-  const parsed = JSON.parse(cleaned);
-  return parsed as T;
+  if (endpoint === 'ask-assistant') {
+    const question = typeof body.question === 'string' ? body.question.trim() : '';
+    const history = normalizeHealthAssistantHistory(body.history);
+    const research = await researchHealthQuestionWithPool(question, memberName, { clientGeminiKeys });
+    const prompt = createHealthAssistantPrompt(
+      question,
+      memberName,
+      body.profile,
+      history,
+      research,
+    );
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: prompt }],
+      systemInstruction: `${HEALTH_ASSISTANT_SYSTEM_INSTRUCTION}\nHãy trả về JSON: {"success": true, "answer": "câu trả lời tiếng Việt chi tiết", "citations": []}.`,
+      responseMimeType: 'application/json',
+      clientGeminiKeys,
+    });
+    const parsed = parseRobustJson(text) as { answer?: string; citations?: unknown };
+    const citations = research.citations.length > 0
+      ? research.citations
+      : normalizeHealthAssistantCitations(parsed.citations);
+    return {
+      success: true,
+      answer: typeof parsed.answer === 'string' && parsed.answer.trim() ? parsed.answer : text,
+      citations,
+      modelUsed,
+    } as T;
+  }
+
+  if (endpoint === 'analyze-comprehensive') {
+    const requestedModel =
+      typeof body.model === 'string' && TASK_MODELS.analysis.includes(body.model as any)
+        ? body.model
+        : TASK_MODELS.analysis[0];
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'analysis',
+      preferredModel: requestedModel,
+      contents: [{ text: buildComprehensiveAnalysisPrompt(memberName, body.member, body.profile) }],
+      responseMimeType: 'application/json',
+      responseSchema: COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
+      clientGeminiKeys,
+    });
+    const parsed = parseRobustJson(text);
+    const normalized = normalizeComprehensiveAnalysisPayload(
+      isRecord(parsed) ? parsed : {},
+      memberName,
+    );
+    return {
+      success: true,
+      ...normalized,
+      modelUsed,
+    } as T;
+  }
+
+  throw new Error(`Unknown endpoint: ${endpoint}`);
 }
 
 async function extractClientSideHealthEvent(
@@ -121,6 +175,7 @@ async function extractClientSideHealthEvent(
   mimeType: string,
   base64Data: string,
   onProgress?: (update: ExtractionProgressUpdate) => void,
+  options?: { isAutoDetect?: boolean },
 ): Promise<{
   extracted: Partial<HealthEvent>;
   modelUsed?: string;
@@ -133,100 +188,195 @@ async function extractClientSideHealthEvent(
   if (keys.length === 0) {
     throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI".');
   }
-  const apiKey = keys[0];
-  const ai = new GoogleGenAI({ apiKey });
-  const modelUsed = 'gemini-3.5-flash-lite (client)';
 
-  onProgress?.({ stage: 'waiting_for_model', progressPercent: 60, message: 'Gemini đang đọc và phân tích tài liệu...', modelUsed });
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash-lite',
-    contents: [
-      {
-        inlineData: {
-          data: base64Data,
-          mimeType,
-        },
-      },
-      {
-        text: `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam. Trích xuất thông tin y tế thành JSON bao gồm: title, date, type, facility, doctorName, physicalExam, diagnoses, medications, metrics, imagingResults, vaccinations, hospitalization, advice, nextFollowUp, notes, patientName, patientBirthDate, patientGender và pageTexts (mỗi phần tử là văn bản đọc được của một trang theo thứ tự). Không suy đoán văn bản không đọc được.`,
-      },
-    ],
-    config: { responseMimeType: 'application/json' },
+  let plannedPages = 1;
+  const result = await runUnifiedHealthDocumentOcr({
+    base64Data,
+    mimeType,
+    fileName: file.name,
+    memberName: member?.name,
+    memberBirthDate: member?.birthDate,
+    isAutoDetect: options?.isAutoDetect ?? false,
+    clientGeminiKeys: keys,
+    interBatchDelayMs: 1_200,
+    onPlanReady: ({ mode, totalPages }) => {
+      plannedPages = totalPages;
+      onProgress?.({
+        stage: 'waiting_for_model',
+        progressPercent: 46,
+        message: mode === 'whole_file'
+          ? `Gemini đang đọc nguyên tài liệu (${totalPages} trang, giữ trọn ngữ cảnh, pool ${keys.length} key)...`
+          : `Gemini đang đọc tài liệu lớn (${totalPages} trang, pool ${keys.length} key)...`,
+        modelUsed: `${TASK_MODELS.digitization[0]} (client)`,
+        totalPages,
+        processedPages: 0,
+      });
+    },
+    onProgress: (statusMessage) => {
+      onProgress?.({
+        stage: 'retrying_model',
+        progressPercent: 52,
+        message: statusMessage,
+        modelUsed: `${TASK_MODELS.digitization[0]} (client)`,
+        totalPages: plannedPages,
+      });
+    },
+    onBatchComplete: ({ completed, totalBatches, extracted: partialMerged, modelUsed, batch, totalPages }) => {
+      onProgress?.({
+        stage: 'extracting_content',
+        progressPercent: Math.min(94, 48 + Math.floor((completed / totalBatches) * 46)),
+        message: totalBatches === 1
+          ? `Gemini (${modelUsed}) đang tổng hợp toàn bộ ${totalPages} trang...`
+          : `Gemini (${modelUsed}) đã xong ${batch.lastPage}/${totalPages} trang...`,
+        modelUsed,
+        totalPages,
+        processedPages: batch.lastPage,
+        partialEvent: normalizeExtractedEvent(partialMerged, file.name),
+      });
+    },
   });
 
-  const rawText = response.text || '{}';
-  let parsed: Record<string, unknown> = {};
-  try {
-    parsed = JSON.parse(rawText.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
-  } catch {
-    parsed = {};
-  }
-
-  const extracted = normalizeExtractedEvent(parsed, file.name);
-  onProgress?.({ stage: 'completed', progressPercent: 100, message: 'Hoàn tất số hóa tài liệu y tế!', modelUsed, partialEvent: extracted });
-  const contentIndexPages = Array.isArray(parsed.pageTexts) &&
-    parsed.pageTexts.length === 1 &&
-    typeof parsed.pageTexts[0] === 'string' &&
-    parsed.pageTexts[0].trim()
-    ? [parsed.pageTexts[0].trim()]
+  const extracted = normalizeExtractedEvent(result.extracted, file.name);
+  const contentIndexPages = Array.isArray(result.extracted.contentIndexPages) &&
+    result.extracted.contentIndexPages.every((page: unknown) => typeof page === 'string')
+    ? (result.extracted.contentIndexPages as string[])
     : [];
+  const contentIndexComplete = result.extracted.contentIndexComplete === true &&
+    contentIndexPages.length === result.totalPages;
+
+  onProgress?.({
+    stage: 'completed',
+    progressPercent: 100,
+    message: 'Hoàn tất số hóa tài liệu y tế!',
+    modelUsed: result.modelUsed,
+    partialEvent: extracted,
+    totalPages: result.totalPages,
+    processedPages: result.processedPages,
+  });
+
   return {
     extracted,
-    modelUsed,
-    totalPages: 1,
-    processedPages: 1,
+    modelUsed: result.modelUsed,
+    totalPages: result.totalPages,
+    processedPages: result.processedPages,
     contentIndexPages,
-    contentIndexComplete: contentIndexPages.length === 1,
+    contentIndexComplete,
   };
 }
 
 async function callGeminiStreamClientSide(
-  endpoint: string,
+  _endpoint: string,
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void,
+  onSources?: (citations: HealthAssistantCitation[]) => void,
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
-  const keys = await getSharedGeminiKeysForRequest();
-  if (keys.length === 0) {
-    throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI".');
-  }
-  const apiKey = keys[0];
-  const ai = new GoogleGenAI({ apiKey });
-  const question = typeof body.question === 'string' ? body.question : '';
-  const member = body.member;
-  const profile = body.profile;
-
-  const promptText = `Bạn là trợ lý y tế gia đình AI bằng tiếng Việt. Câu hỏi: "${question}". Thành viên: ${JSON.stringify(member)}. Hồ sơ: ${JSON.stringify(profile)}. Hãy trả lời chi tiết, chính xác và đồng cảm.`;
-
-  const streamResponse = await ai.models.generateContentStream({
-    model: 'gemini-3.5-flash-lite',
-    contents: promptText,
-  });
-
-  let fullText = '';
-  for await (const chunk of streamResponse) {
-    const text = chunk.text || '';
-    if (text) {
-      fullText += text;
-      onChunk(text);
-    }
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+  if (clientGeminiKeys.length === 0) {
+    throw new Error('Chưa cấu hình Gemini API Key. Vui lòng nhập API key trong mục "Tài nguyên AI" trước khi sử dụng.');
   }
 
-  return { answer: fullText, citations: [] };
+  const question = typeof body.question === 'string' ? body.question.trim() : '';
+  const memberObj = isRecord(body.member) ? body.member : undefined;
+  const memberName = typeof memberObj?.name === 'string' ? memberObj.name.slice(0, 120) : 'Thành viên';
+  const history = normalizeHealthAssistantHistory(body.history);
+  const research = await researchHealthQuestionWithPool(question, memberName, { clientGeminiKeys });
+  const trustedCitations = normalizeHealthAssistantCitations(research.citations);
+  if (trustedCitations.length > 0) {
+    onSources?.(trustedCitations);
+  }
+
+  const prompt = createHealthAssistantPrompt(
+    question,
+    memberName,
+    body.profile,
+    history,
+    research,
+  );
+
+  const { text } = await executeGeminiStreamWithPool(
+    {
+      task: 'assistant',
+      contents: prompt,
+      systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+      clientGeminiKeys,
+    },
+    (chunk) => onChunk(chunk),
+  );
+
+  return { answer: text, citations: trustedCitations };
+}
+
+function isNativeApkRuntime(): boolean {
+  return (
+    Capacitor.isNativePlatform() ||
+    import.meta.env.VITE_APP_MODE === 'apk' ||
+    import.meta.env.VITE_APP_MODE === 'play'
+  );
+}
+
+function isUnreachableBackendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof Error && /failed to fetch|networkerror|load failed|network request failed/i.test(error.message))
+  );
+}
+
+function isFallbackableBackendResponse(response: Response, expectSse = false): boolean {
+  const status = response.status;
+  if (status === 404 || status === 413 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  if (contentType.includes('text/html')) {
+    return true;
+  }
+  if (expectSse && response.ok && !contentType.includes('text/event-stream')) {
+    return true;
+  }
+  return false;
+}
+
+function isNonJsonProxyError(error: unknown): boolean {
+  return error instanceof Error && /trả về (HTML|dữ liệu không phải JSON)/i.test(error.message);
 }
 
 async function callGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const getDuration = digitizationLogger.startTimer();
-  const url = buildApiUrl(`/api/gemini/${endpoint}`);
-  
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+
+  if (isNativeApkRuntime() && clientGeminiKeys.length > 0) {
+    digitizationLogger.log('info', 'api', `Chạy trực tiếp tác vụ ${endpoint} trên APK bằng pool "Tài nguyên AI" (${clientGeminiKeys.length} key).`, { endpoint });
+    const data = await callGeminiClientSide<T>(endpoint, body);
+    const durationMs = getDuration();
+    digitizationLogger.log(
+      'info',
+      'api',
+      `Gemini hoàn tất tác vụ ${endpoint} trực tiếp trên APK (${durationMs}ms).`,
+      { endpoint },
+      durationMs,
+    );
+    return data;
+  }
+
+  let url: string;
+  try {
+    url = buildApiUrl(`/api/gemini/${endpoint}`);
+  } catch (urlError) {
+    if (clientGeminiKeys.length > 0) {
+      digitizationLogger.log('warn', 'api', `Không có backend URL cho ${endpoint}; chạy trực tiếp qua unified pool từ "Tài nguyên AI".`);
+      return await callGeminiClientSide<T>(endpoint, body);
+    }
+    throw urlError;
+  }
+
   digitizationLogger.log('info', 'api', `Gọi Gemini server cho tác vụ ${endpoint}.`, { endpoint });
 
-  const maxRetries = 3;
+  const maxRetries = 2;
   let lastError: unknown;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      let headers: Record<string, string> = {
+      const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
 
@@ -239,22 +389,24 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
         console.warn('[Gemini Service] Could not attach auth token:', e);
       }
 
-      const clientGeminiKeys = await getSharedGeminiKeysForRequest();
-
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({ ...body, clientGeminiKeys }),
       });
 
+      if (clientGeminiKeys.length > 0 && isFallbackableBackendResponse(response, false)) {
+        digitizationLogger.log('warn', 'api', `Backend trả về HTTP ${response.status} ở ${endpoint}; chuyển sang chạy trực tiếp qua unified pool.`);
+        return await callGeminiClientSide<T>(endpoint, body);
+      }
+
       if (!response.ok) {
         const status = response.status;
-        
         if ((status === 502 || status === 503 || status === 504) && attempt < maxRetries - 1) {
-          const backoff = (attempt + 1) * 2000;
+          const backoff = (attempt + 1) * 1500;
           digitizationLogger.log('warn', 'api', `Mã lỗi ${status} từ server ở tác vụ ${endpoint}; thử lại lần ${attempt + 1}/${maxRetries} sau ${backoff}ms...`);
           await response.text();
-          await new Promise((res) => setTimeout(res, backoff));
+          await sleep(backoff);
           continue;
         }
       }
@@ -271,62 +423,51 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       return data;
     } catch (error) {
       lastError = error;
-      const isFetchError =
-        error instanceof TypeError ||
-        (error instanceof Error && /failed to fetch|networkerror|load failed|network request failed/i.test(error.message));
-
-      if (isFetchError && attempt < maxRetries - 1) {
-        const backoff = (attempt + 1) * 2000;
+      if (clientGeminiKeys.length > 0 && (isUnreachableBackendError(error) || isNonJsonProxyError(error))) {
+        try {
+          digitizationLogger.log('warn', 'api', `Backend fallback triggered for ${endpoint}. Falling back to unified client-side execution.`);
+          return await callGeminiClientSide<T>(endpoint, body);
+        } catch (clientErr) {
+          lastError = clientErr;
+          break;
+        }
+      }
+      if (isUnreachableBackendError(error) && attempt < maxRetries - 1 && clientGeminiKeys.length === 0) {
+        const backoff = (attempt + 1) * 1500;
         digitizationLogger.log(
           'warn',
           'api',
           `Kết nối tới Gemini server ở tác vụ ${endpoint} bị gián đoạn (thử lại lần ${attempt + 1}/${maxRetries} sau ${backoff}ms)...`,
           { endpoint, attempt },
         );
-        await new Promise((res) => setTimeout(res, backoff));
+        await sleep(backoff);
         continue;
-      }
-      if (isFetchError) {
-        try {
-          digitizationLogger.log('warn', 'api', `Backend unreachable for ${endpoint}. Falling back to client-side GoogleGenAI execution.`);
-          return await callGeminiClientSide<T>(endpoint, body);
-        } catch (clientErr) {
-          console.warn('[Gemini Client Fallback] Failed:', clientErr);
-        }
       }
       break;
     }
   }
 
-  try {
-    return await callGeminiClientSide<T>(endpoint, body);
-  } catch (clientErr) {
-    const durationMs = getDuration();
-    const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
-    digitizationLogger.log(
-      'error',
-      'api',
-      `Gemini server thất bại ở tác vụ ${endpoint}: ${errorMessage}`,
-      { endpoint },
-      durationMs,
-    );
-    throw lastError instanceof Error ? lastError : new Error(errorMessage);
-  }
+  const durationMs = getDuration();
+  const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
+  digitizationLogger.log(
+    'error',
+    'api',
+    `Gemini thất bại ở tác vụ ${endpoint}: ${errorMessage}`,
+    { endpoint },
+    durationMs,
+  );
+  throw lastError instanceof Error ? lastError : new Error(errorMessage);
 }
 
 // ============================================================================
 // NHÓM NHIỆM VỤ 1: SỐ HÓA, OCR, NHẬN DẠNG TÀI LIỆU, HIỆU CHỈNH & SẮP XẾP DỮ LIỆU
-// Web and native clients send OCR requests through the shared Gemini gateway.
+// Web and native clients share the exact same GeminiQuotaScheduler & prompt engine.
 // ============================================================================
 
-/**
- * Bóc tách một phần JSON đang stream về để hiển thị trực tiếp cho người dùng
- */
 export function extractPartialJson(text: string, fileName?: string): Partial<HealthEvent> {
   const result: Partial<HealthEvent> = {};
   if (!text || typeof text !== 'string') return result;
 
-  // 1. Thử parse JSON hoàn chỉnh nếu khả thi
   try {
     const cleaned = text.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
     const match = cleaned.match(/\{[\s\S]*\}/);
@@ -337,10 +478,9 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
       }
     }
   } catch {
-    // Không parse được toàn bộ, tiếp tục regex trích xuất từng trường
+    // Fallback regex parsing for incomplete streams
   }
 
-  // 2. Trích xuất thông tin người bệnh
   const nameMatch = text.match(/"patientName"\s*:\s*"([^"]+)"/i);
   if (nameMatch) result.patientName = nameMatch[1].trim();
 
@@ -350,7 +490,6 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
   const genderMatch = text.match(/"patientGender"\s*:\s*"([^"]+)"/i);
   if (genderMatch) result.patientGender = genderMatch[1].trim();
 
-  // 3. Cơ sở y tế & Tiêu đề
   const titleMatch = text.match(/"title"\s*:\s*"([^"]+)"/i);
   if (titleMatch) result.title = titleMatch[1].trim();
 
@@ -365,7 +504,6 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
   const dateMatch = text.match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/i);
   if (dateMatch) result.date = dateMatch[1];
 
-  // 4. Chẩn đoán
   const diagMatch = text.match(/"diagnoses"\s*:\s*\[([\s\S]*?)\]/i);
   if (diagMatch) {
     const items = diagMatch[1].match(/"([^"]+)"/g);
@@ -374,7 +512,6 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
     }
   }
 
-  // 5. Đơn thuốc
   const medsMatch = text.match(/"medications"\s*:\s*\[([\s\S]*?)\]/i);
   if (medsMatch) {
     const medBlocks = medsMatch[1].match(/\{[\s\S]*?\}/g);
@@ -400,7 +537,6 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
     }
   }
 
-  // 6. Chỉ số đo sinh tồn
   const metricsMatch = text.match(/"metrics"\s*:\s*\[([\s\S]*?)\]/i);
   if (metricsMatch) {
     const metricBlocks = metricsMatch[1].match(/\{[\s\S]*?\}/g);
@@ -427,7 +563,6 @@ export function extractPartialJson(text: string, fileName?: string): Partial<Hea
     }
   }
 
-  // 7. Lời dặn
   const adviceMatch = text.match(/"advice"\s*:\s*"([^"]+)"/i);
   if (adviceMatch) result.advice = adviceMatch[1].trim();
 
@@ -453,9 +588,25 @@ async function extractServerHealthEvent(
   contentIndexPages: string[];
   contentIndexComplete: boolean;
 }> {
-  const url = buildApiUrl('/api/gemini/extract-health-event');
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
-  let headers: Record<string, string> = {
+  if (isNativeApkRuntime() && clientGeminiKeys.length > 0) {
+    digitizationLogger.log('info', 'api', `Chạy OCR trực tiếp trên APK bằng pool "Tài nguyên AI" (${clientGeminiKeys.length} key).`);
+    return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress, options);
+  }
+
+  let url: string;
+  try {
+    url = buildApiUrl('/api/gemini/extract-health-event');
+  } catch (urlError) {
+    if (clientGeminiKeys.length > 0) {
+      digitizationLogger.log('warn', 'api', 'Không có backend URL cho OCR; chạy trực tiếp qua unified pool từ "Tài nguyên AI".');
+      return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress, options);
+    }
+    throw urlError;
+  }
+
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
 
@@ -467,8 +618,6 @@ async function extractServerHealthEvent(
   } catch (e) {
     console.warn('[Gemini Service] Could not attach auth token for extraction:', e);
   }
-
-  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
 
   let response: Response;
   try {
@@ -486,11 +635,16 @@ async function extractServerHealthEvent(
       }),
     });
   } catch (fetchErr) {
-    if (fetchErr instanceof TypeError || (fetchErr instanceof Error && /failed to fetch|networkerror|load failed/i.test(fetchErr.message))) {
-      digitizationLogger.log('warn', 'api', 'Backend unreachable for OCR. Falling back to client-side GoogleGenAI extraction.');
-      return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress);
+    if (isUnreachableBackendError(fetchErr)) {
+      digitizationLogger.log('warn', 'api', 'Backend unreachable for OCR. Falling back to unified client-side extraction.');
+      return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress, options);
     }
     throw fetchErr;
+  }
+
+  if (clientGeminiKeys.length > 0 && isFallbackableBackendResponse(response, true)) {
+    digitizationLogger.log('warn', 'api', `Backend trả về HTTP ${response.status} khi OCR; chuyển sang OCR trực tiếp bằng unified pool.`);
+    return await extractClientSideHealthEvent(file, member, mimeType, base64Data, onProgress, options);
   }
 
   if (!response.ok) {
@@ -584,9 +738,6 @@ async function extractServerHealthEvent(
   return finalResult;
 }
 
-/**
- * Trích xuất sự kiện y tế từ tệp tài liệu / ảnh chụp kèm theo luồng cập nhật tiến trình và nội dung trực tiếp
- */
 export async function extractHealthEventWithProgress(
   file: File,
   member: FamilyMember,
@@ -616,7 +767,7 @@ export async function extractHealthEventWithProgress(
       stage: 'reading_document',
       progressPercent: 45,
       message: 'Gemini đang đọc tài liệu...',
-      modelUsed: 'gemini-3.5-flash-lite',
+      modelUsed: TASK_MODELS.digitization[0],
     });
     return await extractServerHealthEvent(file, member, mimeType, base64Data, onProgress, getDuration, options);
   } catch (error) {
@@ -636,19 +787,15 @@ export async function extractHealthEventWithProgress(
 
 export async function extractHealthEvent(
   file: File,
-  member: FamilyMember
+  member: FamilyMember,
 ): Promise<Partial<HealthEvent>> {
   const result = await extractHealthEventWithProgress(file, member);
   return result.extracted;
 }
 
-/**
- * Hiệu chỉnh và sắp xếp thông minh toàn bộ dữ liệu thu thập được cho từng thành viên
- * Uses the configured refinement model for web and native requests.
- */
 export async function refineAndOrganizeMemberData(
   member: FamilyMember,
-  events: HealthEvent[]
+  events: HealthEvent[],
 ): Promise<{
   organizedTimeline: HealthEvent[];
   refinementNotes: string[];
@@ -662,7 +809,7 @@ export async function refineAndOrganizeMemberData(
     'info',
     'refine_start',
     `Bắt đầu chuẩn hóa danh pháp y tế tự động cho ${member.name} (${events.length} sự kiện)`,
-    { memberId: member.id, eventCount: events.length }
+    { memberId: member.id, eventCount: events.length },
   );
 
   try {
@@ -683,7 +830,7 @@ export async function refineAndOrganizeMemberData(
       'refine_complete',
       `Chuẩn hóa danh pháp y tế hoàn tất trong ${durationMs}ms (${finalTimeline.length} sự kiện đã xử lý)`,
       { durationMs, organizedCount: finalTimeline.length, notesCount: notes.length },
-      durationMs
+      durationMs,
     );
 
     return {
@@ -697,30 +844,22 @@ export async function refineAndOrganizeMemberData(
       'refine_error',
       `Lỗi khi chuẩn hóa danh pháp y tế: ${error instanceof Error ? error.message : 'Unknown'}`,
       undefined,
-      durationMs
+      durationMs,
     );
     throw error;
   }
 }
 
-// ============================================================================
-// NHÓM NHIỆM VỤ 2: PHÂN TÍCH, ĐÁNH GIÁ TOÀN DIỆN HỒ SƠ Y TẾ & TƯ VẤN LỜI KHUYÊN (DEEP INSIGHT)
-// Comprehensive analysis uses gemini-3.6-flash.
-// ============================================================================
-
-/**
- * Phân tích, đánh giá toàn diện hồ sơ y tế và đưa ra tổng kết tình hình sức khỏe
- */
 export async function summarizeHealthProfile(
   member: FamilyMember,
-  profile: HealthProfile
+  profile: HealthProfile,
 ): Promise<string> {
   const getDuration = digitizationLogger.startTimer();
   digitizationLogger.log(
     'info',
     'summary_start',
     `Bắt đầu tổng kết hồ sơ sức khỏe cho ${member.name} (${profile.timeline.length} sự kiện)`,
-    { memberId: member.id, eventCount: profile.timeline.length }
+    { memberId: member.id, eventCount: profile.timeline.length },
   );
   try {
     const data = await callGemini<{ success: boolean; summary: string }>('summarize', {
@@ -736,7 +875,7 @@ export async function summarizeHealthProfile(
       'summary_complete',
       `Tổng kết hồ sơ sức khỏe hoàn tất trong ${durationMs}ms (${data.summary.length} ký tự)`,
       { durationMs, length: data.summary.length },
-      durationMs
+      durationMs,
     );
     return data.summary.trim();
   } catch (error) {
@@ -746,15 +885,12 @@ export async function summarizeHealthProfile(
       'summary_error',
       `Lỗi tổng kết hồ sơ cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
       undefined,
-      durationMs
+      durationMs,
     );
     throw error;
   }
 }
 
-/**
- * Hỏi đáp tương tác với trợ lý sức khỏe dựa trên toàn bộ hồ sơ y tế
- */
 export async function askHealthAssistant(
   question: string,
   member: FamilyMember,
@@ -795,10 +931,27 @@ async function callGeminiStream(
   endpoint: string,
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void,
+  onSources?: (citations: HealthAssistantCitation[]) => void,
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
-  const url = buildApiUrl(`/api/gemini/${endpoint}`);
-  
-  let headers: Record<string, string> = {
+  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+
+  if (isNativeApkRuntime() && clientGeminiKeys.length > 0) {
+    digitizationLogger.log('info', 'api', `Chạy stream ${endpoint} trực tiếp trên APK bằng pool "Tài nguyên AI" (${clientGeminiKeys.length} key).`);
+    return await callGeminiStreamClientSide(endpoint, body, onChunk, onSources);
+  }
+
+  let url: string;
+  try {
+    url = buildApiUrl(`/api/gemini/${endpoint}`);
+  } catch (urlError) {
+    if (clientGeminiKeys.length > 0) {
+      digitizationLogger.log('warn', 'api', `Không có backend URL cho stream ${endpoint}; chạy trực tiếp qua unified pool từ "Tài nguyên AI".`);
+      return await callGeminiStreamClientSide(endpoint, body, onChunk, onSources);
+    }
+    throw urlError;
+  }
+
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
 
@@ -811,8 +964,6 @@ async function callGeminiStream(
     console.warn('[Gemini Service] Could not attach auth token for stream:', e);
   }
 
-  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
-
   let response: Response;
   try {
     response = await fetch(url, {
@@ -821,11 +972,16 @@ async function callGeminiStream(
       body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
     });
   } catch (fetchErr) {
-    if (fetchErr instanceof TypeError || (fetchErr instanceof Error && /failed to fetch|networkerror|load failed/i.test(fetchErr.message))) {
-      digitizationLogger.log('warn', 'api', 'Backend unreachable for stream. Falling back to client-side GoogleGenAI stream.');
-      return await callGeminiStreamClientSide(endpoint, body, onChunk);
+    if (isUnreachableBackendError(fetchErr)) {
+      digitizationLogger.log('warn', 'api', 'Backend unreachable for stream. Falling back to unified client-side stream.');
+      return await callGeminiStreamClientSide(endpoint, body, onChunk, onSources);
     }
     throw fetchErr;
+  }
+
+  if (clientGeminiKeys.length > 0 && isFallbackableBackendResponse(response, true)) {
+    digitizationLogger.log('warn', 'api', `Backend trả về HTTP ${response.status} cho stream ${endpoint}; chuyển sang stream trực tiếp bằng unified pool.`);
+    return await callGeminiStreamClientSide(endpoint, body, onChunk, onSources);
   }
 
   if (!response.ok) {
@@ -855,7 +1011,7 @@ async function callGeminiStream(
 
     for (const line of lines) {
       if (!line.trim()) continue;
-      
+
       if (line.startsWith('data: ')) {
         const data = line.slice(6);
         if (data === '[DONE]') continue;
@@ -878,6 +1034,9 @@ async function callGeminiStream(
         }
         if (event.type === 'sources') {
           citations = normalizeHealthAssistantCitations(event.citations);
+          if (citations.length > 0) {
+            onSources?.(citations);
+          }
         }
       } else {
         onChunk(line);
@@ -889,30 +1048,28 @@ async function callGeminiStream(
   return { answer: fullText, citations };
 }
 
-/**
- * Hỏi đáp trợ lý sức khỏe với phản hồi truyền phát trực tiếp (Streaming SSE)
- */
 export async function streamHealthAssistant(
   question: string,
   member: FamilyMember,
   profile: HealthProfile,
   onChunk: (chunk: string) => void,
   history: HealthAssistantHistoryMessage[] = [],
+  onSources?: (citations: HealthAssistantCitation[]) => void,
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
-  return callGeminiStream('ask-assistant', { question, member, profile, history }, onChunk);
+  return callGeminiStream('ask-assistant', { question, member, profile, history }, onChunk, onSources);
 }
 
 export async function analyzeComprehensiveHealth(
   member: FamilyMember,
   profile: HealthProfile,
-  model: string = 'gemini-3.6-flash'
+  model: string = 'gemini-4-hydrogen',
 ): Promise<{ result: AiDeepAnalysisResult; aiAnalysis: AiAnalysisBlock; modelUsed?: string }> {
   const getDuration = digitizationLogger.startTimer();
   digitizationLogger.log(
     'info',
     'deep_analysis_start',
     `Bắt đầu phân tích y khoa chuyên sâu 4 lớp (${model}) cho ${member.name} (${profile.timeline.length} sự kiện)`,
-    { memberId: member.id, model, eventCount: profile.timeline.length }
+    { memberId: member.id, model, eventCount: profile.timeline.length },
   );
 
   try {
@@ -956,15 +1113,15 @@ export async function analyzeComprehensiveHealth(
       overviewSummary: result.overallAssessment,
       criticalAlerts: result.roadmap.criticalAlerts,
       chronicConditionsTracking: result.chronicSurveillance.map(
-        (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`
+        (c) => `${c.conditionName}: ${c.comparisonOverTime || c.recommendation}`,
       ),
       actionRoadmap: {
         specialistConsultation: result.roadmap.specialistReferrals.map((s) => s.specialty),
         dietaryModifications: result.roadmap.timeBoundPlan.next3Months.filter((i) =>
-          /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i)
+          /chế độ ăn|kiêng|purin|rượu|nước|dinh dưỡng/i.test(i),
         ),
         followUpSchedule: result.roadmap.timeBoundPlan.next3Months.find((i) =>
-          /tái khám|kiểm tra lại|xét nghiệm/i.test(i)
+          /tái khám|kiểm tra lại|xét nghiệm/i.test(i),
         ) || 'Tái khám kiểm tra lại sau 3 tháng.',
       },
     };
@@ -982,7 +1139,7 @@ export async function analyzeComprehensiveHealth(
         specialistCount: result.roadmap.specialistReferrals.length,
         velocityTrendsCount: result.velocityTrends.length,
       },
-      durationMs
+      durationMs,
     );
 
     return {
@@ -997,29 +1154,35 @@ export async function analyzeComprehensiveHealth(
       'deep_analysis_error',
       `Lỗi phân tích chuyên sâu cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
       undefined,
-      durationMs
+      durationMs,
     );
     throw error;
   }
 }
 
-/**
- * Tải log hệ thống từ server (web only).
- */
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') {
-        reject(new Error('Không thể đọc dữ liệu tệp.'));
-        return;
-      }
-      const base64 = reader.result.split(',')[1] || '';
-      resolve(base64);
-    };
-    reader.onerror = () => reject(new Error('Lỗi khi đọc tệp dữ liệu.'));
-    reader.readAsDataURL(file);
-  });
+async function fileToBase64(file: File): Promise<string> {
+  if (typeof FileReader !== 'undefined') {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result !== 'string') {
+          reject(new Error('Không thể đọc dữ liệu tệp.'));
+          return;
+        }
+        const base64 = reader.result.split(',')[1] || '';
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error('Lỗi khi đọc tệp dữ liệu.'));
+      reader.readAsDataURL(file);
+    });
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function normalizeExtractedEvent(value: Record<string, unknown>, fileName?: string): Partial<HealthEvent> {

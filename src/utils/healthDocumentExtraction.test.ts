@@ -89,4 +89,45 @@ describe('mergeExtractedBatches', () => {
 
     expect(merged.type).toBe('comprehensive_exam');
   });
+
+  it('ignores placeholder patientName/DOB in early batches and recovers name from pageTexts', () => {
+    const mergedFromLaterBatch = mergeExtractedBatches([
+      {
+        firstPage: 1,
+        lastPage: 3,
+        extracted: {
+          patientName: 'Không rõ',
+          patientBirthDate: 'N/A',
+          patientGender: 'Chưa rõ',
+        },
+      },
+      {
+        firstPage: 4,
+        lastPage: 6,
+        extracted: {
+          patientName: 'Ông Trương Anh Tuấn (Nam)',
+          patientBirthDate: '1984-05-10',
+          patientGender: 'Nam',
+        },
+      },
+    ]);
+
+    expect(mergedFromLaterBatch.patientName).toBe('Trương Anh Tuấn');
+    expect(mergedFromLaterBatch.patientBirthDate).toBe('1984-05-10');
+    expect(mergedFromLaterBatch.patientGender).toBe('Nam');
+
+    const recoveredFromText = mergeExtractedBatches([
+      {
+        firstPage: 1,
+        lastPage: 2,
+        extracted: {
+          patientName: 'Bệnh nhân',
+          pageTexts: ['PHIẾU XÉT NGHIỆM\nHọ và tên: Vũ Thị Tú Anh\nTuổi: 38'],
+        },
+      },
+    ]);
+
+    expect(recoveredFromText.patientName).toBe('Vũ Thị Tú Anh');
+  });
 });
+

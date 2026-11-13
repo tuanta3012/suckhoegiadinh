@@ -439,3 +439,115 @@ export function getHealthMetricInfo(standardKey: string): HealthMetricInfo {
     unit: '',
   };
 }
+
+export interface CategorizedHealthMetric {
+  metric: HealthMetric;
+  rangeStatus: HealthMetricRangeStatus;
+  isAbnormal: boolean;
+  index: number;
+}
+
+const EXPLICIT_ABNORMAL_STATUS_RE = /^(?:critical(?:_high|_low)?|warning(?:_high|_low)?|high|low|abnormal|elevated|borderline|out_of_range|positive|cao|thấp|thap|bất\s*thường|bat\s*thuong|vượt\s*ngưỡng|vuot\s*nguong|dương\s*tính|duong\s*tinh|h|l|\+)$/i;
+const EXPLICIT_NORMAL_STATUS_RE = /^(?:normal|ok|within_range|negative|neg|bình\s*thường|binh\s*thuong|âm\s*tính|am\s*tinh|ổn\s*định|on\s*dinh|n)$/i;
+
+function evaluateRefRangeStatus(value: number, refRange?: string): HealthMetricRangeStatus | undefined {
+  if (!refRange || typeof refRange !== 'string') return undefined;
+  const normalized = refRange.trim().replace(/,/g, '.');
+  if (!normalized) return undefined;
+
+  const betweenMatch = normalized.match(/(-?\d+(?:\.\d+)?)\s*(?:-|–|~|to|đến)\s*(-?\d+(?:\.\d+)?)/i);
+  if (betweenMatch) {
+    const min = Number(betweenMatch[1]);
+    const max = Number(betweenMatch[2]);
+    if (Number.isFinite(min) && Number.isFinite(max) && min <= max) {
+      if (value < min) return 'warning_low';
+      if (value > max) return 'warning_high';
+      return 'normal';
+    }
+  }
+
+  const upperMatch = normalized.match(/^(?:<=|<|dưới|nhỏ hơn)\s*(-?\d+(?:\.\d+)?)/i);
+  if (upperMatch) {
+    const max = Number(upperMatch[1]);
+    if (Number.isFinite(max)) {
+      return value > max ? 'warning_high' : 'normal';
+    }
+  }
+
+  const lowerMatch = normalized.match(/^(?:>=|>|trên|lớn hơn)\s*(-?\d+(?:\.\d+)?)/i);
+  if (lowerMatch) {
+    const min = Number(lowerMatch[1]);
+    if (Number.isFinite(min)) {
+      return value < min ? 'warning_low' : 'normal';
+    }
+  }
+
+  return undefined;
+}
+
+export function classifyHealthMetricForDisplay(
+  metric: HealthMetric,
+  gender?: 'male' | 'female' | 'other',
+): { rangeStatus: HealthMetricRangeStatus; isAbnormal: boolean } {
+  const baseStatus = getHealthMetricRangeStatus(metric, gender);
+  if (
+    baseStatus === 'critical_high' ||
+    baseStatus === 'critical_low' ||
+    baseStatus === 'warning_high' ||
+    baseStatus === 'warning_low'
+  ) {
+    return { rangeStatus: baseStatus, isAbnormal: true };
+  }
+  if (baseStatus === 'normal') {
+    return { rangeStatus: 'normal', isAbnormal: false };
+  }
+
+  // Fallback for metrics not in HEALTH_METRIC_INFOS: check declared status or refRange
+  const rawStatus = metric.status?.trim();
+  if (rawStatus) {
+    if (EXPLICIT_ABNORMAL_STATUS_RE.test(rawStatus)) {
+      const inferred: HealthMetricRangeStatus = /low|thấp|thap|^l$/i.test(rawStatus)
+        ? 'warning_low'
+        : /critical/i.test(rawStatus)
+          ? 'critical_high'
+          : 'warning_high';
+      return { rangeStatus: inferred, isAbnormal: true };
+    }
+    if (EXPLICIT_NORMAL_STATUS_RE.test(rawStatus)) {
+      return { rangeStatus: 'normal', isAbnormal: false };
+    }
+  }
+
+  const numericValue = parseMetricValue(metric.value);
+  if (numericValue !== undefined) {
+    const refStatus = evaluateRefRangeStatus(numericValue, metric.refRange);
+    if (refStatus) {
+      return { rangeStatus: refStatus, isAbnormal: refStatus !== 'normal' };
+    }
+  }
+
+  return { rangeStatus: baseStatus, isAbnormal: false };
+}
+
+export function partitionHealthMetricsForDisplay(
+  metrics: HealthMetric[],
+  gender?: 'male' | 'female' | 'other',
+): {
+  abnormal: CategorizedHealthMetric[];
+  normal: CategorizedHealthMetric[];
+} {
+  const abnormal: CategorizedHealthMetric[] = [];
+  const normal: CategorizedHealthMetric[] = [];
+
+  metrics.forEach((metric, index) => {
+    const { rangeStatus, isAbnormal } = classifyHealthMetricForDisplay(metric, gender);
+    const entry: CategorizedHealthMetric = { metric, rangeStatus, isAbnormal, index };
+    if (isAbnormal) {
+      abnormal.push(entry);
+    } else {
+      normal.push(entry);
+    }
+  });
+
+  return { abnormal, normal };
+}

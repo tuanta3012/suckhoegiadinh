@@ -5,6 +5,7 @@ import {
   buildHealthMetricChartData,
   getHealthMetricRangeStatus,
   getHealthMetricStandardKey,
+  partitionHealthMetricsForDisplay,
 } from './healthMetricService';
 
 function makeEvent(
@@ -176,3 +177,31 @@ describe('buildHealthMetricChartData', () => {
     expect(buildHealthMetricChartData(timeline, 'CREATININ')).toEqual([]);
   });
 });
+
+describe('partitionHealthMetricsForDisplay', () => {
+  it('places out-of-range, critical, explicit abnormal, and refRange-violating metrics into abnormal and keeps normal metrics collapsible', () => {
+    const { abnormal, normal } = partitionHealthMetricsForDisplay(
+      [
+        { name: 'Glucose', value: 7.4, unit: 'mmol/L' }, // warning_high
+        { name: 'Creatinin', value: 84, unit: 'µmol/L' }, // normal for male
+        { name: 'TSH', value: 1.9, unit: 'mIU/L' }, // normal
+        { name: 'Vitamin D 25-OH', value: 18, unit: 'ng/mL', refRange: '30 - 100' }, // below refRange
+        { name: 'AFP', value: 4.5, unit: 'ng/mL', refRange: '< 10' }, // within refRange -> normal
+        { name: 'CRP hs', value: 12, unit: 'mg/L', status: 'Cao' }, // explicit abnormal status
+      ],
+      'male',
+    );
+
+    expect(abnormal.map((item) => item.metric.name)).toEqual([
+      'Glucose',
+      'Vitamin D 25-OH',
+      'CRP hs',
+    ]);
+    expect(normal.map((item) => item.metric.name)).toEqual([
+      'Creatinin',
+      'TSH',
+      'AFP',
+    ]);
+  });
+});
+

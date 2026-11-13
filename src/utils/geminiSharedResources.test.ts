@@ -1,4 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Capacitor } from '@capacitor/core';
+
+const { generateContentMock } = vi.hoisted(() => ({
+  generateContentMock: vi.fn(),
+}));
+
+vi.mock('@google/genai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@google/genai')>();
+  return {
+    ...actual,
+    GoogleGenAI: class {
+      apiKey: string;
+      models: { generateContent: (args: unknown) => Promise<unknown> };
+      constructor(opts: { apiKey: string }) {
+        this.apiKey = opts.apiKey;
+        this.models = {
+          generateContent: (args: unknown) => generateContentMock(this.apiKey, args),
+        };
+      }
+    },
+  };
+});
+
 import {
   getSharedGeminiKeys,
   getSharedGeminiKeysForRequest,
@@ -13,11 +36,14 @@ describe('shared Gemini resources', () => {
 
   beforeEach(() => {
     setSharedGeminiKeys([]);
+    generateContentMock.mockReset();
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('parses comma- and newline-separated keys, trims, and removes duplicates', () => {
@@ -45,7 +71,7 @@ describe('shared Gemini resources', () => {
     await expect(getSharedGeminiKeysForRequest()).resolves.toEqual(['drive-key']);
   });
 
-  it('validates API keys through the server proxy', async () => {
+  it('validates API keys through the server proxy on Web', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       valid: true,
       workingModel: 'gemini-3.5-flash-lite',
@@ -67,5 +93,28 @@ describe('shared Gemini resources', () => {
     }), { status: 400 }));
 
     await expect(testGeminiApiKey('bad-key')).rejects.toThrow('Invalid API key');
+  });
+
+  it('validates API keys directly against GoogleGenAI on native APK without backend proxy fetch', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://stale-backend.example.com');
+    globalThis.fetch = vi.fn();
+    generateContentMock.mockResolvedValueOnce({ text: 'OK' });
+
+    const result = await testGeminiApiKey('AIzaSy-apk-valid-key');
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ valid: true, workingModel: 'gemini-3.5-flash-lite' });
+  });
+
+  it('throws an explicit error on native APK when direct key validation fails', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://stale-backend.example.com');
+    globalThis.fetch = vi.fn();
+    generateContentMock.mockRejectedValueOnce({ status: 403, message: 'API_KEY_INVALID' });
+
+    await expect(testGeminiApiKey('bad-apk-key')).rejects.toThrow('API Key không hợp lệ');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

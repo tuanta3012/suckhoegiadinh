@@ -8,6 +8,10 @@ export interface PdfPageBatch {
 
 export class PdfPageBatchError extends Error {}
 
+export const WHOLE_PDF_MAX_PAGES = 30;
+export const WHOLE_PDF_MAX_BASE64_CHARS = 18 * 1024 * 1024; // ~13.5 MB binary, safely under Gemini's 20 MB inline payload cap
+export const FALLBACK_MAX_BATCH_PAGES = 10;
+
 function base64ToUint8Array(base64: string): Uint8Array {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -48,7 +52,7 @@ export async function getPdfPageCount(base64OrArrayBuffer: string | ArrayBuffer)
 export async function splitPdfIntoBatches(
   base64Data: string,
   batchPages = 6,
-  maximumPages = 60,
+  maximumPages = 100,
 ): Promise<PdfPageBatch[]> {
   if (!Number.isInteger(batchPages) || batchPages < 1) {
     throw new Error('PDF batch size must be a positive integer.');
@@ -94,4 +98,80 @@ export async function splitPdfIntoBatches(
     });
   }
   return batches;
+}
+
+/**
+ * Kế hoạch OCR PDF ưu tiên truyền NGUYÊN FILE (whole-PDF) để giữ toàn bộ ngữ cảnh xuyên trang
+ * (tên bệnh nhân, ngày khám, chẩn đoán, chỉ số, kết luận cuối sổ).
+ * Chỉ tự động chia thành số chunk tối thiểu nếu vượt ngưỡng payload/trang của Gemini inlineData.
+ */
+export async function planPdfOcrBatches(
+  base64Data: string,
+  options: {
+    maximumPages?: number;
+    wholePdfMaxPages?: number;
+    wholePdfMaxBase64Chars?: number;
+  } = {},
+): Promise<{
+  mode: 'whole_file' | 'chunked';
+  totalPages: number;
+  batches: PdfPageBatch[];
+}> {
+  const maximumPages = options.maximumPages ?? 100;
+  const wholePdfMaxPages = options.wholePdfMaxPages ?? WHOLE_PDF_MAX_PAGES;
+  const wholePdfMaxBase64Chars = options.wholePdfMaxBase64Chars ?? WHOLE_PDF_MAX_BASE64_CHARS;
+
+  let source: PDFDocument;
+  try {
+    source = await PDFDocument.load(base64ToUint8Array(base64Data), { ignoreEncryption: true });
+  } catch (error) {
+    console.error('[PDF Plan Error]:', error);
+    throw new PdfPageBatchError('Không đọc được PDF. Tệp có thể bị hỏng hoặc được bảo vệ mật khẩu nâng cao.', { cause: error });
+  }
+
+  const pageCount = source.getPageCount();
+  if (pageCount === 0) throw new PdfPageBatchError('PDF không có trang để số hóa.');
+  if (pageCount > maximumPages) {
+    throw new PdfPageBatchError(`PDF có hơn ${maximumPages} trang; hãy chia tài liệu thành các tệp nhỏ hơn trước khi tải lên.`);
+  }
+
+  if (pageCount <= wholePdfMaxPages && base64Data.length <= wholePdfMaxBase64Chars) {
+    console.info(`[OCR] PDF ${pageCount} pages (${(base64Data.length / 1024 / 1024).toFixed(2)} MB b64): sending WHOLE PDF for full cross-page context.`);
+    return {
+      mode: 'whole_file',
+      totalPages: pageCount,
+      batches: [{
+        firstPage: 1,
+        lastPage: pageCount,
+        base64Data,
+      }],
+    };
+  }
+
+  // Oversized PDF: split into the minimum number of context-preserving chunks that stay comfortably under the inline limit.
+  const minChunksBySize = Math.max(1, Math.ceil(base64Data.length / (wholePdfMaxBase64Chars * 0.75)));
+  const minChunksByPages = Math.max(1, Math.ceil(pageCount / FALLBACK_MAX_BATCH_PAGES));
+  const chunkCount = Math.max(2, minChunksBySize, minChunksByPages);
+  const optimalBatchPages = Math.max(2, Math.ceil(pageCount / chunkCount));
+  console.info(`[OCR] PDF ${pageCount} pages exceeds whole-PDF inline threshold; splitting into ~${optimalBatchPages}-page context chunks.`);
+  const batches = await splitPdfIntoBatches(base64Data, optimalBatchPages, maximumPages);
+  return {
+    mode: 'chunked',
+    totalPages: pageCount,
+    batches,
+  };
+}
+
+export function shouldFallbackToBatchedPdfOcr(error: unknown, totalPages: number): boolean {
+  if (totalPages <= 1) return false;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const status =
+    typeof error === 'object' && error !== null
+      ? Number((error as Record<string, unknown>).status ?? (error as Record<string, unknown>).code ?? 0)
+      : 0;
+  return (
+    status === 413 ||
+    status === 504 ||
+    /payload|too large|request size|DEADLINE_EXCEEDED|deadline|timeout|timed out|token|truncated|JSON|unterminated|unexpected end/i.test(message)
+  );
 }

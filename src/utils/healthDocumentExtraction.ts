@@ -1,6 +1,12 @@
 import { normalizeModalityKey } from './deduplicationService';
 import { standardizeMetricKey } from './healthRecordService';
 import { classifyHealthEventType } from './healthEventType';
+import {
+  extractPatientNameFallbackFromText,
+  isRecognizablePatientName,
+  sanitizeOcrPatientName,
+} from './ocrSubjectRouting';
+import { normalizeVietnamese } from './formatters';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -310,6 +316,45 @@ export function resolveConsensusDate(
   return bestDate;
 }
 
+function isPlaceholderFieldValue(value: unknown): boolean {
+  if (typeof value !== 'string') return true;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  const normalized = normalizeVietnamese(trimmed);
+  return (
+    !normalized ||
+    ['na', 'n a', 'unknown', 'khong ro', 'chua ro', 'khong co', 'null', 'undefined'].includes(normalized)
+  );
+}
+
+function resolveConsensusPatientName(values: JsonRecord[]): string | undefined {
+  const counts = new Map<string, { count: number; bestDisplay: string }>();
+  for (const value of values) {
+    if (typeof value.patientName !== 'string') continue;
+    if (!isRecognizablePatientName(value.patientName)) continue;
+    const sanitized = sanitizeOcrPatientName(value.patientName);
+    const key = normalizeVietnamese(sanitized);
+    if (!key) continue;
+    const existing = counts.get(key);
+    if (!existing) {
+      counts.set(key, { count: 1, bestDisplay: sanitized });
+    } else {
+      existing.count += 1;
+      // Prefer properly accented / longer Vietnamese display form
+      if (sanitized.length > existing.bestDisplay.length || (/[À-ỹ]/.test(sanitized) && !/[À-ỹ]/.test(existing.bestDisplay))) {
+        existing.bestDisplay = sanitized;
+      }
+    }
+  }
+  let best: { count: number; bestDisplay: string } | undefined;
+  for (const entry of counts.values()) {
+    if (!best || entry.count > best.count) {
+      best = entry;
+    }
+  }
+  return best?.bestDisplay;
+}
+
 export function mergeExtractedBatches(
   batches: ExtractedPageBatch[],
   preferredYear?: string,
@@ -318,9 +363,15 @@ export function mergeExtractedBatches(
   const values = batches.map(({ extracted }) => cleanExtractedJson(extracted));
   const merged: JsonRecord = {};
   const contentPages: string[] = [];
+  const rawCollectedPageTexts: string[] = [];
   let contentIndexComplete = batches.length > 0;
   for (const [index, batch] of batches.entries()) {
     const extractedPages = values[index].pageTexts;
+    if (Array.isArray(extractedPages)) {
+      for (const page of extractedPages) {
+        if (typeof page === 'string' && page.trim()) rawCollectedPageTexts.push(page.trim());
+      }
+    }
     const expectedPages = batch.lastPage - batch.firstPage + 1;
     if (
       !Array.isArray(extractedPages) ||
@@ -337,7 +388,6 @@ export function mergeExtractedBatches(
   for (const key of [
     'title',
     'type',
-    'patientName',
     'patientBirthDate',
     'patientGender',
     'facility',
@@ -345,8 +395,13 @@ export function mergeExtractedBatches(
     'customCategory',
     'nextFollowUp',
   ]) {
-    const entry = values.find((value) => typeof value[key] === 'string' && Boolean((value[key] as string).trim()));
+    const entry = values.find((value) => !isPlaceholderFieldValue(value[key]));
     if (entry) merged[key] = entry[key];
+  }
+
+  const consensusPatientName = resolveConsensusPatientName(values);
+  if (consensusPatientName) {
+    merged.patientName = consensusPatientName;
   }
 
   const patientBirthDate = merged.patientBirthDate as string | undefined;
@@ -380,7 +435,7 @@ export function mergeExtractedBatches(
     merged.extractedData = mergedExtractedData;
   }
 
-  const notes = batches.map(({ firstPage, lastPage }, index) => {
+  const notes = batches.map((_batch, index) => {
     const note = typeof values[index].notes === 'string' ? values[index].notes.trim() : '';
     return note && !note.includes('Có dữ liệu được trích xuất') ? note : '';
   }).filter(Boolean);
@@ -391,6 +446,14 @@ export function mergeExtractedBatches(
     .filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
     .map((item) => item.trim())));
   if (advice.length) merged.advice = advice.join('\n');
+
+  if (!merged.patientName) {
+    const fallbackPatientName = extractPatientNameFallbackFromText(merged, rawCollectedPageTexts);
+    if (fallbackPatientName) {
+      merged.patientName = fallbackPatientName;
+    }
+  }
+
   const cleaned = cleanExtractedJson(merged);
   const classifiedType = classifyHealthEventType(cleaned, fileName);
   if (classifiedType) cleaned.type = classifiedType;
