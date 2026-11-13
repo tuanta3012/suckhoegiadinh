@@ -1655,21 +1655,26 @@ export function HealthDashboard({
   const selectedProfile = selectedMember ? profiles[selectedMember.id] : null;
   const trackerMember =
     members.find((member) => member.id === trackerState.memberId) || selectedMember;
-  // Extract all available vital metrics from selected member's timeline
+  // Extract vital metrics from timeline containing abnormal measurements
   const metricOptions = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
     const keys = new Set<string>();
+    const gender = selectedMember?.gender;
     for (const event of selectedProfile.timeline) {
       for (const m of event.metrics) {
         const key = getHealthMetricStandardKey(m);
-        if (key) keys.add(key);
+        if (!key) continue;
+        const status = getHealthMetricRangeStatus(m, gender);
+        if (status !== 'normal' && status !== 'unknown') {
+          keys.add(key);
+        }
       }
     }
     return Array.from(keys).map((key) => ({
       key,
       label: getHealthMetricDisplayName(key),
     }));
-  }, [selectedProfile]);
+  }, [selectedProfile, selectedMember?.gender]);
   useEffect(() => {
     if (metricOptions.length > 0 && !metricOptions.some(({ key }) => key === selectedMetric)) {
       setSelectedMetric(metricOptions[0].key);
@@ -5901,7 +5906,7 @@ export function HealthDashboard({
                               </span>
                               {metricInfo.normalRangeText && !metricInfo.normalRangeText.includes('Tham khảo') ? (
                                 <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-800 shadow-2xs border border-emerald-200 shrink-0">
-                                  🛡️ Khoảng an toàn: {metricInfo.normalRangeText}
+                                  🛡️ {metricInfo.normalRangeText}
                                 </span>
                               ) : null}
                             </div>
@@ -7879,27 +7884,24 @@ function UploadMemberPickerModal({
               <button
                 key={member.id}
                 onClick={() => onSelect(member.id)}
-                className="flex items-center gap-3 p-3 rounded-2xl border border-slate-100 bg-white hover:border-emerald-200 hover:bg-emerald-50 transition-all text-left group"
+                className="flex items-center justify-between gap-3 p-3 rounded-2xl border border-slate-100 bg-white hover:border-emerald-200 hover:bg-emerald-50 transition-all text-left group"
               >
-                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold group-hover:scale-105 transition-transform">
-                  {member.name.charAt(0).toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-bold text-slate-800 text-sm">{member.name}</span>
-                    <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
-                      memberRole === 'Admin'
-                        ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-slate-100 text-slate-600'
-                    }`}>
-                      {memberRole}
-                    </span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold shrink-0 group-hover:scale-105 transition-transform text-xs">
+                    {member.name.charAt(0).toUpperCase()}
                   </div>
-                  <div className="text-[10px] text-slate-400 font-medium">
+                  <span className="font-bold text-slate-800 text-sm truncate">{member.name}</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                    memberRole === 'Admin'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}>
                     {memberRole}
-                  </div>
+                  </span>
+                  <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all" />
                 </div>
-                <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all" />
               </button>
               );
             })}
