@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { X } from 'lucide-react';
 import type { FamilyMember } from '../types';
 import { DatePickerVN } from './DatePickerVN';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 export type EditableFamilyMember = Pick<
   FamilyMember,
@@ -34,6 +35,15 @@ export function MemberEditModal({
   const [email, setEmail] = useState(member.email || '');
   const [birthDate, setBirthDate] = useState(toDateInputValue(member.birthDate));
   const [gender, setGender] = useState<NonNullable<FamilyMember['gender']>>(member.gender || 'other');
+
+  useBackHandler(
+    true,
+    () => {
+      if (!isSaving) onClose();
+      return true;
+    },
+    BackPriority.TOP_MODAL,
+  );
 
   return (
     <div

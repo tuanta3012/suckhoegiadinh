@@ -51,6 +51,7 @@ import {
   ChevronRight,
   X,
 } from 'lucide-react';
+import { App as CapacitorApp } from '@capacitor/app';
 import { CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import { Camera as CapacitorCamera } from '@capacitor/camera';
@@ -214,7 +215,16 @@ import {
   setupBackgroundAppResumeListener,
 } from '../utils/backgroundNotificationService';
 import { getFollowUpRemindersForSignedInMember } from '../utils/followUpReminders';
+import {
+  BackPriority,
+  dispatchBackAction,
+  evaluateHorizontalGesture,
+  hasActiveBackHandlers,
+  shouldIgnoreHorizontalSwipeStart,
+  useBackHandler,
+} from '../utils/backNavigation';
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
+const DASHBOARD_TAB_ORDER: DashboardTab[] = ['overview', 'timeline', 'assistant', 'family'];
 interface HealthDashboardProps {
   userEmail: string | null;
   userName?: string | null;
@@ -443,7 +453,40 @@ export function HealthDashboard({
   showToast,
 }: HealthDashboardProps) {
   const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
-  const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
+  const [activeTab, setActiveTabRaw] = useState<DashboardTab>('overview');
+  const activeTabRef = useRef<DashboardTab>('overview');
+  activeTabRef.current = activeTab;
+  const tabHistoryRef = useRef<DashboardTab[]>([]);
+  const [tabSlideClass, setTabSlideClass] = useState<string>('animate-in fade-in duration-150');
+  const setActiveTab = useCallback(
+    (nextTab: DashboardTab, options?: { fromBack?: boolean; direction?: 'left' | 'right' }) => {
+      const prevTab = activeTabRef.current;
+      if (prevTab === nextTab) return;
+
+      const prevIdx = DASHBOARD_TAB_ORDER.indexOf(prevTab);
+      const nextIdx = DASHBOARD_TAB_ORDER.indexOf(nextTab);
+      const direction = options?.direction ?? (nextIdx >= prevIdx ? 'left' : 'right');
+      setTabSlideClass(direction === 'left' ? 'tab-slide-from-right' : 'tab-slide-from-left');
+
+      if (options?.fromBack) {
+        if (nextTab === 'overview') {
+          tabHistoryRef.current = [];
+        }
+      } else if (nextTab === 'overview') {
+        tabHistoryRef.current = [];
+      } else {
+        const history = tabHistoryRef.current;
+        if (history[history.length - 1] !== prevTab) {
+          history.push(prevTab);
+          if (history.length > 8) history.shift();
+        }
+      }
+
+      activeTabRef.current = nextTab;
+      setActiveTabRaw(nextTab);
+    },
+    [],
+  );
   const [rootIdInput, setRootIdInput] = useState('');
   const [workspace, setWorkspace] = useState<HealthDriveWorkspace>(offlineStartup.workspace);
   const hasRemoteWorkspace = workspace.rootFolderId !== 'local_offline_workspace';
@@ -553,6 +596,119 @@ export function HealthDashboard({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
   const [showQuickActionModal, setShowQuickActionModal] = useState(false);
+
+  const mainContentRef = useRef<HTMLElement | null>(null);
+  const swipeTouchStartRef = useRef<{
+    x: number;
+    y: number;
+    time: number;
+    ignoreTabSwipe: boolean;
+  } | null>(null);
+  const lastRootBackPressAtRef = useRef<number>(0);
+  const lastBackHandledAtRef = useRef<number>(0);
+
+  useBackHandler(
+    showMemberDropdown,
+    () => {
+      setShowMemberDropdown(false);
+      return true;
+    },
+    BackPriority.DROPDOWN,
+  );
+  useBackHandler(
+    showSettingsDropdown,
+    () => {
+      setShowSettingsDropdown(false);
+      return true;
+    },
+    BackPriority.DROPDOWN,
+  );
+  useBackHandler(
+    showQuickActionModal,
+    () => {
+      setShowQuickActionModal(false);
+      pickedMemberIdForBatchRef.current = undefined;
+      return true;
+    },
+    BackPriority.SHEET,
+  );
+  useBackHandler(
+    Boolean(workspace) && activeTab !== 'overview',
+    () => {
+      const prevTab = tabHistoryRef.current.pop();
+      const targetTab = prevTab && prevTab !== activeTabRef.current ? prevTab : 'overview';
+      setActiveTab(targetTab, { fromBack: true, direction: 'right' });
+      return true;
+    },
+    BackPriority.TAB,
+  );
+
+  const handleBackNavigation = useCallback(() => {
+    const now = Date.now();
+    if (now - lastBackHandledAtRef.current < 180) return;
+    lastBackHandledAtRef.current = now;
+
+    if (dispatchBackAction()) {
+      lastRootBackPressAtRef.current = 0;
+      return;
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      const isBusy = isUploadingRef.current || Boolean(queueStatusRef.current);
+      if (now - lastRootBackPressAtRef.current <= 2000) {
+        lastRootBackPressAtRef.current = 0;
+        if (isBusy) {
+          void CapacitorApp.minimizeApp().catch(() => {});
+        } else {
+          void CapacitorApp.exitApp().catch(() => {});
+        }
+        return;
+      }
+      lastRootBackPressAtRef.current = now;
+      showToast(
+        isBusy
+          ? 'Đang xử lý tài liệu — nhấn Back lần nữa để thu nhỏ'
+          : 'Nhấn Back lần nữa để thoát ứng dụng',
+        'info',
+      );
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        if (dispatchBackAction()) {
+          event.preventDefault();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
+    let backListenerHandle: { remove: () => Promise<void> } | null = null;
+    let disposed = false;
+
+    if (Capacitor.isNativePlatform()) {
+      void CapacitorApp.addListener('backButton', () => {
+        handleBackNavigation();
+      })
+        .then((handle) => {
+          if (disposed) {
+            void handle.remove();
+          } else {
+            backListenerHandle = handle;
+          }
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('keydown', handleKeyDown);
+      if (backListenerHandle) {
+        void backListenerHandle.remove();
+      }
+    };
+  }, [handleBackNavigation]);
   const [showWorkspaceAuditModal, setShowWorkspaceAuditModal] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
@@ -4937,8 +5093,64 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
+  const handleRootTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length !== 1) {
+      swipeTouchStartRef.current = null;
+      return;
+    }
+    const touch = event.touches[0];
+    swipeTouchStartRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      time: Date.now(),
+      ignoreTabSwipe: shouldIgnoreHorizontalSwipeStart(event.target, mainContentRef.current),
+    };
+  };
+
+  const handleRootTouchEnd = (event: React.TouchEvent<HTMLDivElement>) => {
+    const start = swipeTouchStartRef.current;
+    swipeTouchStartRef.current = null;
+    if (!start || event.changedTouches.length !== 1) return;
+
+    const touch = event.changedTouches[0];
+    const hasBlockingOverlay = hasActiveBackHandlers(BackPriority.SHEET);
+    const outcome = evaluateHorizontalGesture({
+      startX: start.x,
+      startY: start.y,
+      endX: touch.clientX,
+      endY: touch.clientY,
+      durationMs: Date.now() - start.time,
+      viewportWidth: typeof window !== 'undefined' ? window.innerWidth : 0,
+      allowTabSwipe: Boolean(workspace) && !hasBlockingOverlay,
+      ignoredByTarget: start.ignoreTabSwipe,
+    });
+
+    if (outcome === 'edge_back') {
+      handleBackNavigation();
+      return;
+    }
+
+    if (outcome === 'swipe_next_tab' || outcome === 'swipe_prev_tab') {
+      const currentIdx = DASHBOARD_TAB_ORDER.indexOf(activeTabRef.current);
+      if (currentIdx === -1) return;
+      const nextIdx = outcome === 'swipe_next_tab' ? currentIdx + 1 : currentIdx - 1;
+      if (nextIdx >= 0 && nextIdx < DASHBOARD_TAB_ORDER.length) {
+        setActiveTab(DASHBOARD_TAB_ORDER[nextIdx], {
+          direction: outcome === 'swipe_next_tab' ? 'left' : 'right',
+        });
+      }
+    }
+  };
+
   return (
-    <div className="h-[100dvh] min-h-0 overflow-hidden bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
+    <div
+      onTouchStart={handleRootTouchStart}
+      onTouchEnd={handleRootTouchEnd}
+      onTouchCancel={() => {
+        swipeTouchStartRef.current = null;
+      }}
+      className="h-[100dvh] min-h-0 overflow-hidden bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900"
+    >
       {/* 1. TOP BAR CONTRACT: One row, clean zones, thumb-friendly safe area */}
       <header className="sticky top-0 z-30 shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 safe-area-header shadow-xs">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
@@ -5229,9 +5441,11 @@ export function HealthDashboard({
         </div>
       </header>
       {/* Main Content Area */}
-      <main className={activeTab === 'assistant'
-        ? 'flex-1 min-h-0 max-w-6xl w-full mx-auto px-3 sm:px-4 pt-2 sm:pt-3 assistant-viewport-content overflow-hidden flex flex-col'
-        : 'flex-1 min-h-0 overflow-y-auto overscroll-y-contain max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))]'}>
+      <main
+        ref={mainContentRef}
+        className={activeTab === 'assistant'
+          ? 'flex-1 min-h-0 max-w-6xl w-full mx-auto px-3 sm:px-4 pt-2 sm:pt-3 assistant-viewport-content overflow-hidden flex flex-col'
+          : 'flex-1 min-h-0 overflow-y-auto overscroll-y-contain max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))]'}>
         {errorMessage && (() => {
           const isDriveApiDisabled =
             errorMessage.includes('drive.googleapis.com') ||
@@ -5466,7 +5680,7 @@ export function HealthDashboard({
           <>
             {/* VIEW 1: TỔNG QUAN (OVERVIEW) */}
             {activeTab === 'overview' && (
-              <div className="space-y-6 animate-in fade-in duration-150">
+              <div className={`space-y-6 ${tabSlideClass}`}>
                 {/* Empty Local Data Guidance Card */}
                 {totalTimelineEvents === 0 && (
                   <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs text-center animate-in fade-in zoom-in-95 duration-200">
@@ -5747,7 +5961,7 @@ export function HealthDashboard({
             )}
             {/* VIEW 2: HỒ SƠ Y TẾ (TIMELINE & VITALS) */}
             {activeTab === 'timeline' && (
-              <div className="space-y-6 animate-in fade-in duration-150">
+              <div className={`space-y-6 ${tabSlideClass}`}>
                 {/* Active Member Bar & Action CTAs */}
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
                   <div className="flex items-center gap-3">
@@ -6219,7 +6433,7 @@ export function HealthDashboard({
             )}
             {/* VIEW 3: TRỢ LÝ AI (HEALTH CHAT ASSISTANT) */}
             {activeTab === 'assistant' && (
-              <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl md:max-w-3xl flex-col gap-2.5 animate-in fade-in duration-150">
+              <div className={`mx-auto flex h-full min-h-0 w-full max-w-2xl md:max-w-3xl flex-col gap-2.5 ${tabSlideClass}`}>
                 <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/80 bg-white px-3 py-2.5 shadow-xs">
                   <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white shadow-sm">
                     <Bot className="h-5 w-5" />
@@ -6366,7 +6580,7 @@ export function HealthDashboard({
             )}
             {/* VIEW 4: GIA ĐÌNH (FAMILY MEMBERS) */}
             {activeTab === 'family' && (
-              <div className="max-w-3xl mx-auto space-y-4 animate-in fade-in duration-150">
+              <div className={`max-w-3xl mx-auto space-y-4 ${tabSlideClass}`}>
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-6 shadow-xs">
                   <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                     <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
@@ -7173,6 +7387,14 @@ function DigitizationReviewModal({
   onClose,
   onSave,
 }: DigitizationModalProps) {
+  useBackHandler(
+    true,
+    () => {
+      onClose();
+      return true;
+    },
+    BackPriority.MODAL,
+  );
   const extracted = draft.extracted;
   const [targetMemberId, setTargetMemberId] = useState(() =>
     findBestMemberMatch(extracted, members, selectedMemberId)
@@ -7611,6 +7833,14 @@ function UploadMemberPickerModal({
 }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState('');
+  useBackHandler(
+    isOpen,
+    () => {
+      onClose();
+      return true;
+    },
+    BackPriority.MODAL,
+  );
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">

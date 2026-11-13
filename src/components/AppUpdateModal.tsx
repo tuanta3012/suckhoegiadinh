@@ -4,6 +4,7 @@ import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { FileOpener } from '@capacitor-community/file-opener';
 import { Share } from '@capacitor/share';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 export interface AppUpdateInfo {
   version: string;
@@ -30,6 +31,15 @@ export const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
+
+  useBackHandler(
+    isOpen && Boolean(updateInfo),
+    () => {
+      if (!isDownloading) onClose();
+      return true;
+    },
+    BackPriority.TOP_MODAL,
+  );
 
   if (!isOpen || !updateInfo) return null;
 

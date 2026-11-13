@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 export interface SelectOption<T = string | number> {
   value: T;
@@ -31,6 +32,11 @@ export function CustomSelect<T = string | number>({
 }: CustomSelectProps<T>) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useBackHandler(isOpen, () => {
+    setIsOpen(false);
+    return true;
+  }, BackPriority.DROPDOWN);
 
   const selectedOption = options.find((opt) => opt.value === value);
 

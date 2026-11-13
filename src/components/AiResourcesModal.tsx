@@ -9,6 +9,7 @@ import {
   setSharedGeminiKeys,
   testGeminiApiKey,
 } from '../utils/geminiSharedResources';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 interface AiResourcesModalProps {
   isOpen: boolean;
@@ -52,6 +53,15 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
       active = false;
     };
   }, [canEdit, folderId, isOpen]);
+
+  useBackHandler(
+    isOpen,
+    () => {
+      if (!isTesting) onClose();
+      return true;
+    },
+    BackPriority.TOP_MODAL,
+  );
 
   if (!isOpen) return null;
 

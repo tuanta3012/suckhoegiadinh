@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { FamilyMember, HealthEvent } from '../types';
 import type { DriveFile } from '../utils/healthDriveService';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 export type TrackerStep =
   | 'uploading_drive'
@@ -89,6 +90,15 @@ export function DigitizationProgressTrackerModal({
     }, 1000);
     return () => clearInterval(timer);
   }, [isOpen, step]);
+
+  useBackHandler(
+    isOpen && Boolean(file),
+    () => {
+      onClose();
+      return true;
+    },
+    BackPriority.MODAL,
+  );
 
   if (!isOpen || !file) return null;
 

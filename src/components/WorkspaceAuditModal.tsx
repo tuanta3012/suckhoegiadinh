@@ -19,6 +19,7 @@ import {
   restoreTrashedDriveFile,
   trashDriveFile,
 } from '../utils/healthDriveService';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 interface WorkspaceAuditModalProps {
   isOpen: boolean;
@@ -46,6 +47,19 @@ export function WorkspaceAuditModal({
 
   const [isResetting, setIsResetting] = useState(false);
   const [isConfirmingReset, setIsConfirmingReset] = useState(false);
+
+  useBackHandler(
+    isOpen,
+    () => {
+      if (isConfirmingReset && !isResetting) {
+        setIsConfirmingReset(false);
+        return true;
+      }
+      if (!isCleaning && !isResetting) onClose();
+      return true;
+    },
+    BackPriority.MODAL,
+  );
 
   if (!isOpen) return null;
 

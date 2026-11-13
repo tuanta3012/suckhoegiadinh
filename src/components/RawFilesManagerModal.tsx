@@ -20,6 +20,7 @@ import { downloadDriveFile, type HealthDriveWorkspace } from '../utils/healthDri
 import { fileFromLocalSource } from '../utils/localSyncOutbox';
 import { formatDateVN } from '../utils/formatters';
 import type { OcrRecoveryJob } from '../utils/ocrRecoveryStorage';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 interface RawFilesManagerModalProps {
   isOpen: boolean;
@@ -226,6 +227,15 @@ export function RawFilesManagerModal({
     }
     return memberScopedEntries;
   }, [memberScopedEntries, statusFilter]);
+
+  useBackHandler(
+    isOpen && Boolean(workspace),
+    () => {
+      if (!processingId && !viewingId) onClose();
+      return true;
+    },
+    BackPriority.MODAL,
+  );
 
   if (!isOpen || !workspace) return null;
 

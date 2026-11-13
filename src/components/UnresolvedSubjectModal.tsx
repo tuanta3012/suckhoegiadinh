@@ -3,6 +3,7 @@ import { FileText, UserCheck, UserPlus, X, OctagonX, ChevronRight, AlertCircle }
 import type { FamilyMember } from '../types';
 import { getWorkspaceMemberRole } from '../utils/memberOrdering';
 import { isRecognizablePatientName } from '../utils/ocrSubjectRouting';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 interface UnresolvedSubjectModalProps {
   fileName: string;
@@ -38,6 +39,15 @@ export function UnresolvedSubjectModal({
   const memberName = name.trim();
   const canResolveSubject = isRecognizablePatientName(suggestedSubjectName);
   const canCreateMember = isRecognizablePatientName(memberName);
+
+  useBackHandler(
+    true,
+    () => {
+      if (!isSaving) onDefer();
+      return true;
+    },
+    BackPriority.TOP_MODAL,
+  );
 
   return (
     <div

@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Calendar, ChevronLeft, ChevronRight, Check } from 'lucide-react';
 import { formatDateVN } from '../utils/formatters';
 import { CustomSelect } from './CustomSelect';
+import { BackPriority, useBackHandler } from '../utils/backNavigation';
 
 interface DatePickerVNProps {
   value: string; // YYYY-MM-DD
@@ -40,6 +41,11 @@ export const DatePickerVN: React.FC<DatePickerVNProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useBackHandler(isOpen, () => {
+    setIsOpen(false);
+    return true;
+  }, BackPriority.DROPDOWN);
 
   // Parse current value
   const parsed = React.useMemo(() => {
