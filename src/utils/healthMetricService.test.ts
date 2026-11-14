@@ -3,9 +3,18 @@ import type { HealthEvent, HealthMetric } from '../types';
 import { standardizeMetricKey } from './healthRecordService';
 import {
   buildHealthMetricChartData,
+  extractAbnormalHealthMetricOptions,
+  extractOverviewHealthMetricOptions,
+  getHealthMetricBasicDescription,
+  getHealthMetricInfo,
   getHealthMetricRangeStatus,
   getHealthMetricStandardKey,
+  isVitalOverviewMetricKey,
   partitionHealthMetricsForDisplay,
+  resolveHealthMetricDisplayInfo,
+  VITAL_BP_KEY,
+  VITAL_HEIGHT_KEY,
+  VITAL_WEIGHT_KEY,
 } from './healthMetricService';
 
 function makeEvent(
@@ -35,6 +44,12 @@ describe('health metric standardization', () => {
     ['Uric Acid', 'ACID_URIC'],
     ['Thyroid Stimulating Hormone', 'TSH'],
     ['White Blood Cell Count', 'WBC'],
+    ['Định lượng Canxi (Ca) [Huyết Thanh]', 'CALCIUM'],
+    ['Canxi Ion Hóa (Ca2+)', 'CA_ION'],
+    ['CA 72-4', 'CA 72-4'],
+    ['Thể Tích Trung Bình Tiểu Cầu (MPV)', 'MPV'],
+    ['25-OH Vitamin D', 'VITAMIN_D'],
+    ['T4 Tự Do', 'FT4'],
   ])('maps %s to %s', (name, expectedKey) => {
     expect(standardizeMetricKey(name, '', name)).toBe(expectedKey);
   });
@@ -205,3 +220,193 @@ describe('partitionHealthMetricsForDisplay', () => {
   });
 });
 
+describe('extractAbnormalHealthMetricOptions & resolveHealthMetricDisplayInfo', () => {
+  it('surfaces every metric flagged abnormal in Timeline (including Canxi, MPV, Vitamin D, and unmapped metrics)', () => {
+    const timeline: HealthEvent[] = [
+      makeEvent('2026-01-06', [
+        {
+          name: 'Định lượng Canxi (Ca) [Huyết Thanh]',
+          value: 2.23,
+          unit: 'mmol/L',
+          refRange: '2.30 - 2.60',
+        },
+        {
+          name: 'T4 Tự Do',
+          value: 13.05,
+          unit: 'pmol/L',
+          refRange: '9.01-19.05',
+        },
+        {
+          name: 'Creatinin',
+          value: 84,
+          unit: 'µmol/L',
+        },
+      ]),
+      makeEvent('2025-01-07', [
+        {
+          name: 'Thể Tích Trung Bình Tiểu Cầu (MPV)',
+          value: 9.32,
+          unit: 'fL',
+          refRange: '12.3-13.1',
+        },
+        {
+          name: 'T4 Tự Do',
+          value: 11.41,
+          unit: 'pmol/L',
+          refRange: '9.01-19.05',
+        },
+        {
+          name: '25-OH Vitamin D',
+          value: 22,
+          unit: 'ng/mL',
+          refRange: '30-100',
+        },
+        {
+          name: 'Định lượng iPTH [Huyết Thanh]',
+          value: 85,
+          unit: 'pg/mL',
+          refRange: '15 - 65',
+        },
+      ]),
+    ];
+
+    const options = extractAbnormalHealthMetricOptions(timeline, 'male');
+    expect(options).toEqual([
+      { key: 'CALCIUM', label: 'Canxi' },
+      { key: 'MPV', label: 'MPV' },
+      { key: 'FT4', label: 'FT4' },
+      { key: 'VITAMIN_D', label: 'Vitamin D' },
+      { key: 'ĐỊNH LƯỢNG IPTH [HUYẾT THANH]', label: 'iPTH' },
+    ]);
+
+    const caInfo = resolveHealthMetricDisplayInfo('CALCIUM', timeline, 'male');
+    expect(caInfo.normalRangeText).toBe('2.30 - 2.60 mmol/L');
+    expect(caInfo.minNormal).toBe(2.3);
+    expect(caInfo.maxNormal).toBe(2.6);
+
+    const mpvInfo = resolveHealthMetricDisplayInfo('MPV', timeline, 'male');
+    expect(mpvInfo.normalRangeText).toBe('12.3 - 13.1 fL');
+    expect(mpvInfo.minNormal).toBe(12.3);
+    expect(mpvInfo.maxNormal).toBe(13.1);
+
+    const ft4Info = resolveHealthMetricDisplayInfo('FT4', timeline, 'male');
+    expect(ft4Info.normalRangeText).toBe('9.01 - 19.05 pmol/L');
+    expect(ft4Info.minNormal).toBe(9.01);
+    expect(ft4Info.maxNormal).toBe(19.05);
+
+    const ipthInfo = resolveHealthMetricDisplayInfo('ĐỊNH LƯỢNG IPTH [HUYẾT THANH]', timeline, 'male');
+    expect(ipthInfo.name).toBe('iPTH');
+    expect(ipthInfo.normalRangeText).toBe('15 - 65 pg/mL');
+    expect(ipthInfo.minNormal).toBe(15);
+    expect(ipthInfo.maxNormal).toBe(65);
+    expect(ipthInfo.description).not.toBe('Chỉ số xét nghiệm ghi nhận trong hồ sơ sức khỏe.');
+    expect(ipthInfo.description.toLowerCase()).toContain('cận giáp');
+    expect(ipthInfo.description.trim().split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(20);
+    expect(ft4Info.description.trim().split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(20);
+    expect(caInfo.description.trim().split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(20);
+    expect(mpvInfo.description.trim().split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(20);
+
+    const unknownWithoutRange = getHealthMetricInfo('UNMAPPED_TEST');
+    expect(unknownWithoutRange.minNormal).toBeUndefined();
+    expect(unknownWithoutRange.maxNormal).toBeUndefined();
+  });
+});
+
+describe('getHealthMetricBasicDescription', () => {
+  it('returns concise Vietnamese descriptions within 100 words for catalog, keyword, and custom abnormal metrics', () => {
+    const samples: HealthMetric[] = [
+      { name: 'Định lượng Canxi (Ca) [Huyết Thanh]', value: 2.23, unit: 'mmol/L', refRange: '2.30 - 2.60' },
+      { name: 'Thể Tích Trung Bình Tiểu Cầu (MPV)', value: 9.32, unit: 'fL', refRange: '12.3-13.1' },
+      { name: 'T4 Tự Do', value: 11.41, unit: 'pmol/L', refRange: '9.01-19.05' },
+      { name: '25-OH Vitamin D', value: 22, unit: 'ng/mL', refRange: '30-100' },
+      { name: 'CRP hs', value: 15, unit: 'mg/L', status: 'Cao' },
+      { name: 'Định lượng iPTH [Huyết Thanh]', value: 85, unit: 'pg/mL', refRange: '15 - 65' },
+    ];
+
+    for (const metric of samples) {
+      const description = getHealthMetricBasicDescription(metric);
+      const wordCount = description.trim().split(/\s+/).filter(Boolean).length;
+      expect(wordCount).toBeGreaterThan(10);
+      expect(wordCount).toBeLessThanOrEqual(100);
+    }
+
+    expect(getHealthMetricBasicDescription(samples[0]).toLowerCase()).toContain('canxi');
+    expect(getHealthMetricBasicDescription(samples[1]).toLowerCase()).toContain('mpv');
+    expect(getHealthMetricBasicDescription(samples[2]).toLowerCase()).toContain('ft4');
+    expect(getHealthMetricBasicDescription(samples[3]).toLowerCase()).toContain('vitamin d');
+    expect(getHealthMetricBasicDescription(samples[5]).toLowerCase()).toContain('cận giáp');
+    expect(
+      getHealthMetricBasicDescription(
+        { name: 'Chỉ số đặc hiệu XYZ', value: 120, unit: 'U/L', refRange: '10 - 50' },
+        'warning_high',
+      ),
+    ).toContain('cao hơn');
+  });
+});
+
+describe('Overview vital signs (height, weight, blood pressure)', () => {
+  it('places Blood Pressure first, abnormal lab metrics next, then Height and Weight at the end, and builds dual-series BP data', () => {
+    const timeline: HealthEvent[] = [
+      {
+        ...makeEvent('2024-05-10', [
+          { name: '25-OH Vitamin D', value: 22, unit: 'ng/mL', refRange: '30-100' },
+        ]),
+        physicalExam: {
+          height_cm: 168,
+          weight_kg: 58.5,
+          bp_mmHg: '115/75 mmHg',
+        },
+      },
+      {
+        ...makeEvent('2025-05-12', []),
+        physicalExam: {
+          height_cm: 171,
+          weight_kg: 62,
+          bp_mmHg: '125/82',
+        },
+      },
+    ];
+
+    expect(extractOverviewHealthMetricOptions(timeline, 'male')).toEqual([
+      { key: VITAL_BP_KEY, label: 'Huyết áp' },
+      { key: 'VITAMIN_D', label: 'Vitamin D' },
+      { key: VITAL_HEIGHT_KEY, label: 'Chiều cao' },
+      { key: VITAL_WEIGHT_KEY, label: 'Cân nặng' },
+    ]);
+
+    expect(isVitalOverviewMetricKey(VITAL_BP_KEY)).toBe(true);
+    expect(isVitalOverviewMetricKey(VITAL_HEIGHT_KEY)).toBe(true);
+    expect(isVitalOverviewMetricKey(VITAL_WEIGHT_KEY)).toBe(true);
+    expect(isVitalOverviewMetricKey('VITAMIN_D')).toBe(false);
+
+    expect(buildHealthMetricChartData(timeline, VITAL_HEIGHT_KEY)).toEqual([
+      { date: '2024-05-10', value: 168, unit: 'cm', facility: '' },
+      { date: '2025-05-12', value: 171, unit: 'cm', facility: '' },
+    ]);
+
+    expect(buildHealthMetricChartData(timeline, VITAL_WEIGHT_KEY)).toEqual([
+      { date: '2024-05-10', value: 58.5, unit: 'kg', facility: '' },
+      { date: '2025-05-12', value: 62, unit: 'kg', facility: '' },
+    ]);
+
+    expect(buildHealthMetricChartData(timeline, VITAL_BP_KEY)).toEqual([
+      { date: '2024-05-10', value: 115, secondaryValue: 75, unit: 'mmHg', facility: '' },
+      { date: '2025-05-12', value: 125, secondaryValue: 82, unit: 'mmHg', facility: '' },
+    ]);
+
+    expect(resolveHealthMetricDisplayInfo(VITAL_BP_KEY, timeline, 'male')).toMatchObject({
+      name: 'Huyết áp (mmHg)',
+      normalRangeText: '90/60 - 120/80 mmHg',
+    });
+  });
+
+  it('omits height, weight, and blood pressure options when no measurements exist in the timeline', () => {
+    const timeline = [
+      makeEvent('2025-05-12', [
+        { name: 'Creatinin', value: 84, unit: 'µmol/L' },
+      ]),
+    ];
+
+    expect(extractOverviewHealthMetricOptions(timeline, 'male')).toEqual([]);
+  });
+});

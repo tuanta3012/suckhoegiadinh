@@ -46,8 +46,19 @@ const METRIC_STANDARDIZATION_MAP: Array<{
   { standardKey: 'AST', aliases: ['ast', 'got', 'sgot', 'aspartate aminotransferase'] },
   { standardKey: 'ALT', aliases: ['alt', 'gpt', 'sgpt', 'alanine aminotransferase'] },
   { standardKey: 'GGT', aliases: ['ggt', 'gamma gt', 'gamma glutamyl transferase'] },
-  { standardKey: 'FT4', aliases: ['ft4', 'free t4', 'free thyroxine', 'thyroxine tu do'] },
-  { standardKey: 'FT3', aliases: ['ft3', 'free t3', 'free triiodothyronine', 'triiodothyronine tu do'] },
+  { standardKey: 'FT4', aliases: ['ft4', 'free t4', 'free thyroxine', 'thyroxine tu do', 't4 tu do'] },
+  { standardKey: 'FT3', aliases: ['ft3', 'free t3', 'free triiodothyronine', 'triiodothyronine tu do', 't3 tu do'] },
+  { standardKey: 'CA_ION', aliases: ['ca ion', 'canxi ion hoa', 'canxi ion', 'ionized calcium', 'ca2', 'ca 2'] },
+  { standardKey: 'CALCIUM', aliases: ['canxi', 'calcium', 'canxi huyet thanh', 'canxi ca', 'canxi ca huyet thanh', 'dinh luong canxi', 'dinh luong canxi huyet thanh', 'dinh luong canxi ca', 'dinh luong canxi ca huyet thanh', 'serum calcium', 'total calcium', 'canxi toan phan', 'ca'] },
+  { standardKey: 'MPV', aliases: ['mpv', 'the tich trung binh tieu cau', 'the tich trung binh tieu cau mpv', 'mean platelet volume'] },
+  { standardKey: 'VITAMIN_D', aliases: ['vitamin d', '25 oh vitamin d', 'vitamin d 25 oh', '25 oh d', '25 hydroxy vitamin d', '25 hydroxyvitamin d', 'dinh luong vitamin d', 'dinh luong 25 oh vitamin d'] },
+  { standardKey: 'MCV', aliases: ['mcv', 'the tich trung binh hong cau', 'mean corpuscular volume'] },
+  { standardKey: 'MCH', aliases: ['mch', 'luong hgb trung binh hong cau', 'mean corpuscular hemoglobin'] },
+  { standardKey: 'MCHC', aliases: ['mchc', 'nong do hgb trung binh hong cau', 'mean corpuscular hemoglobin concentration'] },
+  { standardKey: 'ESR_1H', aliases: ['esr', 'esr 1h', 'toc do mau lang', 'mau lang 1h', 'vs 1h'] },
+  { standardKey: 'NA', aliases: ['na', 'natri', 'sodium', 'na huyet thanh', 'dinh luong natri'] },
+  { standardKey: 'K', aliases: ['k', 'kali', 'potassium', 'kali huyet thanh', 'dinh luong kali'] },
+  { standardKey: 'CL', aliases: ['cl', 'clo', 'clorua', 'chloride', 'cl huyet thanh', 'dinh luong clo'] },
 ];
 
 const METRIC_ALIAS_TO_KEY = new Map(
@@ -58,10 +69,19 @@ const METRIC_ALIAS_TO_KEY = new Map(
 
 function findCanonicalMetricKey(value: string): string | undefined {
   const normalized = normalizeMetricLabel(value);
+  if (!normalized) return undefined;
   const exact = METRIC_ALIAS_TO_KEY.get(normalized);
   if (exact) return exact;
 
   for (const [alias, standardKey] of METRIC_ALIAS_TO_KEY) {
+    // Prevent short ambiguous tokens (e.g. 'ca', 'na', 'k', 'cl') from prefix-matching unrelated tests like CA 72-4
+    if (alias.length < 4 && !alias.includes(' ')) continue;
+    if (
+      standardKey === 'CALCIUM' &&
+      (normalized.includes('ion') || normalized.includes('ca2') || /\bca\s*\d/.test(normalized))
+    ) {
+      continue;
+    }
     if (normalized.startsWith(`${alias} `) || normalized.endsWith(` ${alias}`)) return standardKey;
   }
   return undefined;
@@ -289,7 +309,7 @@ export function standardizeMetricKey(rawKey: string, unit: string, metricName: s
     CREATININE: 'CREATININ',
     'URIC ACID': 'ACID_URIC',
     'TOTAL CHOLESTEROL': 'CHOLESTEROL',
-    TRIGLYCERIDES: 'TRIGLYCERIDE',
+    TRIGLYCERIDES: 'TRIGLYCERID',
     'SGOT (AST)': 'AST',
     'SGPT (ALT)': 'ALT',
   };

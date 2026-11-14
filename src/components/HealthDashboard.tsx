@@ -138,11 +138,13 @@ import {
 } from '../utils/healthProfile';
 import {
   buildHealthMetricChartData,
+  extractOverviewHealthMetricOptions,
+  getHealthMetricBasicDescription,
   getHealthMetricDisplayName,
-  getHealthMetricInfo,
   getHealthMetricRangeStatus,
-  getHealthMetricStandardKey,
+  isVitalOverviewMetricKey,
   partitionHealthMetricsForDisplay,
+  resolveHealthMetricDisplayInfo,
 } from '../utils/healthMetricService';
 import {
   analyzeComprehensiveHealth,
@@ -597,6 +599,7 @@ export function HealthDashboard({
   const [selectedMetric, setSelectedMetric] = useState('');
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
   const [expandedMetricEventIds, setExpandedMetricEventIds] = useState<Record<string, boolean>>({});
+  const [selectedAbnormalMetricByEvent, setSelectedAbnormalMetricByEvent] = useState<Record<string, number | null>>({});
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
@@ -1785,25 +1788,10 @@ export function HealthDashboard({
   const selectedProfile = selectedMember ? profiles[selectedMember.id] : null;
   const trackerMember =
     members.find((member) => member.id === trackerState.memberId) || selectedMember;
-  // Extract vital metrics from timeline containing abnormal measurements
+  // Extract abnormal lab metrics plus recorded vital signs (height, weight, blood pressure) over time
   const metricOptions = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
-    const keys = new Set<string>();
-    const gender = selectedMember?.gender;
-    for (const event of selectedProfile.timeline) {
-      for (const m of event.metrics) {
-        const key = getHealthMetricStandardKey(m);
-        if (!key) continue;
-        const status = getHealthMetricRangeStatus(m, gender);
-        if (status !== 'normal' && status !== 'unknown') {
-          keys.add(key);
-        }
-      }
-    }
-    return Array.from(keys).map((key) => ({
-      key,
-      label: getHealthMetricDisplayName(key),
-    }));
+    return extractOverviewHealthMetricOptions(selectedProfile.timeline, selectedMember?.gender);
   }, [selectedProfile, selectedMember?.gender]);
   useEffect(() => {
     if (metricOptions.length > 0 && !metricOptions.some(({ key }) => key === selectedMetric)) {
@@ -6099,7 +6087,14 @@ export function HealthDashboard({
                       error={analysisError}
                     />
                     {metricOptions.length > 0 && (() => {
-                      const metricInfo = getHealthMetricInfo(selectedMetric);
+                      const metricInfo = resolveHealthMetricDisplayInfo(
+                        selectedMetric,
+                        selectedProfile.timeline || [],
+                        selectedMember?.gender,
+                      );
+                      const selectedOptionLabel =
+                        metricOptions.find((option) => option.key === selectedMetric)?.label ||
+                        getHealthMetricDisplayName(selectedMetric);
                       return (
                         <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
                           <div className="flex flex-col gap-3">
@@ -6129,26 +6124,28 @@ export function HealthDashboard({
                               ))}
                             </div>
                           </div>
-                          {/* Metric Explanation & Normal Range Banner (2-line layout) */}
-                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 shadow-xs space-y-1 text-xs">
-                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                              <span className="font-extrabold text-emerald-950 text-sm shrink-0">
-                                {metricInfo.name}
-                              </span>
-                              {metricInfo.normalRangeText && !metricInfo.normalRangeText.includes('Tham khảo') ? (
-                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-800 shadow-2xs border border-emerald-200 shrink-0">
-                                  🛡️ {metricInfo.normalRangeText}
+                          {/* Metric Explanation & Normal Range Banner (hidden for vitals: Huyết áp, Chiều cao, Cân nặng) */}
+                          {!isVitalOverviewMetricKey(selectedMetric) && (
+                            <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 shadow-xs space-y-1 text-xs">
+                              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                                <span className="font-extrabold text-emerald-950 text-sm shrink-0">
+                                  {metricInfo.name}
                                 </span>
-                              ) : null}
+                                {metricInfo.normalRangeText && !metricInfo.normalRangeText.includes('Tham khảo') ? (
+                                  <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-800 shadow-2xs border border-emerald-200 shrink-0">
+                                    🛡️ {metricInfo.normalRangeText}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p className="text-emerald-900/90 leading-relaxed font-medium">
+                                {metricInfo.description}
+                              </p>
                             </div>
-                            <p className="text-emerald-900/90 leading-relaxed font-medium">
-                              {metricInfo.description}
-                            </p>
-                          </div>
+                          )}
                           <Suspense fallback={<div className="h-56 animate-pulse rounded-xl bg-slate-50" />}>
                             <HealthMetricsChart
                               data={chartData}
-                              metricName={getHealthMetricDisplayName(selectedMetric)}
+                              metricName={selectedOptionLabel}
                               minNormal={metricInfo.minNormal}
                               maxNormal={metricInfo.maxNormal}
                             />
@@ -6550,6 +6547,11 @@ export function HealthDashboard({
                               selectedMember?.gender,
                             );
                             const isNormalExpanded = Boolean(expandedMetricEventIds[event.id]);
+                            const selectedAbnormalIndex = selectedAbnormalMetricByEvent[event.id] ?? null;
+                            const selectedAbnormalItem =
+                              selectedAbnormalIndex !== null
+                                ? abnormal.find((item) => item.index === selectedAbnormalIndex) || null
+                                : null;
                             const renderMetricChip = (
                               met: typeof event.metrics[number],
                               rangeStatus: ReturnType<typeof getHealthMetricRangeStatus>,
@@ -6561,18 +6563,19 @@ export function HealthDashboard({
                                 isAbnormalChip ||
                                 rangeStatus === 'warning_high' ||
                                 rangeStatus === 'warning_low';
-                              return (
-                                <span
-                                  key={keyIndex}
-                                  aria-label={`${met.name}: ${met.value} ${met.unit}${isCritical ? ', cảnh báo nghiêm trọng' : isWarning ? ', vượt khoảng tham chiếu' : ''}`}
-                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs tabular-nums ${
-                                    isCritical
-                                      ? 'bg-rose-100 border-rose-300 text-rose-950 font-bold'
-                                      : isWarning
-                                        ? 'bg-amber-100 border-amber-300 text-amber-950 font-bold'
-                                        : 'bg-teal-50 border-teal-200 text-teal-900 font-semibold'
-                                  }`}
-                                >
+                              const isSelectedAbnormal = isAbnormalChip && selectedAbnormalIndex === keyIndex;
+                              const chipClass = `inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs tabular-nums ${
+                                isCritical
+                                  ? 'bg-rose-100 border-rose-300 text-rose-950 font-bold'
+                                  : isWarning
+                                    ? 'bg-amber-100 border-amber-300 text-amber-950 font-bold'
+                                    : 'bg-teal-50 border-teal-200 text-teal-900 font-semibold'
+                              }${isAbnormalChip ? ' text-left cursor-pointer transition-all active:scale-[0.98]' : ''}${
+                                isSelectedAbnormal ? ' ring-2 ring-emerald-300' : ''
+                              }`;
+
+                              const chipContent = (
+                                <>
                                   {(isCritical || isWarning) && (
                                     <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                                   )}
@@ -6584,6 +6587,36 @@ export function HealthDashboard({
                                       </span>
                                     ) : null}
                                   </span>
+                                </>
+                              );
+
+                              if (isAbnormalChip) {
+                                return (
+                                  <button
+                                    key={keyIndex}
+                                    type="button"
+                                    aria-expanded={isSelectedAbnormal}
+                                    aria-label={`${met.name}: ${met.value} ${met.unit}${isCritical ? ', cảnh báo nghiêm trọng' : ', vượt khoảng tham chiếu'}. Bấm để xem mô tả cơ bản`}
+                                    onClick={() =>
+                                      setSelectedAbnormalMetricByEvent((prev) => ({
+                                        ...prev,
+                                        [event.id]: prev[event.id] === keyIndex ? null : keyIndex,
+                                      }))
+                                    }
+                                    className={chipClass}
+                                  >
+                                    {chipContent}
+                                  </button>
+                                );
+                              }
+
+                              return (
+                                <span
+                                  key={keyIndex}
+                                  aria-label={`${met.name}: ${met.value} ${met.unit}`}
+                                  className={chipClass}
+                                >
+                                  {chipContent}
                                 </span>
                               );
                             };
@@ -6604,6 +6637,17 @@ export function HealthDashboard({
                                     </span>
                                   )}
                                 </div>
+
+                                {selectedAbnormalItem && (
+                                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2.5 text-xs leading-relaxed text-emerald-950 font-medium">
+                                    <p>
+                                      {getHealthMetricBasicDescription(
+                                        selectedAbnormalItem.metric,
+                                        selectedAbnormalItem.rangeStatus,
+                                      )}
+                                    </p>
+                                  </div>
+                                )}
 
                                 {normal.length > 0 && isNormalExpanded && (
                                   <div className="flex flex-wrap items-center gap-2 rounded-xl border border-teal-100 bg-teal-50/40 p-2.5">
