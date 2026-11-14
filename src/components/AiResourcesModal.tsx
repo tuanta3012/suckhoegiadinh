@@ -30,7 +30,7 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
   const canEdit = isAdmin || isLocalWorkspace;
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !canEdit) return;
     let active = true;
     setIsLoading(true);
     setMessage('');
@@ -63,9 +63,10 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
     BackPriority.TOP_MODAL,
   );
 
-  if (!isOpen) return null;
+  if (!isOpen || !canEdit) return null;
 
   async function testAndSave() {
+    if (!canEdit) return;
     const parsedKeys = parseGeminiKeyInput(input);
     if (parsedKeys.length === 0) {
       setError('Nhập ít nhất một API key.');

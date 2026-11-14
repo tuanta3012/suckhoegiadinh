@@ -2027,6 +2027,13 @@ export function HealthDashboard({
     return nextProfiles;
   }, []);
   const [isSyncing, setIsSyncing] = useState(false);
+  const canManageAiResources =
+    isWorkspaceAdmin && (hasRemoteWorkspace || !userEmail || !isSyncing);
+  useEffect(() => {
+    if (!canManageAiResources && showAiResourcesModal) {
+      setShowAiResourcesModal(false);
+    }
+  }, [canManageAiResources, showAiResourcesModal]);
   const openWorkspace = useCallback(
     async (id: string): Promise<boolean> => {
       const authIdentity = authIdentityRef.current;
@@ -5683,18 +5690,20 @@ export function HealthDashboard({
                     <Download className="w-4 h-4 text-teal-600 shrink-0" />
                     <span>Xuất log file</span>
                   </button>
-                  {/* 5. Tài nguyên AI */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSettingsDropdown(false);
-                      setShowAiResourcesModal(true);
-                    }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
-                  >
-                    <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>Tài nguyên AI</span>
-                  </button>
+                  {/* 5. Tài nguyên AI (chỉ hiển thị cho Admin / chủ sở hữu workspace) */}
+                  {canManageAiResources && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSettingsDropdown(false);
+                        setShowAiResourcesModal(true);
+                      }}
+                      className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
+                    >
+                      <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Tài nguyên AI</span>
+                    </button>
+                  )}
                   {/* 6. Phiên bản */}
                   <button
                     type="button"
@@ -7560,7 +7569,7 @@ export function HealthDashboard({
         showToast={showToast}
       />
       <AiResourcesModal
-        isOpen={showAiResourcesModal}
+        isOpen={showAiResourcesModal && canManageAiResources}
         folderId={workspace?.rootFolderId || 'local_offline_workspace'}
         isAdmin={isWorkspaceAdmin}
         onClose={() => setShowAiResourcesModal(false)}
