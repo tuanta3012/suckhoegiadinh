@@ -1,4 +1,9 @@
-import { normalizeModalityKey } from './deduplicationService';
+import {
+  cleanAndDeduplicateDiagnoses,
+  cleanAndDeduplicateMedications,
+  deduplicateAdviceText,
+  normalizeModalityKey,
+} from './deduplicationService';
 import { standardizeMetricKey } from './healthRecordService';
 import { classifyHealthEventType, cleanHospitalizationRecord } from './healthEventType';
 import {
@@ -21,54 +26,22 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-
-
 export function cleanExtractedJson(value: unknown): JsonRecord {
   if (!isRecord(value)) throw new Error('Phản hồi Gemini không phải một JSON object.');
   const result = { ...value };
 
   if (Array.isArray(result.diagnoses)) {
-    const seen = new Set<string>();
-    result.diagnoses = result.diagnoses.filter((diagnosis): diagnosis is string => {
-      if (typeof diagnosis !== 'string') return false;
-      const normalized = diagnosis.trim().toLowerCase().replace(/[.,;]$/, '');
-      if (!normalized || seen.has(normalized)) return false;
-      seen.add(normalized);
-      return true;
-    });
+    result.diagnoses = cleanAndDeduplicateDiagnoses(result.diagnoses.map(String));
   }
 
   if (Array.isArray(result.medications)) {
-    const medications = new Map<string, JsonRecord>();
-    for (const medication of result.medications) {
-      if (!isRecord(medication) || typeof medication.name !== 'string' || !medication.name.trim()) continue;
-      const key = medication.name
-        .trim()
-        .toLowerCase()
-        .replace(/\b\d+(\.\d+)?\s*(mg|g|mcg|ml|l|iu|ui|viên|ống|gói|chai)\b/gi, '')
-        .trim();
-      const existing = medications.get(key);
-      medications.set(key, existing
-        ? {
-            ...existing,
-            name: existing.name && (existing.name as string).length >= medication.name.length
-              ? existing.name
-              : medication.name,
-            dosage: existing.dosage || medication.dosage,
-            frequency: existing.frequency || medication.frequency,
-            duration: existing.duration || medication.duration,
-          }
-        : medication);
-    }
-    result.medications = Array.from(medications.values()).map((m) => ({
-      name: m.name,
-      dosage: typeof m.dosage === 'string' ? m.dosage.trim() : undefined,
-      quantity: typeof m.quantity === 'string' ? m.quantity.trim() : undefined,
-      frequency: typeof m.frequency === 'string' ? m.frequency.trim() : undefined,
-      timing: typeof m.timing === 'string' ? m.timing.trim() : undefined,
-      duration: typeof m.duration === 'string' ? m.duration.trim() : undefined,
-      instructions: typeof m.instructions === 'string' ? m.instructions.trim() : undefined,
-    }));
+    result.medications = cleanAndDeduplicateMedications(
+      result.medications.filter(isRecord) as any
+    );
+  }
+
+  if (typeof result.advice === 'string') {
+    result.advice = deduplicateAdviceText(result.advice) || result.advice.trim();
   }
 
 

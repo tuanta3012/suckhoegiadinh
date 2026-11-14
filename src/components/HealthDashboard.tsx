@@ -1806,11 +1806,13 @@ export function HealthDashboard({
   // Filtered timeline
   const filteredTimeline = useMemo(() => {
     if (!selectedProfile?.timeline) return [];
-    const list = [...selectedProfile.timeline].sort(
-      (a, b) =>
-        new Date(b.date || b.recordedAt).getTime() -
-        new Date(a.date || a.recordedAt).getTime(),
-    );
+    const list = selectedProfile.timeline
+      .map(cleanAndDeduplicateEventData)
+      .sort(
+        (a, b) =>
+          new Date(b.date || b.recordedAt).getTime() -
+          new Date(a.date || a.recordedAt).getTime(),
+      );
     if (timelineFilter === 'all') return list;
     return list.filter((event) => event.type === timelineFilter);
   }, [selectedProfile, timelineFilter]);

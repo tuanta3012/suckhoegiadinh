@@ -42,6 +42,22 @@ describe('Deduplication Service', () => {
       expect(cleaned.diagnoses).toEqual(['Viêm phế quản cấp', 'Tăng huyết áp']);
     });
 
+    it('deduplicates diagnoses by ICD-10 code and normalizes medical spelling variants', () => {
+      const event: Partial<HealthEvent> = {
+        diagnoses: [
+          'Bệnh tăng huyết áp vô căn (nguyên phát) (I10)',
+          'Bệnh đái tháo đường không phụ thuộc insuline (E11)',
+          'Tăng lipid máu hỗn hợp (E78.2)',
+          'Bệnh đái tháo đường không phụ thuộc insulin (E11)',
+        ],
+      };
+      const cleaned = cleanAndDeduplicateEventData(event);
+      expect(cleaned.diagnoses).toHaveLength(3);
+      expect(cleaned.diagnoses).toContain('Bệnh tăng huyết áp vô căn (nguyên phát) (I10)');
+      expect(cleaned.diagnoses).toContain('Bệnh đái tháo đường không phụ thuộc insulin (E11)');
+      expect(cleaned.diagnoses).toContain('Tăng lipid máu hỗn hợp (E78.2)');
+    });
+
     it('removes duplicate medications, keeping richer details', () => {
       const event: Partial<HealthEvent> = {
         medications: [
@@ -53,6 +69,95 @@ describe('Deduplication Service', () => {
       expect(cleaned.medications).toHaveLength(1);
       expect(cleaned.medications![0].frequency).toBe('1 viên sáng');
       expect(cleaned.medications![0].duration).toBe('30 ngày');
+    });
+
+    it('deduplicates complex compound medications with brand names and redundant dosages', () => {
+      const event: Partial<HealthEvent> = {
+        medications: [
+          {
+            name: 'Sitagliptin + metformin (SITA-MET 50/1000) 50mg + 1000mg',
+            dosage: '50mg + 1000mg',
+            quantity: '60 Viên',
+            frequency: 'Mỗi ngày 1 lần, mỗi lần 1 Viên',
+            duration: '60 ngày',
+          },
+          {
+            name: 'Ezetimibe + Atorvastatin (JAPET) 10mg + 20mg',
+            dosage: '10mg + 20mg',
+            quantity: '60 Viên',
+            frequency: 'Mỗi ngày 1 lần, mỗi lần 1 Viên',
+            duration: '60 ngày',
+          },
+          {
+            name: 'Sitagliptin + Metformin (SITA-MET 50/1000)',
+            dosage: '50mg + 1000mg',
+            frequency: '1 lần/ngày',
+            duration: '60 days',
+          },
+          {
+            name: 'Ezetimibe + Atorvastatin (JAPET)',
+            dosage: '10mg + 20mg',
+            frequency: '1 lần/ngày',
+            duration: '60 days',
+          },
+        ],
+      };
+      const cleaned = cleanAndDeduplicateEventData(event);
+      expect(cleaned.medications).toHaveLength(2);
+
+      const sitamet = cleaned.medications?.find((m) => m.name.includes('SITA-MET'));
+      expect(sitamet).toBeDefined();
+      expect(sitamet?.name).toBe('Sitagliptin + Metformin (SITA-MET 50/1000)');
+      expect(sitamet?.quantity).toBe('60 Viên');
+      expect(sitamet?.frequency).toBe('Mỗi ngày 1 lần, mỗi lần 1 Viên');
+      expect(sitamet?.duration).toBe('60 ngày');
+
+      const japet = cleaned.medications?.find((m) => m.name.includes('JAPET'));
+      expect(japet).toBeDefined();
+      expect(japet?.name).toBe('Ezetimibe + Atorvastatin (JAPET)');
+      expect(japet?.quantity).toBe('60 Viên');
+    });
+
+    it('deduplicates STRADIRAS and eye drops with percentages', () => {
+      const event: Partial<HealthEvent> = {
+        medications: [
+          {
+            name: 'Sitagliptin + Metformin (STRADIRAS 50/850mg)',
+            dosage: '50mg + 850mg',
+            frequency: '1 lần/ngày',
+            duration: '60 ngày',
+          },
+          {
+            name: 'Sitagliptin + metformin (STRADIRAS 50/850MG) 50mg + 850mg',
+            dosage: '50mg + 850mg',
+            frequency: '1 lần/ngày',
+            duration: '60 ngày',
+          },
+          {
+            name: 'Natri Hyaluronat (SANLEIN EYE DROP 0.1% 5ML) 0.1% 5ML',
+            dosage: '1 giọt/lần',
+          },
+          {
+            name: 'Natri Hyaluronat (SANLEIN EYE DROP 0.1% 5ML)',
+            dosage: '1 giọt/lần',
+          },
+        ],
+      };
+      const cleaned = cleanAndDeduplicateEventData(event);
+      expect(cleaned.medications).toHaveLength(2);
+      expect(cleaned.medications![0].name).toBe('Sitagliptin + Metformin (STRADIRAS 50/850mg)');
+      expect(cleaned.medications![1].name).toBe('Natri Hyaluronat (SANLEIN EYE DROP 0.1% 5ML)');
+    });
+
+    it('deduplicates concatenated and repeated doctor advice clauses', () => {
+      const event: Partial<HealthEvent> = {
+        advice:
+          'Hạn chế ăn dầu mỡ, chất béo, nội tạng động vật. Uống đủ nước (2000-2500ml/ngày), tăng cường ăn rau xanh. Hạn chế ăn dầu mỡ, chất béo, nội tạng động vật. Uống đủ nước (2000-2500ml/ngày).',
+      };
+      const cleaned = cleanAndDeduplicateEventData(event);
+      expect(cleaned.advice).toBe(
+        'Hạn chế ăn dầu mỡ, chất béo, nội tạng động vật. Uống đủ nước (2000-2500ml/ngày), tăng cường ăn rau xanh.'
+      );
     });
 
     it('removes duplicate metrics', () => {

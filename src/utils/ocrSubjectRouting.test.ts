@@ -41,19 +41,27 @@ describe('OCR subject routing', () => {
     ]).matched).toBeUndefined();
   });
 
-  it('rejects a name match when the OCR birth date or gender conflicts with the member', () => {
-    expect(findMemberByOcrPatientName(
-      'Nguyen Thi Mai',
-      [{ ...member, birthDate: '1980-12-30', gender: 'female' }],
-      '1981-12-30',
-      'Nữ',
-    ).matched).toBeUndefined();
-    expect(findMemberByOcrPatientName(
-      'Nguyen Thi Mai',
-      [{ ...member, birthDate: '1980-12-30', gender: 'female' }],
-      '30/12/1980',
-      'Nam',
-    ).matched).toBeUndefined();
+  it('auto-matches a unique full-name member despite DOB placeholder/typo or gender mismatch, while disambiguating duplicate names', () => {
+    const tuAnh: FamilyMember = {
+      ...member,
+      id: 'm2',
+      name: 'Vũ Thị Tú Anh',
+      birthDate: '1988-06-15',
+      gender: 'female',
+    };
+    // Clinic placeholder DOB 01/01/YYYY or OCR typo should still match unique Vũ Thị Tú Anh
+    expect(findMemberByOcrPatientName('Vũ Thị Tú Anh', [member, tuAnh], '1988-01-01', 'Nữ').matched?.id).toBe('m2');
+    // Profile with default 'male' or OCR gender misread should still match unique Vũ Thị Tú Anh
+    expect(findMemberByOcrPatientName('Vũ Thị Tú Anh', [{ ...tuAnh, gender: 'male' }], '15/06/1988', 'Nữ').matched?.id).toBe('m2');
+    expect(findMemberByOcrPatientName('Vũ Thị Tú Anh', [member, tuAnh], '1989-06-15', 'Nam').matched?.id).toBe('m2');
+
+    // When two family members share the exact same name, DOB & gender must still disambiguate/reject ambiguity
+    const olderMai: FamilyMember = { ...member, id: 'mai-1', birthDate: '1980-12-30', gender: 'female' };
+    const youngerMai: FamilyMember = { ...member, id: 'mai-2', birthDate: '1995-04-10', gender: 'female' };
+    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [olderMai, youngerMai], '1980-12-30', 'Nữ').matched?.id).toBe('mai-1');
+    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [olderMai, youngerMai], '1980-01-01', 'Nữ').matched?.id).toBe('mai-1');
+    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [olderMai, youngerMai], '1981-12-30', 'Nữ').matched).toBeUndefined();
+    expect(findMemberByOcrPatientName('Nguyen Thi Mai', [olderMai, { ...youngerMai, birthDate: '1980-12-30', gender: 'male' }], '30/12/1980', 'Nữ').matched?.id).toBe('mai-1');
   });
 
   it('can match a member created by an earlier file in the same upload queue', () => {

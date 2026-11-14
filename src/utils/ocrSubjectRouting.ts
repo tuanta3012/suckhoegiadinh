@@ -145,9 +145,9 @@ export function extractPatientNameFallbackFromText(
 
 function normalizeBirthDate(value?: string): string | undefined {
   if (!value) return undefined;
-  const iso = value.trim().match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  const iso = value.trim().match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/);
   if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
-  const vietnamese = value.trim().match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  const vietnamese = value.trim().match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:\s.*)?$/);
   if (vietnamese) {
     return `${vietnamese[3]}-${vietnamese[2].padStart(2, '0')}-${vietnamese[1].padStart(2, '0')}`;
   }
@@ -171,18 +171,52 @@ export function findMemberByOcrPatientName(
   const normalizedName = normalizePatientName(patientName);
   if (!normalizedName) return { candidates: [] };
 
+  const nameMatches = members.filter(
+    (member) => normalizePatientName(member.name) === normalizedName,
+  );
+  if (nameMatches.length === 0) return { candidates: [] };
+
   const birthDate = normalizeBirthDate(patientBirthDate);
   const gender = normalizeGender(patientGender);
-  const candidates = members.filter((member) => {
-    if (normalizePatientName(member.name) !== normalizedName) return false;
+  const candidates = nameMatches.filter((member) => {
     const memberBirthDate = normalizeBirthDate(member.birthDate);
     if (birthDate && memberBirthDate && birthDate !== memberBirthDate) return false;
     const memberGender = normalizeGender(member.gender);
     if (gender && memberGender && gender !== memberGender) return false;
     return true;
   });
+  if (candidates.length === 1) {
+    return { matched: candidates[0], candidates };
+  }
+
+  // When multiple family members share the same name, try same-year + gender disambiguation
+  if (candidates.length === 0 && nameMatches.length > 1 && birthDate) {
+    const birthYear = birthDate.slice(0, 4);
+    const softCandidates = nameMatches.filter((member) => {
+      const memberBirthDate = normalizeBirthDate(member.birthDate);
+      if (memberBirthDate && memberBirthDate.slice(0, 4) !== birthYear) return false;
+      const memberGender = normalizeGender(member.gender);
+      if (gender && memberGender && gender !== memberGender) return false;
+      return true;
+    });
+    if (softCandidates.length === 1) {
+      return { matched: softCandidates[0], candidates: softCandidates };
+    }
+  }
+
+  // If there is exactly ONE family member matching a full (2+ word) name,
+  // still auto-assign when OCR/profile has a placeholder DOB (e.g. 01/01/YYYY),
+  // a digit typo, or a default/mismatched gender flag.
+  if (
+    candidates.length === 0 &&
+    nameMatches.length === 1 &&
+    normalizedName.split(/\s+/).length >= 2
+  ) {
+    return { matched: nameMatches[0], candidates: nameMatches };
+  }
+
   return {
-    matched: candidates.length === 1 ? candidates[0] : undefined,
+    matched: undefined,
     candidates,
   };
 }

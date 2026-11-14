@@ -6,7 +6,7 @@ import type {
   HealthProfile,
   HealthSource,
 } from '../types';
-import { mergeHealthEvents } from './deduplicationService';
+import { cleanAndDeduplicateEventData, mergeHealthEvents } from './deduplicationService';
 import {
   classifyHealthEventType,
   cleanHospitalizationRecord,
@@ -404,7 +404,7 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
       })
     : [];
   const hospitalization = cleanHospitalizationRecord(raw.hospitalization);
-  return {
+  return cleanAndDeduplicateEventData({
     id: String(raw.id || `event_${crypto.randomUUID().slice(0, 8)}`),
     sourceFileId: String(raw.sourceFileId || 'legacy_source'),
     sourceFileName: String(raw.sourceFileName || 'Tài liệu y tế'),
@@ -430,7 +430,7 @@ function sanitizeTimelineEvent(raw: any): HealthEvent | null {
     patientBirthDate: raw.patientBirthDate ? String(raw.patientBirthDate) : undefined,
     patientGender: raw.patientGender ? String(raw.patientGender) : undefined,
     extractedData: raw.extractedData || undefined,
-  };
+  }) as HealthEvent;
 }
 
 function sanitizeHealthSource(raw: any): HealthSource | null {

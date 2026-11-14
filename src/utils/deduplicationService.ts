@@ -32,6 +32,19 @@ export async function computeFileFingerprint(file: Blob | File): Promise<{ hash:
   return { hash: `fallback_${name}_${size}`, size };
 }
 
+
+/**
+ * Bỏ dấu tiếng Việt để so sánh chuỗi regex mạnh mẽ hơn
+ */
+export function removeVietnameseAccents(str: string): string {
+  if (!str) return '';
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+}
+
 /**
  * Chuẩn hóa chuỗi văn bản y tế tiếng Việt để so sánh chính xác
  */
@@ -51,22 +64,396 @@ export function normalizeMedicalText(text: string): string {
  */
 export function normalizeMedicationName(name: string): string {
   if (!name) return '';
-  const normalized = normalizeMedicalText(name);
-  // Loại bỏ các hậu tố liều thông dụng như 5mg, 500mg, 10ml, 1g... để so sánh tên hoạt chất/biệt dược
-  return normalized
-    .replace(/\b\d+(\.\d+)?\s*(mg|g|mcg|ml|l|iu|ui|viên|ống|gói|chai)\b/gi, '')
-    .trim();
+  let normalized = normalizeMedicalText(name);
+  // Loại bỏ các tiền tố số thứ tự: 1., 1/, Thuốc 1:, Thuốc: (không bỏ chữ Thuốc đứng độc lập như Thuốc A)
+  normalized = normalized.replace(/^\s*(?:(?:\d+|[ivx]+)[\.\/\)\-:]|\bthuốc\s*\d+[:\.\-]?|\bthuốc\s*[:\-])\s*/i, '');
+  // Loại bỏ liều lượng kết hợp (VD: 50mg + 1000mg, 50/1000, 10mg + 20mg, 50/850mg)
+  normalized = normalized.replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)?\s*[\/+\-x]\s*\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)?\b/gi, ' ');
+  normalized = normalized.replace(/\b\d+\s*\/\s*\d+\b/g, ' ');
+  // Loại bỏ các hậu tố liều thông dụng như 5mg, 500mg, 10ml, 1g, 0.1%...
+  normalized = normalized.replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)\b/gi, ' ');
+  // Loại bỏ các ký tự dấu toán học hoặc nối còn sót lại ở cuối chuỗi (+, /, -)
+  normalized = normalized.replace(/[\/+\-·,.;]+(?:\s+|$)/g, ' ');
+  return normalized.replace(/\s+/g, ' ').trim();
 }
 
 /**
- * Bỏ dấu tiếng Việt để so sánh chuỗi regex mạnh mẽ hơn
+ * Trích xuất các token định danh cốt lõi của thuốc (hoạt chất và biệt dược)
+ * Loại bỏ tiền tố số thứ tự, hậu tố liều lượng phức hợp, đơn vị, dung tích, phần trăm
+ * Sắp xếp các token hoạt chất để "A + B" trùng "B + A"
  */
-export function removeVietnameseAccents(str: string): string {
-  return str
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'D');
+export function canonicalizeMedicationKey(name: string): string {
+  if (!name || typeof name !== 'string') return '';
+
+  // 1. Loại bỏ số thứ tự đầu dòng: "1. ", "1/ ", "1) ", "Thuốc 1: ", v.v.
+  let cleaned = name.replace(/^\s*(?:(?:\d+|[ivx]+)[\.\/\)\-:]|\bthuốc\s*\d+[:\.\-]?|\bthuốc\s*[:\-])\s*/i, '');
+
+  // 2. Tách phần trong ngoặc (biệt dược thường nằm trong ngoặc như "(VASITIMB 10/20MG)" hoặc "(METFORMIN HCL 850/SITAGLIPTIN 50)")
+  const brandMatches = cleaned.match(/\(([^)]+)\)/g) || [];
+  const brandTexts = brandMatches.map((m) => m.replace(/[()]/g, ' '));
+  let mainText = cleaned.replace(/\(([^)]+)\)/g, ' ');
+
+  // 3. Hàm loại bỏ liều lượng và con số/đơn vị toàn diện:
+  const stripDosagePatterns = (text: string): string => {
+    return text
+      .replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)?\s*[\/+\-x]\s*\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)?\b/gi, ' ')
+      .replace(/\b\d+\s*\/\s*\d+(?:mg|g)?\b/gi, ' ')
+      .replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai|lo|hop)\b/gi, ' ')
+      .replace(/\b\d+(?:[.,]\d+)?\s*%/g, ' ')
+      .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|l)\b/gi, ' ')
+      .replace(/\b\d+(?:[.,]\d+)?\b/g, ' ');
+  };
+
+  mainText = stripDosagePatterns(mainText);
+  const brandCombined = stripDosagePatterns(brandTexts.join(' '));
+
+  // 4. Chuẩn hóa tiếng Việt, bỏ dấu và ký tự đặc biệt, chuẩn hóa gốc dược học
+  const normalizeTokens = (text: string): string[] => {
+    const unaccented = removeVietnameseAccents(text.toLowerCase());
+    return unaccented
+      .replace(/[^a-z0-9]/g, ' ')
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter((token) => {
+        if (token.length < 2) return false;
+        const stopWords = new Set([
+          'thuoc', 'vien', 'ong', 'goi', 'chai', 'lo', 'hop', 'dung', 'dich',
+          'eye', 'drop', 'drops', 'sl', 'mg', 'ml', 'uong', 'ngay', 'lan',
+          'hcl', 'salt', 'sodium', 'potassium'
+        ]);
+        return !stopWords.has(token);
+      })
+      .map((token) => {
+        if (token.endsWith('ine')) return token.slice(0, -1);
+        if (token.endsWith('ole')) return token.slice(0, -1);
+        return token;
+      });
+  };
+
+  const mainTokens = normalizeTokens(mainText);
+  const brandTokens = normalizeTokens(brandCombined);
+
+  // Nếu có brandTokens đặc trưng (như vasitimb, sitamet, stradiras), ưu tiên đưa lên đầu khóa
+  const primaryBrand = brandTokens.find((t) => t.length >= 4 && !['metformin', 'sitagliptin', 'ezetimibe', 'simvastatin', 'atorvastatin'].includes(t));
+  if (primaryBrand) {
+    return `brand_${primaryBrand}`;
+  }
+
+  const allTokens = Array.from(new Set([...mainTokens, ...brandTokens])).sort();
+  if (allTokens.length === 0) {
+    return normalizeMedicationName(name) || normalizeMedicalText(name);
+  }
+  return allTokens.join('_');
+}
+
+/**
+ * Làm sạch tên thuốc hiển thị:
+ * Cắt bỏ phần liều lượng thừa lặp lại sau ngoặc tên biệt dược (VD: "(SITA-MET 50/1000) 50mg + 1000mg" -> "(SITA-MET 50/1000)")
+ * Chuẩn hóa viết hoa chữ cái đầu cho tên hoạt chất
+ */
+export function cleanMedicationDisplayName(name: string): string {
+  if (!name || typeof name !== 'string') return '';
+  let cleaned = name.trim().replace(/^\s*(?:(?:\d+|[ivx]+)[\.\/\)\-:]|\bthuốc\s*\d+[:\.\-]?|\bthuốc\s*[:\-])\s*/i, '');
+
+  const lastCloseParenIndex = cleaned.lastIndexOf(')');
+  if (lastCloseParenIndex !== -1 && lastCloseParenIndex < cleaned.length - 1) {
+    const tail = cleaned.slice(lastCloseParenIndex + 1).trim();
+    // Nếu phần tail là liều lượng hoặc số lượng lặp lại
+    if (/^(\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|l|iu|ui|%|viên|v|ống|gói|chai)?\s*[\/+\-x]?\s*)+$/i.test(tail)) {
+      cleaned = cleaned.slice(0, lastCloseParenIndex + 1).trim();
+    }
+  }
+
+  // Viết hoa chữ cái đầu của các hoạt chất chính
+  cleaned = cleaned.replace(/(?:^|\+\s*)([a-zà-ỹ])/g, (match) => match.toUpperCase());
+  return cleaned.trim();
+}
+
+function pickBestMedicationDisplayName(a: string, b: string): string {
+  const aClean = cleanMedicationDisplayName(a);
+  const bClean = cleanMedicationDisplayName(b);
+  const aHasParen = /\([^)]+\)/.test(aClean);
+  const bHasParen = /\([^)]+\)/.test(bClean);
+  if (aHasParen && !bHasParen) return aClean;
+  if (bHasParen && !aHasParen) return bClean;
+  return aClean.length >= bClean.length ? aClean : bClean;
+}
+
+function pickBetterClinicalValue(a?: string, b?: string): string | undefined {
+  if (!a) return b ? b.trim() : undefined;
+  if (!b) return a.trim();
+  const aTrim = a.trim();
+  const bTrim = b.trim();
+  if (aTrim === bTrim) return aTrim;
+  if (aTrim.toLowerCase().includes(bTrim.toLowerCase())) return aTrim;
+  if (bTrim.toLowerCase().includes(aTrim.toLowerCase())) return bTrim;
+  if (/ngày|lần|viên|uống|sau/i.test(aTrim) && !/ngày|lần|viên|uống|sau/i.test(bTrim)) return aTrim;
+  if (/ngày|lần|viên|uống|sau/i.test(bTrim) && !/ngày|lần|viên|uống|sau/i.test(aTrim)) return bTrim;
+  return aTrim.length >= bTrim.length ? aTrim : bTrim;
+}
+
+function pickBetterDuration(a?: string, b?: string): string | undefined {
+  if (!a) return b ? b.trim() : undefined;
+  if (!b) return a.trim();
+  const aTrim = a.trim();
+  const bTrim = b.trim();
+  if (aTrim === bTrim) return aTrim;
+  if (aTrim.includes('ngày') && bTrim.toLowerCase().includes('days')) return aTrim;
+  if (bTrim.includes('ngày') && aTrim.toLowerCase().includes('days')) return bTrim;
+  return aTrim.length >= bTrim.length ? aTrim : bTrim;
+}
+
+/**
+ * Hợp nhất thông minh một cặp thuốc trùng lặp (giữ tên chuẩn, ghép liều, tần suất, thời gian, số lượng)
+ */
+export function mergeMedicationPair(existing: Medication, incoming: Medication): Medication {
+  const merged: Medication = {
+    name: pickBestMedicationDisplayName(existing.name, incoming.name),
+    dosage: pickBetterClinicalValue(existing.dosage, incoming.dosage),
+    frequency: pickBetterClinicalValue(existing.frequency, incoming.frequency),
+    duration: pickBetterDuration(existing.duration, incoming.duration),
+  };
+  const quantity = pickBetterClinicalValue(existing.quantity, incoming.quantity);
+  if (quantity) merged.quantity = quantity;
+  const timing = pickBetterClinicalValue(existing.timing, incoming.timing);
+  if (timing) merged.timing = timing;
+  const instructions = pickBetterClinicalValue(existing.instructions, incoming.instructions);
+  if (instructions) merged.instructions = instructions;
+
+  return merged;
+}
+
+/**
+ * Khử trùng lặp danh sách thuốc: gom các biến thể có cùng hoạt chất/biệt dược thành 1 bản ghi tối ưu nhất
+ */
+export function cleanAndDeduplicateMedications(medications: Medication[]): Medication[] {
+  if (!Array.isArray(medications) || medications.length === 0) return [];
+  const medMap = new Map<string, Medication>();
+
+  for (const rawMed of medications) {
+    if (!rawMed || typeof rawMed.name !== 'string' || !rawMed.name.trim()) continue;
+    const cleanedName = cleanMedicationDisplayName(rawMed.name);
+    const key = canonicalizeMedicationKey(cleanedName) || normalizeMedicationName(cleanedName) || normalizeMedicalText(cleanedName);
+    if (!key) continue;
+
+    const med: Medication = {
+      name: cleanedName,
+      dosage: rawMed.dosage ? rawMed.dosage.trim() : undefined,
+      frequency: rawMed.frequency ? rawMed.frequency.trim() : undefined,
+      duration: rawMed.duration ? rawMed.duration.trim() : undefined,
+    };
+    if (rawMed.quantity && rawMed.quantity.trim()) med.quantity = rawMed.quantity.trim();
+    if (rawMed.timing && rawMed.timing.trim()) med.timing = rawMed.timing.trim();
+    if (rawMed.instructions && rawMed.instructions.trim()) med.instructions = rawMed.instructions.trim();
+
+    const existing = medMap.get(key);
+    if (!existing) {
+      medMap.set(key, med);
+    } else {
+      medMap.set(key, mergeMedicationPair(existing, med));
+    }
+  }
+
+  return Array.from(medMap.values());
+}
+
+/**
+ * Chuẩn hóa các thuật ngữ / lỗi chính tả y tế thông dụng
+ */
+export function standardizeMedicalSpelling(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\binsuline\b/gi, 'insulin')
+    .replace(/\b(glucozo|glucoza)\b/gi, 'glucose')
+    .replace(/\bcholesteron\b/gi, 'cholesterol')
+    .replace(/\btriglyceride\b/gi, 'triglycerid')
+    .replace(/\bacid uric\b/gi, 'axit uric')
+    .replace(/\bhb\s*a1c\b/gi, 'HbA1c')
+    .replace(/\bcreatinine\b/gi, 'creatinin')
+    .replace(/\bproteine\b/gi, 'protein')
+    .replace(/\bđái tháo đường típ\b/gi, 'đái tháo đường typ')
+    .replace(/\bđái tháo đường type\b/gi, 'đái tháo đường typ');
+}
+
+/**
+ * Trích xuất mã ICD-10 từ chuỗi chẩn đoán nếu có (VD: "(E11)", "(I10)", "(E78.2)", "H10.5")
+ */
+export function extractIcdCode(text: string): string | null {
+  if (!text) return null;
+  const match = text.match(/\b\(([A-Z]\d{2}(?:\.\d{1,2})?)\)/i) || text.match(/\b([A-Z]\d{2}(?:\.\d{1,2})?)\b/);
+  return match ? match[1].toUpperCase() : null;
+}
+
+/**
+ * Khử trùng lặp chẩn đoán y khoa thông minh:
+ * 1. Gom nhóm theo mã ICD-10 (như E11, I10, E78.2...)
+ * 2. Chuẩn hóa chính tả y tế (insuline -> insulin...)
+ * 3. Loại bỏ chẩn đoán chung chung khi đã có chẩn đoán chi tiết bao trùm
+ */
+export function cleanAndDeduplicateDiagnoses(diagnoses: string[]): string[] {
+  if (!Array.isArray(diagnoses) || diagnoses.length === 0) return [];
+
+  interface DiagItem {
+    raw: string;
+    cleaned: string;
+    icd: string | null;
+    canonicalText: string;
+  }
+
+  const items: DiagItem[] = [];
+
+  for (const d of diagnoses) {
+    if (typeof d !== 'string') continue;
+    let trimmed = d.trim()
+      .replace(/^[-*•+]\s*/, '')
+      .replace(/^\d+[\.\/\)]\s*/, '')
+      .replace(/[.,;]$/, '')
+      .trim();
+    if (!trimmed) continue;
+
+    trimmed = standardizeMedicalSpelling(trimmed);
+    const icd = extractIcdCode(trimmed);
+    const canonicalText = removeVietnameseAccents(normalizeMedicalText(trimmed))
+      .replace(/\b(benh|hoi chung|tinh trang|mac|bi)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    items.push({
+      raw: d,
+      cleaned: trimmed,
+      icd,
+      canonicalText,
+    });
+  }
+
+  const icdMap = new Map<string, DiagItem>();
+  const nonIcdItems: DiagItem[] = [];
+
+  for (const item of items) {
+    if (item.icd) {
+      const existing = icdMap.get(item.icd);
+      if (!existing) {
+        icdMap.set(item.icd, item);
+      } else {
+        if (item.cleaned.length > existing.cleaned.length) {
+          icdMap.set(item.icd, item);
+        }
+      }
+    } else {
+      nonIcdItems.push(item);
+    }
+  }
+
+  const resultItems: DiagItem[] = Array.from(icdMap.values());
+
+  for (const nonIcd of nonIcdItems) {
+    const isSubsumed = resultItems.some((accepted) => {
+      if (accepted.canonicalText === nonIcd.canonicalText) return true;
+      if (
+        nonIcd.canonicalText.length >= 4 &&
+        accepted.canonicalText.includes(nonIcd.canonicalText)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    if (!isSubsumed) {
+      const alreadyInResult = resultItems.some(
+        (r) => r.canonicalText === nonIcd.canonicalText
+      );
+      if (!alreadyInResult) {
+        resultItems.push(nonIcd);
+      }
+    }
+  }
+
+  return resultItems.map((item) => item.cleaned);
+}
+
+/**
+ * Khử trùng lặp nội dung Lời dặn / Ghi chú của bác sĩ ở cấp độ câu và mệnh đề
+ * Loại bỏ các đoạn văn bị dán nối tiếp nhiều lần (do OCR nhiều trang hoặc gộp đơn)
+ */
+export function deduplicateAdviceText(text?: string): string | undefined {
+  if (!text || typeof text !== 'string') return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+
+  // Tách văn bản thành các câu hoặc mục lời dặn
+  const rawSegments = trimmed
+    .split(/\n+|(?<=[.!?;])\s+/)
+    .map((s) => s.trim().replace(/^[-*•+]\s*/, '').replace(/^\d+[\.\/\)]\s*/, ''))
+    .filter((s) => s.length > 0);
+
+  if (rawSegments.length <= 1) {
+    return trimmed;
+  }
+
+  const acceptedSegments: string[] = [];
+  const acceptedNormalized: string[] = [];
+
+  for (const seg of rawSegments) {
+    const cleanSeg = seg.trim().replace(/[.,;]$/, '');
+    if (cleanSeg.length < 3) continue;
+
+    const norm = removeVietnameseAccents(cleanSeg.toLowerCase())
+      .replace(/[^a-z0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!norm) continue;
+
+    if (acceptedNormalized.includes(norm)) {
+      continue;
+    }
+
+    let isSubsumed = false;
+    for (let i = 0; i < acceptedNormalized.length; i++) {
+      const existing = acceptedNormalized[i];
+      if (existing.includes(norm)) {
+        isSubsumed = true;
+        break;
+      }
+      if (norm.includes(existing) && norm.length > existing.length * 1.2) {
+        acceptedSegments[i] = cleanSeg;
+        acceptedNormalized[i] = norm;
+        isSubsumed = true;
+        break;
+      }
+
+      const normTokens = new Set(norm.split(' ').filter(t => t.length >= 2));
+      const existingTokens = new Set(existing.split(' ').filter(t => t.length >= 2));
+      let shared = 0;
+      for (const t of normTokens) {
+        if (existingTokens.has(t)) shared++;
+      }
+      const similarity = shared / Math.max(normTokens.size, existingTokens.size);
+      if (similarity >= 0.85) {
+        isSubsumed = true;
+        if (cleanSeg.length > acceptedSegments[i].length) {
+          acceptedSegments[i] = cleanSeg;
+          acceptedNormalized[i] = norm;
+        }
+        break;
+      }
+    }
+
+    if (!isSubsumed) {
+      acceptedSegments.push(cleanSeg);
+      acceptedNormalized.push(norm);
+    }
+  }
+
+  if (acceptedSegments.length === 0) return undefined;
+
+  const hasNewlines = trimmed.includes('\n');
+  return acceptedSegments
+    .map((s) => {
+      const capitalized = s.charAt(0).toUpperCase() + s.slice(1);
+      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+    })
+    .join(hasNewlines ? '\n' : ' ');
 }
 
 /**
@@ -114,46 +501,19 @@ function resolveCanonicalMetricKey(metric: Partial<HealthMetric>): string {
 }
 
 /**
- * Khử trùng lặp nội dung BÊN TRONG của một sự kiện y tế (diagnoses, medications, metrics)
+ * Khử trùng lặp nội dung BÊN TRONG của một sự kiện y tế (diagnoses, medications, metrics, imaging, advice, notes)
  */
 export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(event: T): T {
   // 1. Khử trùng lặp Chẩn đoán (Diagnoses)
   let cleanedDiagnoses: string[] | undefined = undefined;
   if (Array.isArray(event.diagnoses)) {
-    const seen = new Set<string>();
-    cleanedDiagnoses = [];
-    for (const d of event.diagnoses) {
-      const trimmed = d.trim().replace(/^[-*•+]\s*/, '').replace(/[.,;]$/, '');
-      if (!trimmed) continue;
-      const normalized = normalizeMedicalText(trimmed);
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
-        cleanedDiagnoses.push(trimmed);
-      }
-    }
+    cleanedDiagnoses = cleanAndDeduplicateDiagnoses(event.diagnoses);
   }
 
   // 2. Khử trùng lặp Đơn thuốc (Medications)
   let cleanedMedications: Medication[] | undefined = undefined;
   if (Array.isArray(event.medications)) {
-    const medMap = new Map<string, Medication>();
-    for (const med of event.medications) {
-      const name = med.name?.trim();
-      if (!name) continue;
-      const key = normalizeMedicationName(name) || normalizeMedicalText(name);
-      const existing = medMap.get(key);
-      if (!existing) {
-        medMap.set(key, { ...med, name });
-      } else {
-        medMap.set(key, {
-          name: existing.name.length >= name.length ? existing.name : name,
-          dosage: existing.dosage || med.dosage,
-          frequency: existing.frequency || med.frequency,
-          duration: existing.duration || med.duration,
-        });
-      }
-    }
-    cleanedMedications = Array.from(medMap.values());
+    cleanedMedications = cleanAndDeduplicateMedications(event.medications);
   }
 
   // 3. Khử trùng lặp Chỉ số đo (Metrics)
@@ -191,7 +551,11 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
       const key = normalizeModalityKey(modality);
       const existing = imgMap.get(key);
       if (!existing) {
-        imgMap.set(key, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
+        imgMap.set(key, {
+          modality: modality || 'Chẩn đoán hình ảnh',
+          findings: deduplicateAdviceText(findings) || findings,
+          conclusion: deduplicateAdviceText(conclusion) || conclusion,
+        });
       } else {
         let mergedFindings = existing.findings || '';
         if (findings && findings !== mergedFindings) {
@@ -205,13 +569,17 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
         const mergedConclusion = conclusion.length > (existing.conclusion || '').length ? conclusion : (existing.conclusion || '');
         imgMap.set(key, {
           modality: existing.modality || modality,
-          findings: mergedFindings,
-          conclusion: mergedConclusion,
+          findings: deduplicateAdviceText(mergedFindings) || mergedFindings,
+          conclusion: deduplicateAdviceText(mergedConclusion) || mergedConclusion,
         });
       }
     }
     cleanedImagingResults = Array.from(imgMap.values());
   }
+
+  // 5. Khử trùng lặp Lời dặn & Ghi chú (Advice & Notes)
+  const cleanedAdvice = typeof event.advice === 'string' ? deduplicateAdviceText(event.advice) : event.advice;
+  const cleanedNotes = typeof event.notes === 'string' ? deduplicateAdviceText(event.notes) : event.notes;
 
   return {
     ...event,
@@ -219,6 +587,8 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
     medications: cleanedMedications ?? event.medications,
     metrics: cleanedMetrics ?? event.metrics,
     imagingResults: cleanedImagingResults ?? event.imagingResults,
+    advice: cleanedAdvice,
+    notes: cleanedNotes,
   };
 }
 
@@ -558,37 +928,17 @@ export function mergeHealthEvents(
   const primary = preferIncomingAsPrimary ? cleanIncoming : cleanExisting;
   const secondary = preferIncomingAsPrimary ? cleanExisting : cleanIncoming;
 
-  // 1. Gộp chẩn đoán (không trùng lặp)
-  const diagSeen = new Set<string>();
-  const mergedDiagnoses: string[] = [];
-  for (const d of [...primary.diagnoses, ...secondary.diagnoses]) {
-    const norm = normalizeMedicalText(d);
-    if (!diagSeen.has(norm)) {
-      diagSeen.add(norm);
-      mergedDiagnoses.push(d);
-    }
-  }
+  // 1. Gộp chẩn đoán (không trùng lặp, chuẩn hóa chính tả y tế và mã ICD-10)
+  const mergedDiagnoses = cleanAndDeduplicateDiagnoses([
+    ...(primary.diagnoses || []),
+    ...(secondary.diagnoses || []),
+  ]);
 
-  // 2. Gộp đơn thuốc (cập nhật hoặc bổ sung thuốc mới)
-  const medMap = new Map<string, Medication>();
-  for (const med of primary.medications) {
-    const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
-    medMap.set(key, med);
-  }
-  for (const med of secondary.medications) {
-    const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
-    const prev = medMap.get(key);
-    if (!prev) {
-      medMap.set(key, med);
-    } else {
-      medMap.set(key, {
-        name: med.name.length >= prev.name.length ? med.name : prev.name,
-        dosage: prev.dosage || med.dosage,
-        frequency: prev.frequency || med.frequency,
-        duration: prev.duration || med.duration,
-      });
-    }
-  }
+  // 2. Gộp đơn thuốc (cập nhật hoặc bổ sung thuốc mới, giữ đầy đủ liều lượng, số lượng, cách dùng)
+  const mergedMedications = cleanAndDeduplicateMedications([
+    ...(primary.medications || []),
+    ...(secondary.medications || []),
+  ]);
 
   // 3. Gộp chỉ số đo (Metrics) - Chuẩn hóa key để không trùng tên biến thể
   const metricMap = new Map<string, HealthMetric>();
@@ -617,7 +967,11 @@ export function mergeHealthEvents(
     const key = normalizeModalityKey(modality);
     const current = imgMap.get(key);
     if (!current) {
-      imgMap.set(key, { modality: modality || 'Chẩn đoán hình ảnh', findings, conclusion });
+      imgMap.set(key, {
+        modality: modality || 'Chẩn đoán hình ảnh',
+        findings: deduplicateAdviceText(findings) || findings,
+        conclusion: deduplicateAdviceText(conclusion) || conclusion,
+      });
     } else {
       let mergedFindings = current.findings || '';
       if (findings && findings !== mergedFindings) {
@@ -631,8 +985,8 @@ export function mergeHealthEvents(
       const mergedConclusion = conclusion.length > (current.conclusion || '').length ? conclusion : (current.conclusion || '');
       imgMap.set(key, {
         modality: current.modality || modality,
-        findings: mergedFindings,
-        conclusion: mergedConclusion,
+        findings: deduplicateAdviceText(mergedFindings) || mergedFindings,
+        conclusion: deduplicateAdviceText(mergedConclusion) || mergedConclusion,
       });
     }
   }
@@ -649,23 +1003,14 @@ export function mergeHealthEvents(
       }
     : undefined;
 
-  // 6. Lời dặn & Ghi chú (làm sạch trùng lặp)
-  let mergedAdvice = primary.advice;
-  if (secondary.advice && secondary.advice !== primary.advice) {
-    mergedAdvice = primary.advice
-      ? Array.from(new Set([...primary.advice.split('\n'), ...secondary.advice.split('\n')]))
-          .filter(Boolean)
-          .join('\n')
-      : secondary.advice;
-  }
+  // 6. Lời dặn & Ghi chú (khử trùng lặp câu & mệnh đề thông minh)
+  const combinedAdvice = [primary.advice, secondary.advice].filter(Boolean).join('. ');
+  const mergedAdvice = deduplicateAdviceText(combinedAdvice);
 
-  let mergedNotes = primary.notes;
-  if (secondary.notes && secondary.notes !== primary.notes) {
-    const rawNotes = [...(primary.notes?.split('\n') || []), ...(secondary.notes?.split('\n') || [])]
-      .map(n => n.trim())
-      .filter(n => n && !n.includes('Có dữ liệu được trích xuất'));
-    mergedNotes = Array.from(new Set(rawNotes)).join('\n') || undefined;
-  }
+  const rawNotes = [...(primary.notes?.split('\n') || []), ...(secondary.notes?.split('\n') || [])]
+    .map((n) => n.trim())
+    .filter((n) => n && !n.includes('Có dữ liệu được trích xuất'));
+  const mergedNotes = deduplicateAdviceText(rawNotes.join('. '));
 
   // 7. Gộp danh sách các tệp nguồn liên kết (additionalSources)
   const primarySources = primary.additionalSources || (primary.sourceFileId ? [{ driveFileId: primary.sourceFileId, fileName: primary.sourceFileName }] : []);
@@ -679,7 +1024,7 @@ export function mergeHealthEvents(
   }
   const mergedSources = Array.from(sourcesMap.values());
 
-  return {
+  return cleanAndDeduplicateEventData({
     ...primary,
     id: cleanExisting.id,
     sourceFileId: primary.sourceFileId || secondary.sourceFileId,
@@ -692,7 +1037,7 @@ export function mergeHealthEvents(
     additionalSources: mergedSources.length > 1 ? mergedSources : primary.additionalSources,
     physicalExam: mergedPhysicalExam,
     diagnoses: mergedDiagnoses,
-    medications: Array.from(medMap.values()),
+    medications: mergedMedications,
     metrics: Array.from(metricMap.values()),
     imagingResults: Array.from(imgMap.values()),
     vaccinations: primary.vaccinations?.length ? primary.vaccinations : secondary.vaccinations,
@@ -705,7 +1050,7 @@ export function mergeHealthEvents(
     patientBirthDate: primary.patientBirthDate || secondary.patientBirthDate,
     patientGender: primary.patientGender || secondary.patientGender,
     recordedAt: now,
-  };
+  });
 }
 
 export type StructuredEventContainment =
@@ -727,7 +1072,7 @@ function collectStructuredClinicalItems(event: Partial<HealthEvent>): Set<string
     items.add(`metric:${key}:${Number(metric.value).toFixed(2)}`);
   }
   for (const med of event.medications || []) {
-    const key = normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
+    const key = canonicalizeMedicationKey(med.name) || normalizeMedicationName(med.name) || normalizeMedicalText(med.name);
     if (key) items.add(`med:${key}`);
   }
   for (const img of event.imagingResults || []) {
@@ -834,7 +1179,7 @@ export function consolidateTimelineEvents(timeline: HealthEvent[]): {
   mergedCount: number;
 } {
   if (!timeline || timeline.length <= 1) {
-    return { timeline: timeline ? [...timeline] : [], mergedCount: 0 };
+    return { timeline: timeline ? timeline.map(cleanAndDeduplicateEventData) : [], mergedCount: 0 };
   }
 
   const prioritizedTimeline = [...timeline].sort(
@@ -869,9 +1214,9 @@ export function consolidateTimelineEvents(timeline: HealthEvent[]): {
         });
 
     if (matchIndex === -1) {
-      consolidated.push(event);
+      consolidated.push(cleanAndDeduplicateEventData(event));
     } else {
-      consolidated[matchIndex] = mergeHealthEvents(consolidated[matchIndex], event);
+      consolidated[matchIndex] = cleanAndDeduplicateEventData(mergeHealthEvents(consolidated[matchIndex], event));
       mergedCount += 1;
     }
   }
