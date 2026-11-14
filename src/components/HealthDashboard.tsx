@@ -146,6 +146,7 @@ import {
 } from '../utils/healthMetricService';
 import {
   analyzeComprehensiveHealth,
+  cleanErrorMessage,
   extractHealthEvent,
   extractHealthEventWithProgress,
   refineAndOrganizeMemberData,
@@ -193,8 +194,9 @@ import {
   type WorkspaceAccessRole,
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
-import { digitizationLogger } from '../utils/digitizationLogger';
-import { setSharedGeminiKeys, trackSharedGeminiKeysLoad } from '../utils/geminiSharedResources';
+import { digitizationLogger, type DigitizationLogEntry } from '../utils/digitizationLogger';
+import { buildApiUrl } from '../utils/apiConfig';
+import { getSharedGeminiKeys, setSharedGeminiKeys, trackSharedGeminiKeysLoad } from '../utils/geminiSharedResources';
 import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
 import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
@@ -5128,6 +5130,13 @@ export function HealthDashboard({
       });
     };
 
+    const chatTimer = digitizationLogger.startTimer();
+    digitizationLogger.log('info', 'assistant_chat_start', `Bắt đầu hỏi Trợ lý AI cho ${selectedMember.name}`, {
+      memberId: selectedMember.id,
+      questionLength: question.length,
+      historyCount: history.length,
+    });
+
     try {
       const { answer, citations } = await streamHealthAssistant(
         question,
@@ -5150,6 +5159,11 @@ export function HealthDashboard({
       if (!isCurrentRequest()) return;
       const finalAnswer = answer.trim() || streamedText;
       const finalCitations = citations.length > 0 ? citations : streamedCitations;
+      digitizationLogger.log('info', 'assistant_chat_complete', 'Trợ lý AI phản hồi thành công.', {
+        memberId: selectedMember.id,
+        answerLength: finalAnswer.length,
+        citationCount: finalCitations.length,
+      }, chatTimer());
       upsertAssistantDraft(
         finalAnswer || 'Trợ lý AI chưa có phản hồi phù hợp. Vui lòng thử lại.',
         finalCitations,
@@ -5157,12 +5171,26 @@ export function HealthDashboard({
       );
     } catch (error) {
       if (!isCurrentRequest()) return;
-      const errorText =
+      const rawErrorText =
         error instanceof Error
           ? error.message
           : 'Không thể kết nối trợ lý AI lúc này. Vui lòng thử lại.';
+      const friendlyErrorText = cleanErrorMessage(rawErrorText);
+      digitizationLogger.log(
+        'error',
+        'assistant_chat_error',
+        `Lỗi Trợ lý AI: ${rawErrorText}`,
+        {
+          memberId: selectedMember.id,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: rawErrorText,
+          cleanMessage: friendlyErrorText,
+          streamedLength: streamedText.length,
+        },
+        chatTimer(),
+      );
       upsertAssistantDraft(
-        streamedText ? `${streamedText}\n\n(${errorText})` : errorText,
+        streamedText ? `${streamedText}\n\n(${friendlyErrorText})` : friendlyErrorText,
         streamedCitations,
         new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
       );
@@ -5174,7 +5202,9 @@ export function HealthDashboard({
     if (!selectedMember || !selectedProfile) return;
     setIsSummarizing(true);
     setAnalysisError('');
-    digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu (${model})`, { memberId: selectedMember.id });
+    const analysisTimer = digitizationLogger.startTimer();
+    let currentStep: 'summarize' | 'analyze-comprehensive' | 'save' = 'summarize';
+    digitizationLogger.log('info', 'analysis', `Bắt đầu phân tích chuyên sâu (${model})`, { memberId: selectedMember.id, model });
     
     try {
       // Step 1: Narrative Summary (3.5-flash-lite)
@@ -5182,9 +5212,11 @@ export function HealthDashboard({
       const narrative = await summarizeHealthProfile(selectedMember, selectedProfile);
       
       // Step 2: Comprehensive 4-Layer Analysis
+      currentStep = 'analyze-comprehensive';
       showToast('Đang phân tích 4 lớp y khoa chuyên sâu bằng AI...', 'info');
       const deepRes = await analyzeComprehensiveHealth(selectedMember, selectedProfile, model);
       
+      currentStep = 'save';
       const updated: HealthProfile = {
         ...selectedProfile,
         summary: { ...selectedProfile.summary, narrative },
@@ -5195,23 +5227,26 @@ export function HealthDashboard({
       
       const saved = await saveHealthProfile(selectedMember.profileFileId, updated);
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
-      digitizationLogger.log('info', 'analysis', 'Hoàn tất phân tích chuyên sâu', { memberId: selectedMember.id });
+      digitizationLogger.log('info', 'analysis', 'Hoàn tất phân tích chuyên sâu', { memberId: selectedMember.id, model: deepRes.modelUsed || model }, analysisTimer());
       showToast(`Đã hoàn tất phân tích 4 lớp y khoa chuyên sâu bằng AI!`, 'success');
     } catch (error) {
       const rawMsg = error instanceof Error ? error.message : 'Không thể tạo tổng kết bệnh án.';
-      let friendlyMsg = rawMsg;
-      if (rawMsg.includes('{') && rawMsg.includes('error')) {
-        try {
-          const parsed = JSON.parse(rawMsg);
-          if (parsed?.error?.message) {
-            friendlyMsg = `Máy chủ AI Google đang bận (${parsed.error.code || 503}): ${parsed.error.message}`;
-          }
-        } catch {
-          // ignore
-        }
-      }
+      const friendlyMsg = cleanErrorMessage(rawMsg);
       setAnalysisError(friendlyMsg);
-      digitizationLogger.log('error', 'analysis', 'Lỗi phân tích chuyên sâu');
+      digitizationLogger.log(
+        'error',
+        'analysis',
+        `Lỗi phân tích chuyên sâu (${currentStep}): ${rawMsg}`,
+        {
+          memberId: selectedMember.id,
+          model,
+          step: currentStep,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: rawMsg,
+          cleanMessage: friendlyMsg,
+        },
+        analysisTimer(),
+      );
       showToast(friendlyMsg, 'error');
     } finally {
       setIsSummarizing(false);
@@ -5608,10 +5643,38 @@ export function HealthDashboard({
                     onClick={async () => {
                       setShowSettingsDropdown(false);
                       try {
-                        const success = await digitizationLogger.exportLogsAsFile(undefined, {
+                        let serverLogs: DigitizationLogEntry[] | undefined;
+                        let serverLogsFetchError: string | undefined;
+                        let backendLogsUrl = '';
+                        try {
+                          backendLogsUrl = buildApiUrl('/api/gemini/digitization-logs');
+                          const controller = new AbortController();
+                          const timer = window.setTimeout(() => controller.abort(), 4_000);
+                          try {
+                            const res = await fetch(backendLogsUrl, { signal: controller.signal });
+                            if (res.ok) {
+                              const payload = await res.json();
+                              if (Array.isArray(payload?.logs)) {
+                                serverLogs = payload.logs as DigitizationLogEntry[];
+                              }
+                            } else {
+                              serverLogsFetchError = `HTTP ${res.status}`;
+                            }
+                          } finally {
+                            window.clearTimeout(timer);
+                          }
+                        } catch (fetchErr) {
+                          serverLogsFetchError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+                        }
+
+                        const success = await digitizationLogger.exportLogsAsFile(serverLogs, {
                           userEmail,
                           memberCount: members.length,
                           workspaceRoot: workspace?.rootFolderId,
+                          configuredGeminiKeyCount: getSharedGeminiKeys().length,
+                          backendLogsUrl: backendLogsUrl || undefined,
+                          serverLogsCount: serverLogs?.length ?? 0,
+                          serverLogsFetchError,
                         });
                         if (success) {
                           showToast('Đã xuất file log trên thiết bị thành công.', 'success');

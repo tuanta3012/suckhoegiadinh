@@ -255,19 +255,22 @@ export const COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA = {
 export function buildComprehensiveAnalysisPrompt(memberName: string, member: unknown, profile: unknown): string {
   const pruned = prepareDataForDeepDive(member, profile);
   return `Bạn là Hội đồng Chuyên gia Y khoa Gia đình & AI Deep-Dive cấp cao.
-Nhiệm vụ: Phân tích 4 lớp y khoa chuyên sâu cho thành viên ${memberName}.
+Nhiệm vụ: Phân tích 4 lớp y khoa chuyên sâu cho thành viên ${memberName} theo nguyên tắc HAI TẦNG DỮ LIỆU:
+- TẦNG TỔNG QUÁT (100% DÒNG THỜI GIAN): Sử dụng toàn bộ 100% các mốc khám trong "tm" (từ "period.from" đến "period.to") cùng tiền sử bệnh ("h") để có cái nhìn tổng quát về nền tảng sức khỏe, thời điểm khởi phát bệnh lý, các đợt điều trị/nhập viện và diễn tiến dài hạn.
+- TẦNG PHÂN TÍCH CHUYÊN SÂU & KHUYẾN NGHỊ CHUYÊN GIA (TRỌNG TÂM 3 NĂM GẦN NHẤT): Tập trung phân tích sâu vào các mốc thuộc 3 năm gần nhất ("focusWindow", các mốc có "inFocus3Y": true) để đánh giá thực trạng hiện tại, xu hướng biến động cận kỳ và đưa ra lời khuyên y khoa chính xác, thiết thực nhất.
 
-DỮ LIỆU HỒ SƠ ĐÃ TỐI ƯU (Pruned Matrix):
+DỮ LIỆU HỒ SƠ SỨC KHỎE (100% dòng thời gian theo thứ tự thời gian):
 ${JSON.stringify(pruned, null, 2)}
-(Chú thích: p=patient, n=name, g=gender, b=birthDate, h=history, tm=timeline, d=date, t=title, diag=diagnoses, img=imaging, phys=physicalExam, bp=bloodPressure, st=status, val=value)
+(Chú thích: p=patient, n=name, g=gender, b=birthDate, h=medicalHistory, totalEvents=tổng số mốc khám, period=toàn bộ khoảng thời gian hồ sơ, focusWindow=khung 3 năm gần nhất để phân tích chuyên sâu, inFocus3Y=mốc thuộc 3 năm gần nhất, tm=toàn bộ timeline, d=date, t=title, diag=diagnoses, meds=medications, img=imaging conclusions, phys=physicalExam, bp=bloodPressure, st=status, val=value, hosp=hospitalization, vacc=vaccinations, adv=advice)
 
 YÊU CẦU PHÂN TÍCH (BẮT BUỘC):
-1. LỚP 1 - Tương quan chéo (crossCorrelations): Chỉ đối chiếu dữ liệu thực sự có trong hồ sơ; nếu thiếu dữ liệu, nêu rõ chưa đủ thông tin.
-2. LỚP 2 - Biến động lịch sử (velocityTrends): Chỉ mô tả xu hướng khi có đủ phép đo theo thời gian; không suy ra ổn định từ dữ liệu thiếu.
-3. LỚP 3 - Giám sát mạn tính (chronicSurveillance): Chỉ kết luận ổn định/lành tính khi được dữ liệu hỗ trợ; nếu thiếu, nêu rõ chưa đủ thông tin.
-4. LỚP 4 - Lộ trình hành động (roadmap): Đưa ra Cảnh báo đỏ, Khám chuyên khoa cần thiết, và Lịch kiểm tra 3-6-12 tháng.
+1. ĐÁNH GIÁ TỔNG QUAN & ĐIỂM SỨC KHỎE (overallAssessment, healthScore): Khái quát bức tranh tổng thể dựa trên 100% lịch sử khám chữa bệnh, sau đó đi sâu đánh giá thực trạng sức khỏe hiện tại dựa trên dữ liệu 3 năm gần nhất.
+2. LỚP 1 - Tương quan chéo (crossCorrelations): Tập trung đối chiếu sâu các chỉ số xét nghiệm, hình ảnh, thể lực và thuốc điều trị trong 3 năm gần nhất, đặt trên nền tiền sử dài hạn; nếu thiếu dữ liệu, nêu rõ chưa đủ thông tin.
+3. LỚP 2 - Biến động lịch sử (velocityTrends): Tham chiếu nền cũ (nếu có) nhưng tập trung phân tích tốc độ tăng/giảm và độ ổn định của các chỉ số trong 3 năm gần nhất; chỉ kết luận xu hướng khi có từ 2 phép đo trở lên theo thời gian.
+4. LỚP 3 - Giám sát mạn tính (chronicSurveillance): So sánh diễn tiến từ lúc khởi phát (nền lịch sử) đến tình trạng kiểm soát trong 3 năm gần nhất (khỏi, ổn định, cần giám sát hay tiến triển).
+5. LỚP 4 - Lộ trình hành động & Lời khuyên chuyên gia (roadmap): Đưa ra Cảnh báo đỏ, Khám chuyên khoa cần thiết, và Lịch kiểm tra 3-6-12 tháng sát nhất với bối cảnh lâm sàng 3 năm gần đây.
 
-LƯU Ý: Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên hoặc chưa được số hóa; không có dữ liệu KHÔNG đồng nghĩa với bình thường. Không tự suy diễn kết quả, chẩn đoán, điểm sức khỏe hay khuyến nghị. Nếu không đủ căn cứ, mô tả rõ là chưa đủ dữ liệu. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
+LƯU Ý: Nếu 3 năm gần nhất có ít dữ liệu, nêu rõ khoảng trống dữ liệu trong 3 năm gần đây thay vì suy diễn. Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên hoặc chưa được số hóa; không có dữ liệu KHÔNG đồng nghĩa với bình thường. Không tự suy diễn kết quả, chẩn đoán hay khuyến nghị. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
 }
 
 export function normalizeComprehensiveAnalysisPayload(

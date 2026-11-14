@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GeminiQuotaScheduler, parseGeminiProjects } from './geminiQuotaScheduler';
+import { createGeminiRequestContext } from './geminiRequestContext';
 
 const quota = { rpm: 1 };
 
@@ -127,8 +128,30 @@ describe('GeminiQuotaScheduler', () => {
     setTimeout(active.release, 20);
 
     const next = await waiting;
-
     expect(next.project.id).toBe('one');
     next.release();
+  });
+
+  it('refunds an RPM token when released with refundRpm=true and captures diagnostics snapshot', async () => {
+    const scheduler = new GeminiQuotaScheduler([{ id: 'one', apiKey: 'first-project-api-key' }]);
+    const failedAttempt = await scheduler.acquire('analysis', 'gemini-4-hydrogen', { rpm: 1 }, new Set(), 100);
+    failedAttempt.release({ refundRpm: true });
+
+    const snapshot = scheduler.getDiagnosticsSnapshot('gemini-4-hydrogen', { rpm: 1 });
+    expect(snapshot.totalProjects).toBe(1);
+    expect(snapshot.rpmUsed.one).toBe(0);
+
+    const retry = await scheduler.acquire('analysis', 'gemini-4-hydrogen', { rpm: 1 }, new Set(), 50);
+    expect(retry.project.id).toBe('one');
+    retry.release();
+  });
+
+  it('allows concurrent tasks in shared request context so OCR does not starve assistant calls', async () => {
+    const { scheduler } = createGeminiRequestContext(['AIzaSy-shared-key-01234567890123456789012345678901']);
+    const ocrLease = await scheduler.acquire('digitization', 'gemini-3.5-flash-lite', { rpm: 15 }, new Set(), 50);
+    const assistantLease = await scheduler.acquire('assistant', 'gemini-3.5-flash-lite', { rpm: 15 }, new Set(), 50);
+    expect(ocrLease.project.id).toBe(assistantLease.project.id);
+    ocrLease.release();
+    assistantLease.release();
   });
 });

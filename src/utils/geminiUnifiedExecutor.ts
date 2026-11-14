@@ -33,8 +33,59 @@ export function getAttemptTimeout(task: GeminiTask): number {
     : GEMINI_TIMEOUTS.analysisAttemptMs;
 }
 
-function getMinimumAttemptDuration(task: GeminiTask, attemptTimeoutMs?: number): number {
-  return Math.min(30_000, attemptTimeoutMs || getAttemptTimeout(task));
+function getMinimumAttemptDuration(
+  task: GeminiTask,
+  attemptTimeoutMs?: number,
+  totalBudgetMs?: number,
+): number {
+  const attemptCap = attemptTimeoutMs || getAttemptTimeout(task);
+  if (totalBudgetMs && totalBudgetMs > 0) {
+    return Math.min(attemptCap, Math.max(2_000, Math.floor(totalBudgetMs / 4)), 30_000);
+  }
+  return Math.min(30_000, attemptCap);
+}
+
+function getRawErrorText(error: unknown): { errorName: string; errorMessage: string } {
+  if (!error) {
+    return { errorName: 'UnknownError', errorMessage: 'Unknown error' };
+  }
+  if (error instanceof Error) {
+    return {
+      errorName: error.name || 'Error',
+      errorMessage: error.message || String(error),
+    };
+  }
+  if (typeof error === 'object') {
+    const obj = error as Record<string, any>;
+    const msg = typeof obj.message === 'string'
+      ? obj.message
+      : typeof obj.error?.message === 'string'
+      ? obj.error.message
+      : JSON.stringify(obj);
+    return {
+      errorName: typeof obj.name === 'string' ? obj.name : 'ObjectError',
+      errorMessage: msg,
+    };
+  }
+  return { errorName: typeof error, errorMessage: String(error) };
+}
+
+function getErrorCategory(details: ReturnType<typeof describeGeminiError>): string {
+  if (details.isInvalidKey) return 'invalid_key';
+  if (details.isDailyQuota) return 'daily_quota';
+  if (details.isRateLimit) return 'rate_limit';
+  if (details.isTransient) return 'transient';
+  return 'provider_or_scheduler_error';
+}
+
+function isNetworkOrTimeoutBeforeProvider(error: unknown): boolean {
+  const { errorName, errorMessage } = getRawErrorText(error);
+  return (
+    errorName === 'TypeError' ||
+    /failed to fetch|networkerror|load failed|network request failed|attempt timed out|stream timed out|econnreset|etimedout|enotfound/i.test(
+      errorMessage,
+    )
+  );
 }
 
 export function getModelQuota(model: string): GeminiQuota {
@@ -315,13 +366,14 @@ async function callGeminiSingleAttempt(
   model: string,
   options: UnifiedExecuteOptions,
   deadline: number,
+  minimumAttemptMs: number,
   signal?: AbortSignal,
 ): Promise<string> {
   if (signal?.aborted) throw new Error('Gemini request was cancelled.');
 
   const remainingTime = deadline - Date.now();
   const requestedAttemptTimeout = options.attemptTimeoutMs || getAttemptTimeout(options.task);
-  if (remainingTime < getMinimumAttemptDuration(options.task, options.attemptTimeoutMs)) {
+  if (remainingTime < minimumAttemptMs) {
     throw new Error(
       `Thời gian xử lý còn lại (${Math.round(remainingTime / 1000)}s) không đủ để gửi request tới Gemini API.`,
     );
@@ -386,7 +438,7 @@ export async function executeGeminiWithPool(
   const totalBudgetMs = options.timeoutMs
     || (options.task === 'digitization' ? GEMINI_TIMEOUTS.ocrTotalMs : GEMINI_TIMEOUTS.analysisTotalMs);
   const deadline = Date.now() + totalBudgetMs;
-  const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs);
+  const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs, totalBudgetMs);
   const maxPoolPasses = options.maxPoolPasses ?? (options.task === 'digitization' ? 3 : 2);
   const dailyQuotaExhaustedProjectIds = new Set<string>();
   let lastError: Error | null = null;
@@ -396,6 +448,7 @@ export async function executeGeminiWithPool(
     model: targetModel,
     keyCount: projects.length,
     maxPoolPasses,
+    rpmLimit: quota.rpm,
   });
 
   for (let pass = 0; pass < maxPoolPasses; pass++) {
@@ -433,12 +486,16 @@ export async function executeGeminiWithPool(
         if (!lastError) {
           lastError = err instanceof Error ? err : new Error(String(err));
         }
-        digitizationLogger.log('warn', 'gemini_slot_wait_failed', 'Không cấp được slot gọi Gemini.', {
+        const errInfo = getRawErrorText(err);
+        digitizationLogger.log('warn', 'gemini_slot_wait_failed', `Không cấp được slot gọi Gemini: ${errInfo.errorMessage}`, {
           requestId: options.requestId,
           task: options.task,
           model: targetModel,
           pass: pass + 1,
           status: describeGeminiError(err).status,
+          errorName: errInfo.errorName,
+          errorMessage: errInfo.errorMessage,
+          schedulerSnapshot: scheduler.getDiagnosticsSnapshot(targetModel, quota, excludedProjectIds),
         });
         break;
       }
@@ -446,6 +503,7 @@ export async function executeGeminiWithPool(
       const { project } = lease;
       attemptedProjectIds.add(project.id);
       const attemptStartedAt = Date.now();
+      let refundRpm = false;
       digitizationLogger.log('info', 'gemini_attempt_start', 'Bắt đầu gọi Gemini provider.', {
         requestId: options.requestId,
         task: options.task,
@@ -462,6 +520,7 @@ export async function executeGeminiWithPool(
           targetModel,
           options,
           deadline,
+          minimumAttemptMs,
           options.signal,
         );
         digitizationLogger.log(
@@ -494,6 +553,7 @@ export async function executeGeminiWithPool(
         return { text, modelUsed: targetModel, projectId: project.id };
       } catch (error) {
         if (options.signal?.aborted) {
+          refundRpm = true;
           digitizationLogger.log('warn', 'gemini_attempt_cancelled', 'Đã hủy lần gọi Gemini.', {
             requestId: options.requestId,
             task: options.task,
@@ -503,7 +563,9 @@ export async function executeGeminiWithPool(
           });
           throw error;
         }
+        refundRpm = isNetworkOrTimeoutBeforeProvider(error);
         const details = describeGeminiError(error);
+        const errInfo = getRawErrorText(error);
         lastError =
           error instanceof Error
             ? error
@@ -528,7 +590,9 @@ export async function executeGeminiWithPool(
             options.task !== 'digitization',
           );
           if (details.isTransient) {
-            scheduler.markProjectCooldown(project.id, GEMINI_TIMEOUTS.projectCooldownMs);
+            if (!isNetworkOrTimeoutBeforeProvider(error)) {
+              scheduler.markProjectCooldown(project.id, GEMINI_TIMEOUTS.projectCooldownMs);
+            }
             sawRetryableFailureInPass = true;
           } else if (details.isRateLimit && !details.isDailyQuota) {
             sawRetryableFailureInPass = true;
@@ -540,23 +604,18 @@ export async function executeGeminiWithPool(
         digitizationLogger.log(
           'error',
           'gemini_attempt_error',
-          'Gemini provider từ chối hoặc không hoàn tất lần gọi.',
+          `Gemini provider thất bại (${project.id}): ${errInfo.errorMessage}`,
           {
             requestId: options.requestId,
             task: options.task,
             model: targetModel,
             projectId: project.id,
             pass: pass + 1,
+            attempt: attemptedProjectIds.size,
             status: details.status,
-            errorCategory: details.isInvalidKey
-              ? 'invalid_key'
-              : details.isDailyQuota
-                ? 'daily_quota'
-                : details.isRateLimit
-                  ? 'rate_limit'
-                  : details.isTransient
-                    ? 'transient'
-                    : 'provider_error',
+            errorName: errInfo.errorName,
+            errorMessage: errInfo.errorMessage,
+            errorCategory: getErrorCategory(details),
             durationMs: Date.now() - attemptStartedAt,
           },
           Date.now() - attemptStartedAt,
@@ -564,7 +623,7 @@ export async function executeGeminiWithPool(
 
         options.onProgress?.(`${project.id} gặp sự cố; tự động chuyển sang key khả dụng kế tiếp...`);
       } finally {
-        lease.release();
+        lease.release({ refundRpm });
       }
     }
 
@@ -593,28 +652,25 @@ export async function executeGeminiWithPool(
       model: targetModel,
       keyCount: projects.length,
       durationMs: Date.now() - requestStartedAt,
+      status: 429,
       errorCategory: 'daily_quota',
+      errorMessage: error.message,
     });
     throw error;
   }
   const finalError = lastError || new Error(`Đã hết quota hoặc thời gian chờ cho mô hình ${targetModel}.`);
   const finalDetails = describeGeminiError(finalError);
-  digitizationLogger.log('error', 'gemini_request_failed', 'Tác vụ Gemini thất bại.', {
+  const finalErrInfo = getRawErrorText(finalError);
+  digitizationLogger.log('error', 'gemini_request_failed', `Tác vụ Gemini thất bại: ${finalErrInfo.errorMessage}`, {
     requestId: options.requestId,
     task: options.task,
     model: targetModel,
     keyCount: projects.length,
     durationMs: Date.now() - requestStartedAt,
     status: finalDetails.status,
-    errorCategory: finalDetails.isInvalidKey
-      ? 'invalid_key'
-      : finalDetails.isDailyQuota
-        ? 'daily_quota'
-        : finalDetails.isRateLimit
-          ? 'rate_limit'
-          : finalDetails.isTransient
-            ? 'transient'
-            : 'provider_or_scheduler_error',
+    errorName: finalErrInfo.errorName,
+    errorMessage: finalErrInfo.errorMessage,
+    errorCategory: getErrorCategory(finalDetails),
   });
   throw finalError;
 }
@@ -630,8 +686,10 @@ export async function executeGeminiStreamWithPool(
   const targetModel = options.preferredModel
     || (TASK_MODELS[options.task] ? TASK_MODELS[options.task][0] : 'gemini-3.5-flash-lite');
   const quota = getModelQuota(targetModel);
-  const deadline = Date.now() + (options.timeoutMs || GEMINI_TIMEOUTS.analysisTotalMs);
-  const attemptedProjectIds = new Set<string>();
+  const totalBudgetMs = options.timeoutMs || GEMINI_TIMEOUTS.analysisTotalMs;
+  const deadline = Date.now() + totalBudgetMs;
+  const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs, totalBudgetMs);
+  const maxPoolPasses = options.maxPoolPasses ?? 2;
   const dailyQuotaExhaustedProjectIds = new Set<string>();
   let lastError: Error | null = null;
   digitizationLogger.log('info', 'gemini_stream_start', 'Bắt đầu luồng Gemini.', {
@@ -639,148 +697,203 @@ export async function executeGeminiStreamWithPool(
     task: options.task,
     model: targetModel,
     keyCount: projects.length,
+    maxPoolPasses,
+    rpmLimit: quota.rpm,
   });
 
-  while (
-    new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]).size < projects.length &&
-    Date.now() < deadline - 30_000
-  ) {
+  for (let pass = 0; pass < maxPoolPasses; pass++) {
     if (options.signal?.aborted) throw new Error('Gemini stream was cancelled.');
+    if (Date.now() >= deadline - minimumAttemptMs) break;
 
-    const remainingAcquireMs = Math.max(1, deadline - Date.now() - 30_000);
-    const streamAcquireTimeoutMs = remainingAcquireMs;
-    const excludedProjectIds = new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]);
+    const attemptedProjectIds = new Set<string>();
+    let sawRetryableFailureInPass = false;
 
-    let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
-    try {
-      lease = await scheduler.acquire(
-        options.task,
-        targetModel,
-        quota,
-        excludedProjectIds,
-        streamAcquireTimeoutMs,
-        undefined,
-        options.signal,
+    while (
+      new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]).size < projects.length &&
+      Date.now() < deadline - minimumAttemptMs
+    ) {
+      if (options.signal?.aborted) throw new Error('Gemini stream was cancelled.');
+
+      const remainingAcquireMs = Math.max(1, deadline - Date.now() - minimumAttemptMs);
+      const streamAcquireTimeoutMs = remainingAcquireMs;
+      const excludedProjectIds = new Set([...attemptedProjectIds, ...dailyQuotaExhaustedProjectIds]);
+
+      let lease: Awaited<ReturnType<GeminiQuotaScheduler['acquire']>>;
+      try {
+        lease = await scheduler.acquire(
+          options.task,
+          targetModel,
+          quota,
+          excludedProjectIds,
+          streamAcquireTimeoutMs,
+          undefined,
+          options.signal,
+        );
+      } catch (error) {
+        if (!lastError) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+        }
+        const errInfo = getRawErrorText(error);
+        digitizationLogger.log('warn', 'gemini_stream_slot_wait_failed', `Không cấp được slot gọi Gemini stream: ${errInfo.errorMessage}`, {
+          requestId: options.requestId,
+          task: options.task,
+          model: targetModel,
+          pass: pass + 1,
+          status: describeGeminiError(error).status,
+          errorName: errInfo.errorName,
+          errorMessage: errInfo.errorMessage,
+          schedulerSnapshot: scheduler.getDiagnosticsSnapshot(targetModel, quota, excludedProjectIds),
+        });
+        break;
+      }
+
+      attemptedProjectIds.add(lease.project.id);
+      const attemptStartedAt = Date.now();
+      digitizationLogger.log('info', 'gemini_stream_attempt_start', 'Bắt đầu lần gọi Gemini dạng stream.', {
+        requestId: options.requestId,
+        task: options.task,
+        model: targetModel,
+        projectId: lease.project.id,
+        pass: pass + 1,
+        attempt: attemptedProjectIds.size,
+      });
+
+      const remainingTime = Math.max(1_000, deadline - Date.now());
+      const requestedAttemptTimeout = options.attemptTimeoutMs || GEMINI_TIMEOUTS.analysisAttemptMs;
+      const calculatedTimeoutMs = Math.min(requestedAttemptTimeout, remainingTime);
+
+      const attemptController = new AbortController();
+      const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
+      options.signal?.addEventListener('abort', cancelAttempt, { once: true });
+      const attemptTimeout = setTimeout(
+        () => attemptController.abort(new Error('Gemini stream timed out.')),
+        calculatedTimeoutMs,
       );
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+
+      let hasOutput = false;
+      let fullText = '';
+      let refundRpm = false;
+
+      try {
+        const ai = createGeminiSdkClient(lease.project.apiKey, calculatedTimeoutMs);
+        const config: Record<string, unknown> = {
+          ...options.generationConfig,
+          abortSignal: attemptController.signal,
+        };
+        if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
+
+        const streamResult = await ai.models.generateContentStream({
+          model: targetModel,
+          contents: options.contents as any,
+          config,
+        });
+
+        for await (const chunk of streamResult) {
+          if (attemptController.signal.aborted) throw new Error('Gemini stream was cancelled.');
+          const piece = chunk.text || '';
+          if (piece) {
+            hasOutput = true;
+            fullText += piece;
+            onChunk(piece, targetModel);
+          }
+        }
+
+        if (!hasOutput) throw new Error('Gemini returned an empty stream.');
+        digitizationLogger.log(
+          'info',
+          'gemini_stream_attempt_complete',
+          'Gemini stream hoàn tất.',
+          {
+            requestId: options.requestId,
+            task: options.task,
+            model: targetModel,
+            projectId: lease.project.id,
+            pass: pass + 1,
+            durationMs: Date.now() - attemptStartedAt,
+          },
+          Date.now() - attemptStartedAt,
+        );
+        digitizationLogger.log(
+          'info',
+          'gemini_stream_complete',
+          'Luồng Gemini hoàn tất.',
+          {
+            requestId: options.requestId,
+            task: options.task,
+            model: targetModel,
+            projectId: lease.project.id,
+            durationMs: Date.now() - requestStartedAt,
+          },
+          Date.now() - requestStartedAt,
+        );
+        return { text: fullText, modelUsed: targetModel, projectId: lease.project.id };
+      } catch (error) {
+        refundRpm = Boolean(options.signal?.aborted) || (!hasOutput && isNetworkOrTimeoutBeforeProvider(error));
+        const details = describeGeminiError(error);
+        const errInfo = getRawErrorText(error);
+        lastError =
+          error instanceof Error
+            ? error
+            : Object.assign(new Error(details.message), {
+                status: details.status,
+                cause: error,
+              });
+        const shouldRetry = recordProjectFailure(scheduler, lease.project.id, targetModel, error);
+        if (details.isDailyQuota) {
+          dailyQuotaExhaustedProjectIds.add(lease.project.id);
+        } else if (details.isTransient) {
+          if (!isNetworkOrTimeoutBeforeProvider(error)) {
+            scheduler.markProjectCooldown(lease.project.id, GEMINI_TIMEOUTS.projectCooldownMs);
+          }
+          sawRetryableFailureInPass = true;
+        } else if (details.isRateLimit) {
+          sawRetryableFailureInPass = true;
+        }
+
+        digitizationLogger.log(
+          options.signal?.aborted ? 'warn' : 'error',
+          options.signal?.aborted ? 'gemini_stream_cancelled' : 'gemini_stream_attempt_error',
+          options.signal?.aborted
+            ? 'Đã hủy luồng Gemini.'
+            : `Lần gọi Gemini dạng stream thất bại (${lease.project.id}): ${errInfo.errorMessage}`,
+          {
+            requestId: options.requestId,
+            task: options.task,
+            model: targetModel,
+            projectId: lease.project.id,
+            pass: pass + 1,
+            attempt: attemptedProjectIds.size,
+            status: details.status,
+            errorName: errInfo.errorName,
+            errorMessage: errInfo.errorMessage,
+            errorCategory: getErrorCategory(details),
+            hasOutput,
+            durationMs: Date.now() - attemptStartedAt,
+          },
+          Date.now() - attemptStartedAt,
+        );
+        if (hasOutput || options.signal?.aborted) throw lastError;
+        if (!shouldRetry) throw lastError;
+      } finally {
+        clearTimeout(attemptTimeout);
+        options.signal?.removeEventListener('abort', cancelAttempt);
+        lease.release({ refundRpm });
+      }
+    }
+
+    if (
+      !sawRetryableFailureInPass ||
+      pass >= maxPoolPasses - 1 ||
+      Date.now() >= deadline - minimumAttemptMs
+    ) {
       break;
     }
 
-    attemptedProjectIds.add(lease.project.id);
-    const attemptStartedAt = Date.now();
-    digitizationLogger.log('info', 'gemini_stream_attempt_start', 'Bắt đầu lần gọi Gemini dạng stream.', {
-      requestId: options.requestId,
-      task: options.task,
-      model: targetModel,
-      projectId: lease.project.id,
-      attempt: attemptedProjectIds.size,
-    });
-    const attemptController = new AbortController();
-    const cancelAttempt = () => attemptController.abort(new Error('Client disconnected.'));
-    options.signal?.addEventListener('abort', cancelAttempt, { once: true });
-    const attemptTimeout = setTimeout(
-      () => attemptController.abort(new Error('Gemini stream timed out.')),
-      options.attemptTimeoutMs || GEMINI_TIMEOUTS.analysisAttemptMs,
+    const backoffMs = Math.min(
+      Math.pow(2, pass + 1) * 1_500,
+      Math.max(1_000, deadline - Date.now() - minimumAttemptMs),
     );
-
-    let hasOutput = false;
-    let fullText = '';
-
-    try {
-      const ai = createGeminiSdkClient(lease.project.apiKey, GEMINI_TIMEOUTS.analysisAttemptMs);
-      const config: Record<string, unknown> = {
-        ...options.generationConfig,
-        abortSignal: attemptController.signal,
-      };
-      if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
-
-      const streamResult = await ai.models.generateContentStream({
-        model: targetModel,
-        contents: options.contents as any,
-        config,
-      });
-
-      for await (const chunk of streamResult) {
-        if (attemptController.signal.aborted) throw new Error('Gemini stream was cancelled.');
-        const piece = chunk.text || '';
-        if (piece) {
-          hasOutput = true;
-          fullText += piece;
-          onChunk(piece, targetModel);
-        }
-      }
-
-      if (!hasOutput) throw new Error('Gemini returned an empty stream.');
-      digitizationLogger.log(
-        'info',
-        'gemini_stream_attempt_complete',
-        'Gemini stream hoàn tất.',
-        {
-          requestId: options.requestId,
-          task: options.task,
-          model: targetModel,
-          projectId: lease.project.id,
-          durationMs: Date.now() - attemptStartedAt,
-        },
-        Date.now() - attemptStartedAt,
-      );
-      digitizationLogger.log(
-        'info',
-        'gemini_stream_complete',
-        'Luồng Gemini hoàn tất.',
-        {
-          requestId: options.requestId,
-          task: options.task,
-          model: targetModel,
-          projectId: lease.project.id,
-          durationMs: Date.now() - requestStartedAt,
-        },
-        Date.now() - requestStartedAt,
-      );
-      return { text: fullText, modelUsed: targetModel, projectId: lease.project.id };
-    } catch (error) {
-      const details = describeGeminiError(error);
-      lastError =
-        error instanceof Error
-          ? error
-          : Object.assign(new Error(details.message), {
-              status: details.status,
-              cause: error,
-            });
-      const shouldRetry = recordProjectFailure(scheduler, lease.project.id, targetModel, error);
-      if (details.isDailyQuota) dailyQuotaExhaustedProjectIds.add(lease.project.id);
-      digitizationLogger.log(
-        options.signal?.aborted ? 'warn' : 'error',
-        options.signal?.aborted ? 'gemini_stream_cancelled' : 'gemini_stream_attempt_error',
-        options.signal?.aborted ? 'Đã hủy luồng Gemini.' : 'Lần gọi Gemini dạng stream thất bại.',
-        {
-          requestId: options.requestId,
-          task: options.task,
-          model: targetModel,
-          projectId: lease.project.id,
-          status: details.status,
-          errorCategory: details.isInvalidKey
-            ? 'invalid_key'
-            : details.isDailyQuota
-              ? 'daily_quota'
-              : details.isRateLimit
-                ? 'rate_limit'
-                : details.isTransient
-                  ? 'transient'
-                  : 'provider_error',
-          hasOutput,
-          durationMs: Date.now() - attemptStartedAt,
-        },
-        Date.now() - attemptStartedAt,
-      );
-      if (hasOutput || options.signal?.aborted) throw lastError;
-      if (!shouldRetry) throw lastError;
-    } finally {
-      clearTimeout(attemptTimeout);
-      options.signal?.removeEventListener('abort', cancelAttempt);
-      lease.release();
-    }
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
   }
 
   if (projects.length > 0 && dailyQuotaExhaustedProjectIds.size === projects.length) {
@@ -791,28 +904,25 @@ export async function executeGeminiStreamWithPool(
       model: targetModel,
       keyCount: projects.length,
       durationMs: Date.now() - requestStartedAt,
+      status: 429,
       errorCategory: 'daily_quota',
+      errorMessage: error.message,
     });
     throw error;
   }
   const finalError = lastError || new Error('Không còn quota khả dụng cho trợ lý Gemini.');
   const finalDetails = describeGeminiError(finalError);
-  digitizationLogger.log('error', 'gemini_stream_failed', 'Luồng Gemini thất bại.', {
+  const finalErrInfo = getRawErrorText(finalError);
+  digitizationLogger.log('error', 'gemini_stream_failed', `Luồng Gemini thất bại: ${finalErrInfo.errorMessage}`, {
     requestId: options.requestId,
     task: options.task,
     model: targetModel,
     keyCount: projects.length,
     durationMs: Date.now() - requestStartedAt,
     status: finalDetails.status,
-    errorCategory: finalDetails.isInvalidKey
-      ? 'invalid_key'
-      : finalDetails.isDailyQuota
-        ? 'daily_quota'
-        : finalDetails.isRateLimit
-          ? 'rate_limit'
-          : finalDetails.isTransient
-            ? 'transient'
-            : 'provider_or_scheduler_error',
+    errorName: finalErrInfo.errorName,
+    errorMessage: finalErrInfo.errorMessage,
+    errorCategory: getErrorCategory(finalDetails),
   });
   throw finalError;
 }
@@ -859,11 +969,17 @@ export async function researchHealthQuestionWithPool(
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const details = describeGeminiError(error);
+    const errInfo = getRawErrorText(error);
     digitizationLogger.log(
       'warn',
       'assistant-research',
-      `Tìm kiếm nguồn y khoa trực tuyến tạm thời không khả dụng (${details.status || 'search'}); tiếp tục trả lời từ hồ sơ sức khỏe.`,
-      { status: details.status },
+      `Tìm kiếm nguồn y khoa trực tuyến tạm thời không khả dụng (${details.status || 'search'}): ${errInfo.errorMessage}; tiếp tục trả lời từ hồ sơ sức khỏe.`,
+      {
+        requestId: options.requestId,
+        status: details.status,
+        errorName: errInfo.errorName,
+        errorMessage: errInfo.errorMessage,
+      },
     );
     return { summary: null, citations: [] };
   }
@@ -897,23 +1013,18 @@ export async function testGeminiApiKeyDirect(
     return { valid: true, workingModel: modelUsed };
   } catch (err) {
     const details = describeGeminiError(err);
+    const errInfo = getRawErrorText(err);
     digitizationLogger.log(
       details.isRateLimit || details.status === 429 ? 'warn' : 'error',
       'gemini_key_test_failed',
-      'Gemini API key kiểm tra thất bại.',
+      `Gemini API key kiểm tra thất bại: ${errInfo.errorMessage}`,
       {
         task: 'key_test',
         model: modelUsed,
         status: details.status,
-        errorCategory: details.isInvalidKey
-          ? 'invalid_key'
-          : details.isDailyQuota
-            ? 'daily_quota'
-            : details.isRateLimit
-              ? 'rate_limit'
-              : details.isTransient
-                ? 'transient'
-                : 'provider_error',
+        errorName: errInfo.errorName,
+        errorMessage: errInfo.errorMessage,
+        errorCategory: getErrorCategory(details),
         durationMs: Date.now() - startedAt,
       },
       Date.now() - startedAt,

@@ -47,11 +47,25 @@ function waitForCapacity(delayMs: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export interface GeminiSchedulerSnapshot {
+  totalProjects: number;
+  excludedCount: number;
+  disabledCount: number;
+  disabledModelCount: number;
+  rpmLimit: number;
+  activeRequests: Record<string, number>;
+  rpmUsed: Record<string, number>;
+  projectCooldownRemainingMs: Record<string, number>;
+  modelCooldownRemainingMs: Record<string, number>;
+}
+
+const DEFAULT_UNAVAILABLE_TTL_MS = 5 * 60_000;
+
 export class GeminiQuotaScheduler {
   private readonly usage = new Map<string, UsageWindow>();
   private readonly cursors = new Map<string, number>();
-  private readonly disabledProjects = new Set<string>();
-  private readonly disabledProjectModels = new Set<string>();
+  private readonly disabledProjectsUntil = new Map<string, number>();
+  private readonly disabledProjectModelsUntil = new Map<string, number>();
   private readonly projectCooldownUntil = new Map<string, number>();
   private readonly activeRequests = new Map<string, number>();
 
@@ -72,18 +86,19 @@ export class GeminiQuotaScheduler {
     timeoutMs: number,
     preferredProjectId?: string,
     signal?: AbortSignal,
-  ): Promise<{ project: GeminiProject; release: () => void }> {
+  ): Promise<{ project: GeminiProject; release: (options?: { refundRpm?: boolean }) => void }> {
     const startedAt = Date.now();
     const queueKey = `${task}:${model}`;
     while (Date.now() - startedAt < timeoutMs) {
       if (signal?.aborted) {
         throw signal.reason instanceof Error ? signal.reason : new Error('Gemini request was cancelled.');
       }
+      const now = Date.now();
       const candidates = this.getOrderedCandidates(queueKey).filter((project) =>
         (!preferredProjectId || project.id === preferredProjectId) &&
         !excludedProjectIds.has(project.id) &&
-        !this.disabledProjects.has(project.id) &&
-        !this.disabledProjectModels.has(`${project.id}:${model}`),
+        !this.isProjectDisabled(project.id, now) &&
+        !this.isModelDisabled(project.id, model, now),
       );
       if (candidates.length === 0) {
         throw new Error(`No available projects remain for ${model}.`);
@@ -93,10 +108,10 @@ export class GeminiQuotaScheduler {
 
       for (const project of candidates) {
         const usage = this.getUsage(project.id, model);
-        const now = Date.now();
-        usage.minuteRequests = usage.minuteRequests.filter((timestamp) => now - timestamp < 60_000);
+        const loopNow = Date.now();
+        usage.minuteRequests = usage.minuteRequests.filter((timestamp) => loopNow - timestamp < 60_000);
 
-        const projectCooldownWait = Math.max(0, (this.projectCooldownUntil.get(project.id) || 0) - now);
+        const projectCooldownWait = Math.max(0, (this.projectCooldownUntil.get(project.id) || 0) - loopNow);
         if (projectCooldownWait > 0) {
           blockedByCapacity = true;
           nextWaitMs = Math.min(nextWaitMs, projectCooldownWait);
@@ -110,23 +125,30 @@ export class GeminiQuotaScheduler {
         }
 
         const requestWait = usage.minuteRequests.length >= quota.rpm
-          ? Math.max(1, 60_000 - (now - usage.minuteRequests[0]))
+          ? Math.max(1, 60_000 - (loopNow - usage.minuteRequests[0]))
           : 0;
-        const cooldownWait = Math.max(0, usage.cooldownUntil - now);
+        const cooldownWait = Math.max(0, usage.cooldownUntil - loopNow);
         if (requestWait > 0 || cooldownWait > 0) {
           blockedByCapacity = true;
           nextWaitMs = Math.min(nextWaitMs, Math.max(requestWait, cooldownWait));
           continue;
         }
 
-        usage.minuteRequests.push(now);
+        const tokenTimestamp = loopNow;
+        usage.minuteRequests.push(tokenTimestamp);
         this.activeRequests.set(project.id, (this.activeRequests.get(project.id) || 0) + 1);
         let released = false;
         return {
           project,
-          release: () => {
+          release: (options?: { refundRpm?: boolean }) => {
             if (released) return;
             released = true;
+            if (options?.refundRpm) {
+              const tokenIndex = usage.minuteRequests.lastIndexOf(tokenTimestamp);
+              if (tokenIndex !== -1) {
+                usage.minuteRequests.splice(tokenIndex, 1);
+              }
+            }
             const activeCount = this.activeRequests.get(project.id) || 0;
             if (activeCount <= 1) this.activeRequests.delete(project.id);
             else this.activeRequests.set(project.id, activeCount - 1);
@@ -142,6 +164,50 @@ export class GeminiQuotaScheduler {
     throw new Error(`Timed out waiting for an available ${task} Gemini quota slot.`);
   }
 
+  getDiagnosticsSnapshot(
+    model: string,
+    quota: GeminiQuota,
+    excludedProjectIds: ReadonlySet<string> = new Set(),
+  ): GeminiSchedulerSnapshot {
+    const now = Date.now();
+    const activeRequests: Record<string, number> = {};
+    const rpmUsed: Record<string, number> = {};
+    const projectCooldownRemainingMs: Record<string, number> = {};
+    const modelCooldownRemainingMs: Record<string, number> = {};
+    let disabledCount = 0;
+    let disabledModelCount = 0;
+
+    for (const project of this.projects) {
+      if (this.isProjectDisabled(project.id, now)) disabledCount++;
+      if (this.isModelDisabled(project.id, model, now)) disabledModelCount++;
+
+      const active = this.activeRequests.get(project.id) || 0;
+      if (active > 0) activeRequests[project.id] = active;
+
+      const usage = this.getUsage(project.id, model);
+      usage.minuteRequests = usage.minuteRequests.filter((ts) => now - ts < 60_000);
+      rpmUsed[project.id] = usage.minuteRequests.length;
+
+      const projCd = Math.max(0, (this.projectCooldownUntil.get(project.id) || 0) - now);
+      if (projCd > 0) projectCooldownRemainingMs[project.id] = projCd;
+
+      const modelCd = Math.max(0, usage.cooldownUntil - now);
+      if (modelCd > 0) modelCooldownRemainingMs[project.id] = modelCd;
+    }
+
+    return {
+      totalProjects: this.projects.length,
+      excludedCount: excludedProjectIds.size,
+      disabledCount,
+      disabledModelCount,
+      rpmLimit: quota.rpm,
+      activeRequests,
+      rpmUsed,
+      projectCooldownRemainingMs,
+      modelCooldownRemainingMs,
+    };
+  }
+
   markRateLimited(projectId: string, model: string, retryAfterMs = 60_000): void {
     const usage = this.getUsage(projectId, model);
     usage.cooldownUntil = Math.max(usage.cooldownUntil, Date.now() + retryAfterMs);
@@ -154,12 +220,33 @@ export class GeminiQuotaScheduler {
     );
   }
 
-  markProjectUnavailable(projectId: string): void {
-    this.disabledProjects.add(projectId);
+  markProjectUnavailable(projectId: string, durationMs = DEFAULT_UNAVAILABLE_TTL_MS): void {
+    this.disabledProjectsUntil.set(projectId, Date.now() + durationMs);
   }
 
-  markModelUnavailable(projectId: string, model: string): void {
-    this.disabledProjectModels.add(`${projectId}:${model}`);
+  markModelUnavailable(projectId: string, model: string, durationMs = DEFAULT_UNAVAILABLE_TTL_MS): void {
+    this.disabledProjectModelsUntil.set(`${projectId}:${model}`, Date.now() + durationMs);
+  }
+
+  private isProjectDisabled(projectId: string, now: number): boolean {
+    const until = this.disabledProjectsUntil.get(projectId);
+    if (!until) return false;
+    if (now >= until) {
+      this.disabledProjectsUntil.delete(projectId);
+      return false;
+    }
+    return true;
+  }
+
+  private isModelDisabled(projectId: string, model: string, now: number): boolean {
+    const key = `${projectId}:${model}`;
+    const until = this.disabledProjectModelsUntil.get(key);
+    if (!until) return false;
+    if (now >= until) {
+      this.disabledProjectModelsUntil.delete(key);
+      return false;
+    }
+    return true;
   }
 
   private getOrderedCandidates(queueKey: string): GeminiProject[] {
@@ -181,5 +268,4 @@ export class GeminiQuotaScheduler {
     }
     return usage;
   }
-
 }

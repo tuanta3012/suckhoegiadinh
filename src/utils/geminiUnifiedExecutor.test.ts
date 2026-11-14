@@ -128,4 +128,35 @@ describe('Gemini unified executor', () => {
       message: expect.stringContaining('chưa cấp được lượt gọi Gemini'),
     });
   });
+
+  it('rotates keys cleanly within a short 12s budget when key 1 fails transiently', async () => {
+    vi.useFakeTimers();
+    try {
+      generateContentMock
+        .mockImplementationOnce(async () => {
+          vi.advanceTimersByTime(3_000);
+          throw new TypeError('Failed to fetch');
+        })
+        .mockResolvedValueOnce({ text: 'Recovered on second key.' });
+
+      const requestContext = createGeminiRequestContext([
+        'AIzaSy-test-key-012345678901234567890123456789012345',
+        'AIzaSy-another-test-key-01234567890123456789012345678901',
+      ]);
+
+      await expect(executeGeminiWithPool({
+        task: 'assistant',
+        contents: [{ text: 'Search.' }],
+        requestContext,
+        timeoutMs: 12_000,
+        attemptTimeoutMs: 10_000,
+        maxPoolPasses: 1,
+      })).resolves.toMatchObject({
+        text: 'Recovered on second key.',
+        projectId: 'account-2',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -29,9 +29,47 @@ function getLogDateKey(value: string | Date): string | null {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+export function sanitizeSensitiveText(value: string): string {
+  return value
+    .replace(/AIza[0-9A-Za-z_-]{10,}/g, 'AIza***')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{12,}/gi, '$1***')
+    .replace(/([?&]key=)[^&\s]+/gi, '$1***');
+}
+
+function sanitizeLogValue(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    const masked = sanitizeSensitiveText(value);
+    return masked.length > 1500 ? `${masked.slice(0, 1500)}…` : masked;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: sanitizeSensitiveText(value.message).slice(0, 1000),
+    };
+  }
+  if (depth >= 4) return '[Nested]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 30).map((item) => sanitizeLogValue(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (/^(?:apiKey|apikey|clientGeminiKeys|authorization|token|password|secret)$/i.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = sanitizeLogValue(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  return String(value);
+}
+
 class DigitizationLogger {
   private logs: DigitizationLogEntry[] = [];
-  private readonly MAX_LOGS = 3000;
+  private readonly MAX_LOGS = 5000;
   private currentLogDate = getLogDateKey(new Date()) || '';
 
   constructor() {
@@ -74,14 +112,16 @@ class DigitizationLogger {
     source?: 'client' | 'server',
   ) {
     this.retainCurrentDay();
+    const safeMessage = sanitizeSensitiveText(String(message || ''));
+    const safeData = data !== undefined ? sanitizeLogValue(data) : undefined;
     const entry: DigitizationLogEntry = {
       timestamp: new Date().toISOString(),
       level,
       stage,
-      message,
+      message: safeMessage,
       durationMs,
       source: source || (typeof window === 'undefined' ? 'server' : 'client'),
-      data,
+      data: safeData,
     };
     this.logs.push(entry);
     if (this.logs.length > this.MAX_LOGS) this.logs.shift();
@@ -89,7 +129,7 @@ class DigitizationLogger {
 
     const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
     const durStr = durationMs !== undefined ? ` [${durationMs}ms]` : '';
-    logFn(`[Digitization][${stage}] ${message}${durStr}`, data || '');
+    logFn(`[Digitization][${stage}] ${safeMessage}${durStr}`, safeData || '');
   }
 
   getLogs(): DigitizationLogEntry[] {
@@ -117,8 +157,10 @@ class DigitizationLogger {
       const serverLogs: DigitizationLogEntry[] = (customLogs || [])
         .filter((entry) => getLogDateKey(entry.timestamp) === currentDay)
         .map((l) => ({
-        ...l,
-        source: l.source || 'server',
+          ...l,
+          message: sanitizeSensitiveText(String(l.message || '')),
+          data: l.data !== undefined ? sanitizeLogValue(l.data) : undefined,
+          source: l.source || 'server',
         }));
 
       // Hợp nhất và sắp xếp theo mốc thời gian ISO
@@ -142,11 +184,12 @@ class DigitizationLogger {
       const exportPayload = {
         title: 'Báo cáo Hoạt động Số hóa & Phân tích AI - Sức Khỏe Gia Đình',
         exportedAt: new Date().toISOString(),
+        logDate: currentDay,
         environment: {
           platform: Capacitor.getPlatform(),
           isNative: Capacitor.isNativePlatform(),
           userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
-          ...(extraMetadata || {}),
+          ...(extraMetadata ? (sanitizeLogValue(extraMetadata) as Record<string, unknown>) : {}),
         },
         statistics: {
           totalEntries: finalLogs.length,

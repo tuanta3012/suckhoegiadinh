@@ -69,14 +69,10 @@ function findCanonicalMetricKey(value: string): string | undefined {
 
 /**
  * Tiền xử lý dữ liệu trước khi gửi cho Phân tích Chuyên sâu (AI Deep-Dive):
- * 1. Lọc chỉ số thông minh:
- *    - Chỉ giữ các chỉ số bất thường (status !== 'normal').
- *    - Hoặc nhóm chỉ số cốt lõi theo dõi định kỳ (Glucose, HbA1c, Creatinin, Acid Uric, TSH, Lipid máu, Men gan).
- *    - Loại bỏ chỉ số bình thường lặp lại không cần thiết để tối ưu token & thời gian xử lý.
- * 2. Rút gọn kết quả hình ảnh:
- *    - Đối với siêu âm, X-quang: CHỈ giữ lại phần 'conclusion' (kết luận), loại bỏ 'findings' dài dòng.
- * 3. Chuẩn hóa tên chỉ số:
- *    - Tự động gọi sanitizeMetricName để loại bỏ dấu sao (*), ký tự thừa.
+ * 1. Sử dụng 100% dòng thời gian dữ liệu (toàn bộ các mốc khám từ đầu đến hiện tại) để AI nắm bức tranh tổng quát.
+ * 2. Tập trung độ chi tiết tối đa cho dữ liệu trong 3 năm gần nhất (inFocus3Y: true) để phân tích chuyên sâu và đưa ra lời khuyên sát thực tế hiện tại.
+ * 3. Các mốc trước 3 năm vẫn giữ đầy đủ mốc sự kiện, chẩn đoán, thuốc, kết luận hình ảnh, nằm viện, tiêm chủng và các chỉ số bất thường/cốt lõi.
+ * 4. Chuẩn hóa tên chỉ số bằng sanitizeMetricName.
  */
 export function prepareDataForDeepDive(member: any, profile: any) {
   const memberName = member?.name || profile?.member?.name || 'Thành viên';
@@ -85,13 +81,21 @@ export function prepareDataForDeepDive(member: any, profile: any) {
   const medicalHistory = profile?.medicalHistory || { surgeries: [], chronicConditions: [] };
 
   const timeline = Array.isArray(profile?.timeline) ? profile.timeline : [];
-  // Sắp xếp theo ngày tăng dần và lấy tối đa 15 mốc khám gần nhất
+  // Sắp xếp toàn bộ 100% lịch sử khám theo ngày tăng dần để phân tích đầy đủ bức tranh tổng thể
   const sortedEvents = [...timeline].sort(
     (a: any, b: any) =>
       new Date(a.date || a.recordedAt).getTime() -
-      new Date(b.date || b.recordedAt).getTime()
+      new Date(b.date || b.recordedAt).getTime(),
   );
-  const relevantEvents = sortedEvents.slice(-15);
+
+  const eventTimestamps = sortedEvents
+    .map((evt: any) => new Date(evt.date || evt.recordedAt || 0).getTime())
+    .filter((ts: number) => Number.isFinite(ts) && ts > 0);
+  const latestEventMs = eventTimestamps.length > 0 ? Math.max(...eventTimestamps) : 0;
+  const focusEndDate = new Date(Math.max(Date.now(), latestEventMs));
+  const focusStartDate = new Date(focusEndDate);
+  focusStartDate.setFullYear(focusStartDate.getFullYear() - 3);
+  const focusStartMs = focusStartDate.getTime();
 
   // Danh mục từ khóa các nhóm chỉ số cốt lõi theo dõi định kỳ
   const coreKeywords = [
@@ -101,6 +105,7 @@ export function prepareDataForDeepDive(member: any, profile: any) {
     'TSH', 'FT4', 'FT3',
     'CHOLESTEROL', 'TRIGLYCERID', 'TRIGLYCERIDE', 'HDL_C', 'HDL', 'LDL_C', 'LDL',
     'AST', 'ALT', 'GGT', 'SGOT', 'SGPT',
+    'WBC', 'RBC', 'HGB', 'PLT',
   ];
 
   const isCoreIndicator = (key: string, name: string): boolean => {
@@ -109,9 +114,14 @@ export function prepareDataForDeepDive(member: any, profile: any) {
     return coreKeywords.some((kw) => normKey.includes(kw) || normName.includes(kw));
   };
 
-  const prunedEvents = relevantEvents.map((evt: any, index: number) => {
-    // 3 mốc khám mới nhất giữ thêm chỉ số để so sánh xu hướng
-    const isRecent = index >= Math.max(0, relevantEvents.length - 3);
+  let recent3YearsEventCount = 0;
+  let historicalBefore3YearsCount = 0;
+
+  const prunedEvents = sortedEvents.map((evt: any) => {
+    const evtTs = new Date(evt.date || evt.recordedAt || 0).getTime();
+    const inFocus3Y = Number.isFinite(evtTs) && evtTs >= focusStartMs;
+    if (inFocus3Y) recent3YearsEventCount++;
+    else historicalBefore3YearsCount++;
 
     const metrics = Array.isArray(evt.metrics)
       ? evt.metrics
@@ -127,14 +137,14 @@ export function prepareDataForDeepDive(member: any, profile: any) {
               (status !== 'normal' && status !== '');
             const isCore = isCoreIndicator(standardKey, cleanName);
 
-            // Giữ nếu: bất thường HOẶC thuộc nhóm chỉ số cốt lõi
-            if (isAbnormal || isCore || (isRecent && status !== 'normal')) {
+            // Trong 3 năm gần nhất: giữ toàn bộ chỉ số; trước 3 năm: giữ toàn bộ chỉ số bất thường và chỉ số cốt lõi
+            if (inFocus3Y || isAbnormal || isCore) {
               return {
                 name: cleanName,
                 key: standardKey,
                 val: m.value,
                 unit: m.unit || '',
-                st: isAbnormal ? (status || 'abnormal') : 'normal',
+                st: isAbnormal ? (status || 'abnormal') : (status || 'normal'),
                 ref: m.refRange,
               };
             }
@@ -143,41 +153,117 @@ export function prepareDataForDeepDive(member: any, profile: any) {
           .filter((m: any): m is NonNullable<typeof m> => m !== null)
       : [];
 
-    // Rút gọn kết luận hình ảnh (siêu âm, X-quang, CT...): CHỈ giữ conclusion, bỏ findings
+    // Giữ kết luận hình ảnh (ưu tiên conclusion, fallback findings súc tích)
     const imagingResults = Array.isArray(evt.imagingResults)
       ? evt.imagingResults
           .map((img: any) => {
-            const conclusion = String(img.conclusion || img.findings || '').trim();
-            if (!conclusion) return null;
+            const conclusion = String(img.conclusion || '').trim();
+            const findings = String(img.findings || '').trim();
+            const text = conclusion && findings && !conclusion.includes(findings) && findings.length <= 160
+              ? `${conclusion} (${findings})`
+              : (conclusion || findings);
+            if (!text) return null;
             return {
               mod: img.modality || 'Chẩn đoán hình ảnh',
-              con: conclusion.substring(0, 300), // Rút gọn súc tích
+              con: text.substring(0, inFocus3Y ? 400 : 250),
             };
           })
           .filter((img: any): img is NonNullable<typeof img> => img !== null)
       : [];
 
+    const meds = Array.isArray(evt.medications)
+      ? evt.medications
+          .filter((med: any) => med && typeof med.name === 'string' && med.name.trim())
+          .slice(0, inFocus3Y ? 15 : 8)
+          .map((med: any) => ({
+            n: med.name.trim(),
+            ...(med.dosage ? { dos: String(med.dosage).trim() } : {}),
+            ...(med.duration ? { dur: String(med.duration).trim() } : {}),
+          }))
+      : [];
+
+    const vacc = Array.isArray(evt.vaccinations)
+      ? evt.vaccinations
+          .filter((v: any) => v && typeof v.vaccineName === 'string' && v.vaccineName.trim())
+          .slice(0, 8)
+          .map((v: any) => ({
+            n: v.vaccineName.trim(),
+            ...(v.doseNumber !== undefined ? { dose: v.doseNumber } : {}),
+            ...(v.administeredDate ? { d: v.administeredDate } : {}),
+          }))
+      : [];
+
+    const hosp = evt.hospitalization && typeof evt.hospitalization === 'object'
+      ? {
+          ...(evt.hospitalization.admissionDate ? { adm: evt.hospitalization.admissionDate } : {}),
+          ...(evt.hospitalization.dischargeDate ? { dis: evt.hospitalization.dischargeDate } : {}),
+          ...(evt.hospitalization.admissionReason ? { reason: String(evt.hospitalization.admissionReason).slice(0, 160) } : {}),
+          ...(evt.hospitalization.finalDiagnosis ? { finalDiag: String(evt.hospitalization.finalDiagnosis).slice(0, 180) } : {}),
+          ...(evt.hospitalization.dischargeCondition ? { cond: String(evt.hospitalization.dischargeCondition).slice(0, 160) } : {}),
+        }
+      : undefined;
+
     return {
       d: evt.date,
+      inFocus3Y,
       t: evt.title,
       type: evt.type,
       facility: evt.facility,
-      diag: Array.isArray(evt.diagnoses) ? evt.diagnoses.slice(0, 10) : [],
-      metrics: metrics.slice(0, 40),
-      img: imagingResults.slice(0, 10),
+      diag: Array.isArray(evt.diagnoses) ? evt.diagnoses.slice(0, 12) : [],
+      ...(meds.length > 0 ? { meds } : {}),
+      ...(metrics.length > 0 ? { metrics: metrics.slice(0, inFocus3Y ? 60 : 30) } : {}),
+      ...(imagingResults.length > 0 ? { img: imagingResults.slice(0, 10) } : {}),
+      ...(vacc.length > 0 ? { vacc } : {}),
+      ...(hosp && Object.keys(hosp).length > 0 ? { hosp } : {}),
+      ...(typeof evt.advice === 'string' && evt.advice.trim()
+        ? { adv: evt.advice.trim().slice(0, inFocus3Y ? 280 : 160) }
+        : {}),
+      ...(typeof evt.notes === 'string' && evt.notes.trim()
+        ? { notes: evt.notes.trim().slice(0, inFocus3Y ? 220 : 140) }
+        : {}),
       phys: evt.physicalExam
         ? {
+            h: evt.physicalExam.height_cm,
+            w: evt.physicalExam.weight_kg,
             bp: evt.physicalExam.bp_mmHg,
             bmi: evt.physicalExam.bmi,
             pulse: evt.physicalExam.pulse_bpm,
+            cls: evt.physicalExam.classification,
           }
         : undefined,
     };
   });
 
+  const period = sortedEvents.length > 0
+    ? {
+        from: sortedEvents[0].date || sortedEvents[0].recordedAt || '',
+        to: sortedEvents[sortedEvents.length - 1].date || sortedEvents[sortedEvents.length - 1].recordedAt || '',
+      }
+    : undefined;
+
   return {
     p: { n: memberName, g: gender, b: birthDate },
     h: medicalHistory,
+    totalEvents: sortedEvents.length,
+    ...(period ? { period } : {}),
+    focusWindow: {
+      years: 3,
+      from: focusStartDate.toISOString().slice(0, 10),
+      to: focusEndDate.toISOString().slice(0, 10),
+      recent3YearsEventCount,
+      historicalBefore3YearsCount,
+    },
+    ...(profile?.summary
+      ? {
+          summary: {
+            latestEventDate: profile.summary.latestEventDate,
+            latestDiagnoses: Array.isArray(profile.summary.latestDiagnoses)
+              ? profile.summary.latestDiagnoses.slice(0, 15)
+              : [],
+            nextFollowUp: profile.summary.nextFollowUp,
+          },
+        }
+      : {}),
     tm: prunedEvents,
   };
 }

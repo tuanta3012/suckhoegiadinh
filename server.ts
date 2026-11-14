@@ -118,6 +118,32 @@ function getGeminiRequestId(res: Response): string | undefined {
   return res.locals.requestId as string | undefined;
 }
 
+function logServerRouteError(
+  endpoint: string,
+  res: Response,
+  error: unknown,
+  status?: number,
+  extra?: Record<string, unknown>,
+): void {
+  const errorName = error instanceof Error ? error.name : 'UnknownError';
+  const errorMessage = error instanceof Error ? error.message : String(error ?? 'Unknown error');
+  digitizationLogger.log(
+    'error',
+    'api_http_error',
+    `Server route lỗi tại ${endpoint}: ${errorMessage}`,
+    {
+      requestId: getGeminiRequestId(res),
+      endpoint,
+      status,
+      errorName,
+      errorMessage,
+      ...(extra || {}),
+    },
+    undefined,
+    'server',
+  );
+}
+
 async function startServer() {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -313,6 +339,7 @@ async function startServer() {
       });
       return;
     }
+    logServerRouteError('/api/gemini/test-key', res, new Error(result.error || 'Key không hợp lệ.'), 400);
     res.status(400).json({ error: result.error || 'Key không hợp lệ.' });
   });
 
@@ -338,7 +365,8 @@ async function startServer() {
     } catch (err) {
       console.error('[Gemini Server GenerateContent Error]', err);
       const details = describeGeminiError(err);
-      res.status(500).json({ error: details.message || 'Lỗi khi gọi Gemini API.' });
+      logServerRouteError('/api/gemini/generate-content', res, err, details.status || 500);
+      res.status(details.status || 500).json({ error: details.message || 'Lỗi khi gọi Gemini API.' });
     }
   });
 
@@ -472,6 +500,7 @@ async function startServer() {
       if (heartbeat) clearInterval(heartbeat);
       if (extractionTimeout) clearTimeout(extractionTimeout);
       if (error instanceof PdfPageBatchError) {
+        logServerRouteError('/api/gemini/extract-health-event', res, error, 400);
         if (res.headersSent) {
           writeSse(res, { type: 'error', error: error.message });
           res.end();
@@ -481,6 +510,7 @@ async function startServer() {
         return;
       }
       const details = describeGeminiError(error);
+      logServerRouteError('/api/gemini/extract-health-event', res, error, details.status || 500);
       console.error('[Gemini Server Extract Error]', { status: details.status });
       if (res.headersSent) {
         writeSse(res, { type: 'error', error: details.message });
@@ -526,6 +556,7 @@ async function startServer() {
       });
     } catch (error) {
       const details = describeGeminiError(error);
+      logServerRouteError('/api/gemini/refine-and-organize', res, error, details.status || 500);
       console.error('[Gemini Server Refine Error]', { status: details.status });
       res.status(details.status || 500).json({ error: details.message });
     }
@@ -551,6 +582,7 @@ async function startServer() {
       res.json({ success: true, summary: parsed.summary || text, modelUsed });
     } catch (error) {
       const details = describeGeminiError(error);
+      logServerRouteError('/api/gemini/summarize', res, error, details.status || 500);
       console.error('[Gemini Server Summary Error]', { status: details.status });
       res.status(details.status || 500).json({ error: details.message });
     }
@@ -562,9 +594,10 @@ async function startServer() {
       const { member, profile } = req.body;
       const memberName = member?.name || 'Thành viên';
       digitizationLogger.log('info', 'analysis', 'Bắt đầu phân tích chuyên sâu', {
+        requestId: getGeminiRequestId(res),
         memberId: member?.id,
         eventCount: profile?.timeline?.length,
-      });
+      }, undefined, 'server');
 
       const requestedModel = typeof req.body.model === 'string' && TASK_MODELS.analysis.includes(req.body.model as any)
         ? req.body.model
@@ -590,9 +623,10 @@ async function startServer() {
         modelUsed,
       });
     } catch (error) {
-      console.error('[Gemini Server Analyze Error]', { status: describeGeminiError(error).status });
-      const { status, message } = describeGeminiError(error);
-      res.status(status || 500).json({ error: message });
+      const details = describeGeminiError(error);
+      logServerRouteError('/api/gemini/analyze-comprehensive', res, error, details.status || 500);
+      console.error('[Gemini Server Analyze Error]', { status: details.status });
+      res.status(details.status || 500).json({ error: details.message });
     }
   });
 
@@ -668,8 +702,9 @@ async function startServer() {
           res.write('data: [DONE]\n\n');
           res.end();
         } catch (error) {
-          const { message } = describeGeminiError(error);
-          writeSse(res, { type: 'error', error: message });
+          const details = describeGeminiError(error);
+          logServerRouteError('/api/gemini/ask-assistant', res, error, details.status || 500, { stream: true });
+          writeSse(res, { type: 'error', error: details.message });
           res.end();
         } finally {
           clearTimeout(timeout);
@@ -702,16 +737,17 @@ async function startServer() {
 
       res.json({ success: true, answer: text, citations: research.citations, modelUsed });
     } catch (error) {
-      console.error('[Gemini Server Assistant Error]', { status: describeGeminiError(error).status });
+      const details = describeGeminiError(error);
+      logServerRouteError('/api/gemini/ask-assistant', res, error, details.status || 500, { stream: Boolean(req.body?.stream) });
+      console.error('[Gemini Server Assistant Error]', { status: details.status });
       if (res.headersSent) {
         writeSse(res, {
           type: 'error',
-          error: error instanceof Error ? error.message : 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
+          error: details.message || 'Lỗi khi giao tiếp với trợ lý bác sĩ.',
         });
         res.end();
       } else {
-        const { status, message } = describeGeminiError(error);
-        res.status(status || 500).json({ error: message });
+        res.status(details.status || 500).json({ error: details.message });
       }
     }
   });

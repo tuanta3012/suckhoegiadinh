@@ -349,4 +349,128 @@ describe('Gemini service backend routing', () => {
     expect(globalThis.fetch).toHaveBeenCalledOnce();
     expect(generateContentMock).not.toHaveBeenCalled();
   });
+
+  it('compacts bulky profile sources and aiDeepAnalysis while preserving the entire longitudinal timeline for comprehensive analysis', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-compact-key']);
+    const { prepareDataForDeepDive } = await import('./healthRecordService');
+
+    const timeline = Array.from({ length: 20 }, (_, idx) => {
+      const year = 2021 + Math.floor(idx / 4);
+      const month = String((idx % 4) * 3 + 1).padStart(2, '0');
+      const date = `${year}-${month}-10`;
+      return {
+        id: `e${idx + 1}`,
+        sourceFileId: `f${idx + 1}`,
+        sourceFileName: `doc_${idx + 1}.pdf`,
+        type: 'test_result',
+        title: `Xét nghiệm mốc ${idx + 1}`,
+        date,
+        diagnoses: idx === 0 ? ['Tiền tiểu đường (khởi phát 2021)'] : ['Rối loạn lipid'],
+        medications: [{ name: `Thuốc ${idx + 1}`, dosage: '10mg' }],
+        metrics: [
+          { name: 'Cholesterol', standardKey: 'CHOLESTEROL', value: 5.5 + idx * 0.1, unit: 'mmol/L', status: 'high' },
+          { name: 'Vitamin D phụ trợ', standardKey: 'VITAMIN_D', value: 42, unit: 'ng/mL', status: 'normal' },
+        ],
+        recordedAt: `${date}T00:00:00.000Z`,
+      };
+    });
+
+    const bulkyProfile = {
+      schemaVersion: 2,
+      member,
+      timeline,
+      sources: [
+        {
+          driveFileId: 'f1',
+          fileName: 'doc.pdf',
+          mimeType: 'application/pdf',
+          uploadedAt: '2026-11-10T00:00:00.000Z',
+          status: 'processed',
+          contentIndexPages: ['Huge raw OCR text '.repeat(1000)],
+        },
+      ],
+      summary: {
+        latestDiagnoses: ['Rối loạn lipid'],
+        latestMetrics: {},
+      },
+      aiDeepAnalysis: {
+        analyzedAt: '2026-11-10T00:00:00.000Z',
+        healthScore: 80,
+        overallAssessment: 'Verbose prior analysis',
+        crossCorrelations: [],
+        velocityTrends: [],
+        chronicSurveillance: [],
+        roadmap: {
+          criticalAlerts: [],
+          specialistReferrals: [],
+          timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] },
+        },
+      },
+      createdAt: '2021-01-10T00:00:00.000Z',
+      updatedAt: '2026-11-10T00:00:00.000Z',
+    } as unknown as HealthProfile;
+
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      result: {
+        healthScore: 85,
+        overallAssessment: 'OK',
+        crossCorrelations: [],
+        velocityTrends: [],
+        chronicSurveillance: [],
+        roadmap: { criticalAlerts: [], specialistReferrals: [], timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] } },
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await analyzeComprehensiveHealth(member, bulkyProfile);
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.profile.sources).toEqual([]);
+    expect(body.profile.aiDeepAnalysis).toBeUndefined();
+    expect(body.profile.timeline).toHaveLength(20);
+    expect(body.profile.timeline[0].id).toBe('e1');
+
+    const prepared = prepareDataForDeepDive(member, body.profile);
+    expect(prepared.totalEvents).toBe(20);
+    expect(prepared.tm).toHaveLength(20);
+    expect(prepared.focusWindow.years).toBe(3);
+    expect(prepared.focusWindow.historicalBefore3YearsCount).toBeGreaterThan(0);
+    expect(prepared.focusWindow.recent3YearsEventCount).toBeGreaterThan(0);
+    expect(prepared.tm[0].d).toBe('2021-01-10');
+    expect(prepared.tm[0].inFocus3Y).toBe(false);
+    expect(prepared.tm[0].diag).toContain('Tiền tiểu đường (khởi phát 2021)');
+    expect(prepared.tm[0].meds).toEqual([{ n: 'Thuốc 1', dos: '10mg' }]);
+    expect(prepared.tm[0].metrics?.map((m: { key: string }) => m.key)).toEqual(['CHOLESTEROL']);
+    expect(prepared.tm[prepared.tm.length - 1].inFocus3Y).toBe(true);
+    expect(prepared.tm[prepared.tm.length - 1].metrics?.map((m: { key: string }) => m.key)).toEqual([
+      'CHOLESTEROL',
+      'VITAMIN_D',
+    ]);
+  });
+
+  it('falls back from APK direct streaming to non-stream execution when stream fails with zero chunks', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-fallback-key']);
+    generateContentStreamMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    generateContentMock.mockResolvedValue({ text: 'Câu trả lời dự phòng non-stream.' });
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Lần gần nhất khám ở đâu?',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(result.answer).toBe('Câu trả lời dự phòng non-stream.');
+    expect(chunks.join('')).toBe('Câu trả lời dự phòng non-stream.');
+    expect(generateContentMock).toHaveBeenCalledOnce();
+  });
 });

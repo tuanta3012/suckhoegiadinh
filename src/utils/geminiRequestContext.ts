@@ -18,13 +18,15 @@ export function normalizeGeminiKeysInput(rawKeys: unknown): string[] {
     : [];
 }
 
+export const DEFAULT_MAX_CONCURRENT_PER_PROJECT = 3;
+
 export function createGeminiRequestContext(rawKeys: unknown): GeminiRequestContext {
   const keys = normalizeGeminiKeysInput(rawKeys);
   const projects = parseGeminiProjects(keys, undefined);
   if (projects.length === 0) {
     throw new Error('Chưa có Gemini API key trong Tài nguyên AI. Hãy tải hoặc nhập key trong mục Tài nguyên AI.');
   }
-  return { projects, scheduler: new GeminiQuotaScheduler(projects) };
+  return { projects, scheduler: new GeminiQuotaScheduler(projects, DEFAULT_MAX_CONCURRENT_PER_PROJECT) };
 }
 
 /**
@@ -45,7 +47,7 @@ export function getOrCreateSharedGeminiRequestContext(rawKeys: unknown): GeminiR
   }
   const created: GeminiRequestContext = {
     projects,
-    scheduler: new GeminiQuotaScheduler(projects),
+    scheduler: new GeminiQuotaScheduler(projects, DEFAULT_MAX_CONCURRENT_PER_PROJECT),
   };
   if (sharedSchedulerRegistry.size > 16) {
     const oldestKey = sharedSchedulerRegistry.keys().next().value;

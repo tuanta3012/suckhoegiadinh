@@ -71,6 +71,23 @@ export interface ExtractionProgressUpdate {
   processedPages?: number;
 }
 
+class BackendGatewayError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'BackendGatewayError';
+    this.status = status;
+  }
+}
+
+function getRawErrorDetails(error: unknown): { errorName: string; errorMessage: string } {
+  if (!error) return { errorName: 'UnknownError', errorMessage: 'Unknown error' };
+  if (error instanceof Error) {
+    return { errorName: error.name || 'Error', errorMessage: error.message || String(error) };
+  }
+  return { errorName: typeof error, errorMessage: String(error) };
+}
+
 function isUnreachableBackendError(error: unknown): boolean {
   return (
     error instanceof TypeError ||
@@ -81,8 +98,78 @@ function isUnreachableBackendError(error: unknown): boolean {
 function isBackendUnavailableError(error: unknown): boolean {
   return (
     isUnreachableBackendError(error) ||
+    (error instanceof BackendGatewayError && (error.status === 502 || error.status === 503 || error.status === 504)) ||
     (error instanceof Error && /chưa cấu hình máy chủ AI/i.test(error.message))
   );
+}
+
+function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
+  const timeline = Array.isArray(profile?.timeline)
+    ? [...profile.timeline]
+        .sort((a, b) => new Date(a.date || a.recordedAt).getTime() - new Date(b.date || b.recordedAt).getTime())
+        .map((evt) => ({
+          ...evt,
+          additionalSources: undefined,
+          extractedData: undefined,
+          imagingResults: Array.isArray(evt.imagingResults)
+            ? evt.imagingResults.map((img) => ({
+                modality: img.modality,
+                findings: img.conclusion ? '' : String(img.findings || '').slice(0, 300),
+                conclusion: img.conclusion,
+              }))
+            : undefined,
+        }))
+    : [];
+  return {
+    schemaVersion: profile?.schemaVersion || 2,
+    member: profile?.member,
+    medicalHistory: profile?.medicalHistory,
+    timeline,
+    sources: [],
+    summary: {
+      latestEventDate: profile?.summary?.latestEventDate,
+      latestDiagnoses: Array.isArray(profile?.summary?.latestDiagnoses)
+        ? profile.summary.latestDiagnoses.slice(-15)
+        : [],
+      latestMetrics: profile?.summary?.latestMetrics || {},
+      nextFollowUp: profile?.summary?.nextFollowUp,
+    },
+    createdAt: profile?.createdAt || '',
+    updatedAt: profile?.updatedAt || '',
+  };
+}
+
+function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
+  const recentTimeline = Array.isArray(profile?.timeline)
+    ? profile.timeline.slice(-6).map((evt) => ({
+        ...evt,
+        additionalSources: undefined,
+        extractedData: undefined,
+        imagingResults: Array.isArray(evt.imagingResults)
+          ? evt.imagingResults.map((img) => ({
+              modality: img.modality,
+              findings: img.conclusion ? '' : String(img.findings || '').slice(0, 200),
+              conclusion: img.conclusion,
+            }))
+          : undefined,
+      }))
+    : [];
+  return {
+    schemaVersion: profile?.schemaVersion || 2,
+    member: profile?.member,
+    timeline: recentTimeline,
+    sources: [],
+    summary: {
+      latestEventDate: profile?.summary?.latestEventDate,
+      latestDiagnoses: Array.isArray(profile?.summary?.latestDiagnoses)
+        ? profile.summary.latestDiagnoses.slice(-12)
+        : [],
+      latestMetrics: profile?.summary?.latestMetrics || {},
+      nextFollowUp: profile?.summary?.nextFollowUp,
+    },
+    createdAt: profile?.createdAt || '',
+    updatedAt: profile?.updatedAt || '',
+  };
 }
 
 function isNativeApkRuntime(): boolean {
@@ -215,12 +302,36 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
     url = buildApiUrl(`/api/gemini/${endpoint}`);
   } catch (error) {
     if (isNativeApkRuntime()) {
-      return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+      try {
+        return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+      } catch (fallbackError) {
+        const rawInfo = getRawErrorDetails(fallbackError);
+        const cleaned = cleanErrorMessage(rawInfo.errorMessage);
+        digitizationLogger.log(
+          'error',
+          'api_direct_fallback_error',
+          `Fallback Gemini trực tiếp trên APK thất bại (${endpoint}): ${rawInfo.errorMessage}`,
+          {
+            requestId,
+            endpoint,
+            errorName: rawInfo.errorName,
+            errorMessage: rawInfo.errorMessage,
+            cleanMessage: cleaned,
+            durationMs: getDuration(),
+          },
+          getDuration(),
+        );
+        if (fallbackError instanceof Error && fallbackError.message === cleaned) {
+          throw fallbackError;
+        }
+        throw new Error(cleaned, { cause: fallbackError });
+      }
     }
     digitizationLogger.log('error', 'api_request_setup_error', 'Không thể xác định URL Gemini gateway.', {
       requestId,
       endpoint,
       errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error),
       durationMs: getDuration(),
     });
     throw error;
@@ -271,6 +382,13 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
           await sleep(backoff);
           continue;
         }
+        if (status === 502 || status === 503 || status === 504) {
+          const textBody = await response.text().catch(() => '');
+          throw new BackendGatewayError(
+            textBody.trim() || `Server Gemini (${endpoint}) gặp sự cố tạm thời (HTTP ${status}).`,
+            status,
+          );
+        }
       }
 
       const data = await readApiJson<T>(response, `Server Gemini (${endpoint})`);
@@ -285,22 +403,29 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       return data;
     } catch (error) {
       lastError = error;
+      const errInfo = getRawErrorDetails(error);
       digitizationLogger.log(
         'warn',
         'api_attempt_error',
-        'Lần gọi Gemini gateway thất bại.',
+        `Lần gọi Gemini gateway thất bại (${endpoint}): ${errInfo.errorMessage}`,
         {
           requestId,
           endpoint,
           attempt: attempt + 1,
-          status: lastHttpStatus,
-          errorName: error instanceof Error ? error.name : 'UnknownError',
+          status: lastHttpStatus ?? (error instanceof BackendGatewayError ? error.status : undefined),
+          errorName: errInfo.errorName,
+          errorMessage: errInfo.errorMessage,
           durationMs: Date.now() - attemptStartedAt,
         },
         Date.now() - attemptStartedAt,
       );
-      if (isNativeApkRuntime() && isUnreachableBackendError(error)) {
-        return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+      if (isNativeApkRuntime() && isBackendUnavailableError(error)) {
+        try {
+          return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+        } catch (fallbackError) {
+          lastError = fallbackError;
+          break;
+        }
       }
       if (isUnreachableBackendError(error) && attempt < maxRetries - 1) {
         const backoff = (attempt + 1) * 1500;
@@ -318,21 +443,27 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
   }
 
   const durationMs = getDuration();
-  const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
+  const rawErrInfo = getRawErrorDetails(lastError);
+  const errorMessage = cleanErrorMessage(rawErrInfo.errorMessage);
   digitizationLogger.log(
     'error',
     'api_request_failed',
-    `Gemini gateway request thất bại: ${errorMessage}`,
+    `Gemini gateway request thất bại (${endpoint}): ${rawErrInfo.errorMessage}`,
     {
       requestId,
       endpoint,
-      status: lastHttpStatus,
-      errorName: lastError instanceof Error ? lastError.name : 'UnknownError',
+      status: lastHttpStatus ?? (lastError instanceof BackendGatewayError ? lastError.status : undefined),
+      errorName: rawErrInfo.errorName,
+      errorMessage: rawErrInfo.errorMessage,
+      cleanMessage: errorMessage,
       durationMs,
     },
     durationMs,
   );
-  throw lastError instanceof Error ? lastError : new Error(errorMessage);
+  if (lastError instanceof Error && lastError.message === errorMessage) {
+    throw lastError;
+  }
+  throw new Error(errorMessage, { cause: lastError });
 }
 
 // ============================================================================
@@ -859,9 +990,10 @@ export async function summarizeHealthProfile(
     { memberId: member.id, eventCount: profile.timeline.length },
   );
   try {
+    const compactedProfile = compactProfileForDeepDive(profile);
     const data = await callGemini<{ success: boolean; summary: string }>('summarize', {
       member,
-      profile,
+      profile: compactedProfile,
     });
     if (typeof data.summary !== 'string' || !data.summary.trim()) {
       throw new Error('AI chưa trả về bản tóm tắt hợp lệ. Vui lòng thử lại sau.');
@@ -877,11 +1009,12 @@ export async function summarizeHealthProfile(
     return data.summary.trim();
   } catch (error) {
     const durationMs = getDuration();
+    const errInfo = getRawErrorDetails(error);
     digitizationLogger.log(
       'error',
       'summary_error',
-      `Lỗi tổng kết hồ sơ cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
-      undefined,
+      `Lỗi tổng kết hồ sơ cho ${member.name}: ${errInfo.errorMessage}`,
+      { memberId: member.id, errorName: errInfo.errorName, errorMessage: errInfo.errorMessage },
       durationMs,
     );
     throw error;
@@ -894,6 +1027,7 @@ export async function askHealthAssistant(
   profile: HealthProfile,
   history: HealthAssistantHistoryMessage[] = [],
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  const compactedProfile = compactProfileForAssistant(profile);
   const data = await callGemini<{
     success: boolean;
     answer: string;
@@ -901,7 +1035,7 @@ export async function askHealthAssistant(
   }>('ask-assistant', {
     question,
     member,
-    profile,
+    profile: compactedProfile,
     history,
     stream: false,
   });
@@ -961,22 +1095,32 @@ async function callGeminiStream(
       body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
     });
   } catch (error) {
-    digitizationLogger.log('error', 'api_request_failed', 'Không kết nối được Gemini gateway cho stream.', {
+    const errInfo = getRawErrorDetails(error);
+    digitizationLogger.log('error', 'api_request_failed', `Không kết nối được Gemini gateway cho stream (${endpoint}): ${errInfo.errorMessage}`, {
       requestId,
       endpoint,
-      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorName: errInfo.errorName,
+      errorMessage: errInfo.errorMessage,
       durationMs: Date.now() - requestStartedAt,
     }, Date.now() - requestStartedAt);
     throw error;
   }
 
   if (!response.ok) {
-    digitizationLogger.log('error', 'api_response_error', 'Gemini gateway trả lỗi cho stream.', {
+    const status = response.status;
+    digitizationLogger.log('error', 'api_response_error', `Gemini gateway trả lỗi cho stream (${endpoint}, HTTP ${status}).`, {
       requestId,
       endpoint,
-      status: response.status,
+      status,
       durationMs: Date.now() - requestStartedAt,
     }, Date.now() - requestStartedAt);
+    if (status === 502 || status === 503 || status === 504) {
+      const textBody = await response.text().catch(() => '');
+      throw new BackendGatewayError(
+        textBody.trim() || `Server Gemini (${endpoint}) gặp sự cố tạm thời (HTTP ${status}).`,
+        status,
+      );
+    }
     await readApiJson<never>(response, `Server Gemini (${endpoint})`);
   }
 
@@ -993,48 +1137,61 @@ async function callGeminiStream(
   let fullText = '';
   let citations: HealthAssistantCitation[] = [];
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
+      for (const line of lines) {
+        if (!line.trim()) continue;
 
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6);
-        if (data === '[DONE]') continue;
-        let event: unknown;
-        try {
-          event = JSON.parse(data);
-        } catch {
-          onChunk(data);
-          fullText += data;
-          continue;
-        }
-
-        if (!isRecord(event)) continue;
-        if (event.type === 'error') {
-          throw new Error(typeof event.error === 'string' ? event.error : 'Lỗi xử lý từ server AI.');
-        }
-        if (typeof event.text === 'string') {
-          onChunk(event.text);
-          fullText += event.text;
-        }
-        if (event.type === 'sources') {
-          citations = normalizeHealthAssistantCitations(event.citations);
-          if (citations.length > 0) {
-            onSources?.(citations);
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
+          let event: unknown;
+          try {
+            event = JSON.parse(data);
+          } catch {
+            onChunk(data);
+            fullText += data;
+            continue;
           }
+
+          if (!isRecord(event)) continue;
+          if (event.type === 'error') {
+            throw new Error(typeof event.error === 'string' ? event.error : 'Lỗi xử lý từ server AI.');
+          }
+          if (typeof event.text === 'string') {
+            onChunk(event.text);
+            fullText += event.text;
+          }
+          if (event.type === 'sources') {
+            citations = normalizeHealthAssistantCitations(event.citations);
+            if (citations.length > 0) {
+              onSources?.(citations);
+            }
+          }
+        } else {
+          onChunk(line);
+          fullText += line;
         }
-      } else {
-        onChunk(line);
-        fullText += line;
       }
     }
+  } catch (streamError) {
+    const errInfo = getRawErrorDetails(streamError);
+    digitizationLogger.log('error', 'api_stream_read_error', `Lỗi đọc luồng Gemini (${endpoint}): ${errInfo.errorMessage}`, {
+      requestId,
+      endpoint,
+      receivedLength: fullText.length,
+      errorName: errInfo.errorName,
+      errorMessage: errInfo.errorMessage,
+      durationMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt);
+    throw streamError;
   }
 
   digitizationLogger.log('info', 'api_request_complete', 'Gemini stream đã kết thúc.', {
@@ -1043,6 +1200,7 @@ async function callGeminiStream(
     status: response.status,
     durationMs: Date.now() - requestStartedAt,
     citationCount: citations.length,
+    answerLength: fullText.length,
   }, Date.now() - requestStartedAt);
   return { answer: fullText, citations };
 }
@@ -1056,46 +1214,105 @@ export async function streamHealthAssistant(
   onSources?: (citations: HealthAssistantCitation[]) => void,
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
   const requestId = createApiRequestId();
+  const compactedProfile = compactProfileForAssistant(profile);
+  let emittedChunks = false;
+  const emitChunk = (chunk: string) => {
+    if (chunk) emittedChunks = true;
+    onChunk(chunk);
+  };
+
   try {
     return await callGeminiStream(
       'ask-assistant',
-      { question, member, profile, history },
-      onChunk,
+      { question, member, profile: compactedProfile, history },
+      emitChunk,
       onSources,
       requestId,
     );
   } catch (error) {
-    if (!isNativeApkRuntime() || !isBackendUnavailableError(error)) throw error;
+    if (emittedChunks) {
+      const cleaned = cleanErrorMessage(getRawErrorDetails(error).errorMessage);
+      throw new Error(cleaned, { cause: error });
+    }
+    if (!isNativeApkRuntime() || !isBackendUnavailableError(error)) {
+      const rawInfo = getRawErrorDetails(error);
+      digitizationLogger.log('error', 'assistant_stream_error', `Trợ lý AI stream thất bại: ${rawInfo.errorMessage}`, {
+        requestId,
+        errorName: rawInfo.errorName,
+        errorMessage: rawInfo.errorMessage,
+      });
+      const cleaned = cleanErrorMessage(rawInfo.errorMessage);
+      if (error instanceof Error && error.message === cleaned) throw error;
+      throw new Error(cleaned, { cause: error });
+    }
 
-    const clientGeminiKeys = await getSharedGeminiKeysForRequest();
-    const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
-    digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển chat stream sang Gemini SDK trên APK.', {
-      requestId,
-      endpoint: 'ask-assistant',
-      keyCount: clientGeminiKeys.length,
-    });
-    const normalizedHistory = normalizeHealthAssistantHistory(history);
-    const research = await researchHealthQuestionWithPool(question, member.name, {
-      requestContext,
-      requestId,
-    });
-    onSources?.(research.citations);
-    const prompt = createHealthAssistantPrompt(
-      question,
-      member.name,
-      profile,
-      normalizedHistory,
-      research,
-    );
-    const { text } = await executeGeminiStreamWithPool({
-      task: 'assistant',
-      contents: [{ text: prompt }],
-      systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
-      clientGeminiKeys,
-      requestContext,
-      requestId,
-    }, (chunk) => onChunk(chunk));
-    return { answer: text, citations: research.citations };
+    try {
+      const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+      const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
+      digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển chat stream sang Gemini SDK trên APK.', {
+        requestId,
+        endpoint: 'ask-assistant',
+        keyCount: clientGeminiKeys.length,
+      });
+      const normalizedHistory = normalizeHealthAssistantHistory(history);
+      const research = await researchHealthQuestionWithPool(question, member.name, {
+        requestContext,
+        requestId,
+      });
+      onSources?.(research.citations);
+      const prompt = createHealthAssistantPrompt(
+        question,
+        member.name,
+        compactedProfile,
+        normalizedHistory,
+        research,
+      );
+
+      let directEmittedChunks = false;
+      try {
+        const { text } = await executeGeminiStreamWithPool({
+          task: 'assistant',
+          contents: [{ text: prompt }],
+          systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+          clientGeminiKeys,
+          requestContext,
+          requestId,
+          maxPoolPasses: 1,
+        }, (chunk) => {
+          if (chunk) directEmittedChunks = true;
+          onChunk(chunk);
+        });
+        return { answer: text, citations: research.citations };
+      } catch (directStreamError) {
+        if (directEmittedChunks) throw directStreamError;
+        const streamErrInfo = getRawErrorDetails(directStreamError);
+        digitizationLogger.log('warn', 'api_direct_non_stream_fallback', `Stream trực tiếp trên APK lỗi (${streamErrInfo.errorMessage}); thử gọi non-stream.`, {
+          requestId,
+          errorName: streamErrInfo.errorName,
+          errorMessage: streamErrInfo.errorMessage,
+        });
+        const { text } = await executeGeminiWithPool({
+          task: 'assistant',
+          contents: [{ text: prompt }],
+          systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+          clientGeminiKeys,
+          requestContext,
+          requestId,
+        });
+        if (text) onChunk(text);
+        return { answer: text, citations: research.citations };
+      }
+    } catch (fallbackError) {
+      const errInfo = getRawErrorDetails(fallbackError);
+      digitizationLogger.log('error', 'assistant_direct_fallback_error', `Fallback Trợ lý AI trên APK thất bại: ${errInfo.errorMessage}`, {
+        requestId,
+        errorName: errInfo.errorName,
+        errorMessage: errInfo.errorMessage,
+      });
+      const cleaned = cleanErrorMessage(errInfo.errorMessage);
+      if (fallbackError instanceof Error && fallbackError.message === cleaned) throw fallbackError;
+      throw new Error(cleaned, { cause: fallbackError });
+    }
   }
 }
 
@@ -1113,6 +1330,7 @@ export async function analyzeComprehensiveHealth(
   );
 
   try {
+    const compactedProfile = compactProfileForDeepDive(profile);
     const data = await callGemini<{
       success: boolean;
       result: AiDeepAnalysisResult;
@@ -1120,7 +1338,7 @@ export async function analyzeComprehensiveHealth(
       modelUsed?: string;
     }>('analyze-comprehensive', {
       member,
-      profile,
+      profile: compactedProfile,
       model,
     });
 
@@ -1189,11 +1407,12 @@ export async function analyzeComprehensiveHealth(
     };
   } catch (error) {
     const durationMs = getDuration();
+    const errInfo = getRawErrorDetails(error);
     digitizationLogger.log(
       'error',
       'deep_analysis_error',
-      `Lỗi phân tích chuyên sâu cho ${member.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
-      undefined,
+      `Lỗi phân tích chuyên sâu cho ${member.name}: ${errInfo.errorMessage}`,
+      { memberId: member.id, model, errorName: errInfo.errorName, errorMessage: errInfo.errorMessage },
       durationMs,
     );
     throw error;
