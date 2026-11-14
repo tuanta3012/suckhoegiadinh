@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core';
 import type {
   AiAnalysisBlock,
   AiDeepAnalysisResult,
@@ -19,11 +20,31 @@ import {
 } from './healthEventType';
 import { sleep } from './healthRecordService';
 import { getFirebaseIdToken } from './googleDriveService';
+import { createApiRequestId } from './apiRequestId';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
 import { buildApiUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
 import { cleanErrorMessage } from './geminiErrorMessages';
 import { TASK_MODELS } from './geminiModels';
+import {
+  buildComprehensiveAnalysisPrompt,
+  buildRefinePrompt,
+  buildSummarizePrompt,
+  COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
+  createHealthAssistantPrompt,
+  HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+  normalizeComprehensiveAnalysisPayload,
+  SUMMARIZE_RESPONSE_SCHEMA,
+} from './healthAiPrompts';
+import {
+  executeGeminiStreamWithPool,
+  executeGeminiWithPool,
+  researchHealthQuestionWithPool,
+} from './geminiUnifiedExecutor';
+import { getOrCreateSharedGeminiRequestContext } from './geminiRequestContext';
+import { normalizeHealthAssistantHistory } from './healthAssistantContext';
+import { parseRobustJson } from './healthRecordService';
+import { runUnifiedHealthDocumentOcr } from './healthDocumentOcrRunner';
 import {
   isApprovedMedicalCitationUrl,
   type HealthAssistantCitation,
@@ -57,20 +78,165 @@ function isUnreachableBackendError(error: unknown): boolean {
   );
 }
 
+function isBackendUnavailableError(error: unknown): boolean {
+  return (
+    isUnreachableBackendError(error) ||
+    (error instanceof Error && /chưa cấu hình máy chủ AI/i.test(error.message))
+  );
+}
+
+function isNativeApkRuntime(): boolean {
+  return (
+    Capacitor.isNativePlatform() ||
+    import.meta.env.VITE_APP_MODE === 'apk' ||
+    import.meta.env.VITE_APP_MODE === 'play'
+  );
+}
+
+async function runDirectGeminiFallback<T>(
+  endpoint: string,
+  body: Record<string, unknown>,
+  clientGeminiKeys: string[],
+  requestId: string,
+): Promise<T> {
+  if (clientGeminiKeys.length === 0) {
+    throw new Error('Chưa có API key trong Tài nguyên AI để chạy trực tiếp trên thiết bị.');
+  }
+  const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
+  digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển sang Gemini SDK trên APK.', {
+    requestId,
+    endpoint,
+    keyCount: clientGeminiKeys.length,
+  });
+
+  let result: unknown;
+  if (endpoint === 'refine-and-organize') {
+    const member = body.member as FamilyMember;
+    const events = Array.isArray(body.events) ? body.events as HealthEvent[] : [];
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'refinement',
+      contents: [{ text: buildRefinePrompt(member?.name || 'Thành viên', events) }],
+      responseMimeType: 'application/json',
+      requestContext,
+      requestId,
+    });
+    const parsed = parseRobustJson(text);
+    result = {
+      success: true,
+      organizedTimeline: Array.isArray(parsed.organizedEvents) ? parsed.organizedEvents : events,
+      refinementNotes: Array.isArray(parsed.refinementNotes)
+        ? parsed.refinementNotes
+        : ['Đã chuẩn hóa dữ liệu.'],
+      modelUsed,
+    };
+  } else if (endpoint === 'summarize') {
+    const member = body.member as FamilyMember;
+    const profile = body.profile as HealthProfile;
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: buildSummarizePrompt(member.name, member, profile) }],
+      responseMimeType: 'application/json',
+      responseSchema: SUMMARIZE_RESPONSE_SCHEMA,
+      requestContext,
+      requestId,
+    });
+    const parsed = parseRobustJson(text);
+    result = { success: true, summary: parsed.summary || text, modelUsed };
+  } else if (endpoint === 'analyze-comprehensive') {
+    const member = body.member as FamilyMember;
+    const profile = body.profile as HealthProfile;
+    const model = TASK_MODELS.analysis.find((candidate) => candidate === body.model)
+      || TASK_MODELS.analysis[0];
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'analysis',
+      contents: [{ text: buildComprehensiveAnalysisPrompt(member.name, member, profile) }],
+      responseMimeType: 'application/json',
+      responseSchema: COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
+      preferredModel: model,
+      requestContext,
+      requestId,
+    });
+    result = {
+      success: true,
+      ...normalizeComprehensiveAnalysisPayload(parseRobustJson(text), member.name),
+      modelUsed,
+    };
+  } else if (endpoint === 'ask-assistant') {
+    const question = typeof body.question === 'string' ? body.question.trim() : '';
+    const member = body.member as FamilyMember;
+    const profile = body.profile as HealthProfile;
+    const history = normalizeHealthAssistantHistory(body.history);
+    const memberName = member?.name || 'Thành viên';
+    const research = await researchHealthQuestionWithPool(question, memberName, {
+      requestContext,
+      requestId,
+    });
+    const prompt = createHealthAssistantPrompt(question, memberName, profile, history, research);
+    const { text, modelUsed } = await executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: prompt }],
+      systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+      requestContext,
+      requestId,
+    });
+    result = {
+      success: true,
+      answer: text,
+      citations: research.citations,
+      modelUsed,
+    };
+  } else {
+    throw new Error(`Chưa hỗ trợ fallback Gemini trực tiếp cho tác vụ ${endpoint}.`);
+  }
+  return result as T;
+}
+
 async function callGemini<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const getDuration = digitizationLogger.startTimer();
-  const clientGeminiKeys = await getSharedGeminiKeysForRequest();
-  const url = buildApiUrl(`/api/gemini/${endpoint}`);
-
-  digitizationLogger.log('info', 'api', `Gọi Gemini server cho tác vụ ${endpoint}.`, { endpoint });
+  const requestId = createApiRequestId();
+  let clientGeminiKeys: string[];
+  digitizationLogger.log('info', 'api_request_start', 'Bắt đầu request tới Gemini gateway.', {
+    requestId,
+    endpoint,
+  });
+  try {
+    clientGeminiKeys = await getSharedGeminiKeysForRequest();
+  } catch (error) {
+    digitizationLogger.log('error', 'api_request_setup_error', 'Không thể chuẩn bị request Gemini.', {
+      requestId,
+      endpoint,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      durationMs: getDuration(),
+    });
+    throw error;
+  }
+  let url: string;
+  try {
+    url = buildApiUrl(`/api/gemini/${endpoint}`);
+  } catch (error) {
+    if (isNativeApkRuntime()) {
+      return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+    }
+    digitizationLogger.log('error', 'api_request_setup_error', 'Không thể xác định URL Gemini gateway.', {
+      requestId,
+      endpoint,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      durationMs: getDuration(),
+    });
+    throw error;
+  }
 
   const maxRetries = 2;
   let lastError: unknown;
+  let lastHttpStatus: number | undefined;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const attemptStartedAt = Date.now();
+    lastHttpStatus = undefined;
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'X-Request-Id': requestId,
       };
 
       try {
@@ -90,9 +256,17 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
 
       if (!response.ok) {
         const status = response.status;
+        lastHttpStatus = status;
         if ((status === 502 || status === 503 || status === 504) && attempt < maxRetries - 1) {
           const backoff = (attempt + 1) * 1500;
-          digitizationLogger.log('warn', 'api', `Mã lỗi ${status} từ server ở tác vụ ${endpoint}; thử lại lần ${attempt + 1}/${maxRetries} sau ${backoff}ms...`);
+          digitizationLogger.log('warn', 'api_attempt_retry', 'Gemini gateway trả lỗi tạm thời; sẽ thử lại.', {
+            requestId,
+            endpoint,
+            attempt: attempt + 1,
+            nextAttempt: attempt + 2,
+            status,
+            backoffMs: backoff,
+          });
           await response.text();
           await sleep(backoff);
           continue;
@@ -103,21 +277,38 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       const durationMs = getDuration();
       digitizationLogger.log(
         'info',
-        'api',
-        `Gemini hoàn tất tác vụ ${endpoint} qua server (${durationMs}ms).`,
-        { endpoint },
+        'api_request_complete',
+        'Gemini gateway hoàn tất request.',
+        { requestId, endpoint, status: response.status, durationMs },
         durationMs,
       );
       return data;
     } catch (error) {
       lastError = error;
+      digitizationLogger.log(
+        'warn',
+        'api_attempt_error',
+        'Lần gọi Gemini gateway thất bại.',
+        {
+          requestId,
+          endpoint,
+          attempt: attempt + 1,
+          status: lastHttpStatus,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          durationMs: Date.now() - attemptStartedAt,
+        },
+        Date.now() - attemptStartedAt,
+      );
+      if (isNativeApkRuntime() && isUnreachableBackendError(error)) {
+        return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
+      }
       if (isUnreachableBackendError(error) && attempt < maxRetries - 1) {
         const backoff = (attempt + 1) * 1500;
         digitizationLogger.log(
           'warn',
-          'api',
-          `Kết nối tới Gemini server ở tác vụ ${endpoint} bị gián đoạn (thử lại lần ${attempt + 1}/${maxRetries} sau ${backoff}ms)...`,
-          { endpoint, attempt },
+          'api_attempt_retry',
+          'Không kết nối được Gemini gateway; sẽ thử lại.',
+          { requestId, endpoint, attempt: attempt + 1, nextAttempt: attempt + 2, backoffMs: backoff },
         );
         await sleep(backoff);
         continue;
@@ -130,9 +321,15 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
   const errorMessage = cleanErrorMessage(lastError instanceof Error ? lastError.message : String(lastError));
   digitizationLogger.log(
     'error',
-    'api',
-    `Gemini thất bại ở tác vụ ${endpoint}: ${errorMessage}`,
-    { endpoint },
+    'api_request_failed',
+    `Gemini gateway request thất bại: ${errorMessage}`,
+    {
+      requestId,
+      endpoint,
+      status: lastHttpStatus,
+      errorName: lastError instanceof Error ? lastError.name : 'UnknownError',
+      durationMs,
+    },
     durationMs,
   );
   throw lastError instanceof Error ? lastError : new Error(errorMessage);
@@ -267,11 +464,30 @@ async function extractServerHealthEvent(
   contentIndexPages: string[];
   contentIndexComplete: boolean;
 }> {
+  const requestId = createApiRequestId();
+  const requestStartedAt = Date.now();
+  digitizationLogger.log('info', 'api_request_start', 'Bắt đầu request OCR tới Gemini gateway.', {
+    requestId,
+    endpoint: 'extract-health-event',
+    fileType: mimeType,
+    fileSize: file.size,
+  });
   const clientGeminiKeys = await getSharedGeminiKeysForRequest();
-  const url = buildApiUrl('/api/gemini/extract-health-event');
+  let url: string;
+  try {
+    url = buildApiUrl('/api/gemini/extract-health-event');
+  } catch (error) {
+    if (isNativeApkRuntime()) {
+      return runDirectHealthDocumentOcr(
+        file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
+      );
+    }
+    throw error;
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Request-Id': requestId,
   };
 
   try {
@@ -283,22 +499,44 @@ async function extractServerHealthEvent(
     console.warn('[Gemini Service] Could not attach auth token for extraction:', e);
   }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    signal: options?.signal,
-    body: JSON.stringify({
-      base64Data,
-      mimeType,
-      member,
-      fileName: file.name,
-      stream: true,
-      clientGeminiKeys,
-      isAutoDetect: options?.isAutoDetect ?? false,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      signal: options?.signal,
+      body: JSON.stringify({
+        base64Data,
+        mimeType,
+        member,
+        fileName: file.name,
+        stream: true,
+        clientGeminiKeys,
+        isAutoDetect: options?.isAutoDetect ?? false,
+      }),
+    });
+  } catch (error) {
+    if (isNativeApkRuntime() && isUnreachableBackendError(error)) {
+      return runDirectHealthDocumentOcr(
+        file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
+      );
+    }
+    digitizationLogger.log('error', 'api_request_failed', 'Không kết nối được Gemini gateway cho OCR.', {
+      requestId,
+      endpoint: 'extract-health-event',
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      durationMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt);
+    throw error;
+  }
 
   if (!response.ok) {
+    digitizationLogger.log('error', 'api_response_error', 'Gemini gateway trả lỗi cho OCR.', {
+      requestId,
+      endpoint: 'extract-health-event',
+      status: response.status,
+      durationMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt);
     await readApiJson<never>(response, 'Server Gemini (extract-health-event)');
   }
 
@@ -370,11 +608,20 @@ async function extractServerHealthEvent(
 
   const durationMs = getDuration();
   digitizationLogger.log('info', 'ocr_complete', `OCR qua server hoàn tất trong ${durationMs}ms bằng ${finalResult.modelUsed}.`, {
+    requestId,
+    endpoint: 'extract-health-event',
     durationMs,
     modelUsed: finalResult.modelUsed,
     totalPages: finalResult.totalPages,
     processedPages: finalResult.processedPages,
   }, durationMs);
+  digitizationLogger.log('info', 'api_request_complete', 'Gemini gateway hoàn tất OCR.', {
+    requestId,
+    endpoint: 'extract-health-event',
+    status: response.status,
+    durationMs: Date.now() - requestStartedAt,
+    model: finalResult.modelUsed,
+  }, Date.now() - requestStartedAt);
 
   onProgress?.({
     stage: 'completed',
@@ -387,6 +634,91 @@ async function extractServerHealthEvent(
   });
 
   return finalResult;
+}
+
+async function runDirectHealthDocumentOcr(
+  file: File,
+  member: FamilyMember,
+  mimeType: string,
+  base64Data: string,
+  clientGeminiKeys: string[],
+  requestId: string,
+  onProgress?: (update: ExtractionProgressUpdate) => void,
+  options?: { isAutoDetect?: boolean; signal?: AbortSignal },
+): Promise<{
+  extracted: Partial<HealthEvent>;
+  modelUsed?: string;
+  totalPages?: number;
+  processedPages?: number;
+  contentIndexPages: string[];
+  contentIndexComplete: boolean;
+}> {
+  digitizationLogger.log('warn', 'api_direct_fallback', 'Chạy OCR bằng Gemini SDK trực tiếp trên APK.', {
+    requestId,
+    endpoint: 'extract-health-event',
+    keyCount: clientGeminiKeys.length,
+  });
+  const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
+  const result = await runUnifiedHealthDocumentOcr({
+    base64Data,
+    mimeType,
+    fileName: file.name,
+    memberName: member.name,
+    memberBirthDate: typeof member.birthDate === 'string' ? member.birthDate : undefined,
+    isAutoDetect: options?.isAutoDetect,
+    clientGeminiKeys,
+    requestContext,
+    requestId,
+    signal: options?.signal,
+    onPlanReady: ({ totalPages }) => onProgress?.({
+      stage: 'reading_document',
+      progressPercent: 45,
+      message: `Đã nhận diện tài liệu ${totalPages} trang; Gemini đang xử lý trực tiếp trên thiết bị.`,
+      totalPages,
+    }),
+    onBatchComplete: ({ completed, totalBatches, extracted, modelUsed, batch, totalPages }) => onProgress?.({
+      stage: 'extracting_content',
+      progressPercent: Math.min(95, 50 + Math.round((completed / totalBatches) * 45)),
+      message: `Đã xử lý ${completed}/${totalBatches} phần tài liệu.`,
+      modelUsed,
+      partialEvent: normalizeExtractedEvent(extracted, file.name),
+      totalPages,
+      processedPages: Math.min(totalPages, batch.lastPage),
+    }),
+    onProgress: (message) => onProgress?.({
+      stage: 'waiting_for_model',
+      progressPercent: 50,
+      message,
+    }),
+  });
+  const extracted = normalizeExtractedEvent(result.extracted, file.name);
+  const contentIndexPages = Array.isArray(result.extracted.contentIndexPages)
+    ? result.extracted.contentIndexPages.filter((page): page is string => typeof page === 'string')
+    : [];
+  onProgress?.({
+    stage: 'completed',
+    progressPercent: 100,
+    message: 'Hoàn tất số hóa tài liệu y tế!',
+    modelUsed: result.modelUsed,
+    partialEvent: extracted,
+    totalPages: result.totalPages,
+    processedPages: result.processedPages,
+  });
+  digitizationLogger.log('info', 'ocr_complete', 'OCR trực tiếp trên APK hoàn tất.', {
+    requestId,
+    endpoint: 'extract-health-event',
+    modelUsed: result.modelUsed,
+    totalPages: result.totalPages,
+    processedPages: result.processedPages,
+  });
+  return {
+    extracted,
+    modelUsed: result.modelUsed,
+    totalPages: result.totalPages,
+    processedPages: result.processedPages,
+    contentIndexPages,
+    contentIndexComplete: result.extracted.contentIndexComplete === true,
+  };
 }
 
 export async function extractHealthEventWithProgress(
@@ -597,12 +929,19 @@ async function callGeminiStream(
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void,
   onSources?: (citations: HealthAssistantCitation[]) => void,
+  requestId = createApiRequestId(),
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
+  const requestStartedAt = Date.now();
+  digitizationLogger.log('info', 'api_request_start', 'Bắt đầu request Gemini dạng stream.', {
+    requestId,
+    endpoint,
+  });
   const clientGeminiKeys = await getSharedGeminiKeysForRequest();
   const url = buildApiUrl(`/api/gemini/${endpoint}`);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Request-Id': requestId,
   };
 
   try {
@@ -614,13 +953,30 @@ async function callGeminiStream(
     console.warn('[Gemini Service] Could not attach auth token for stream:', e);
   }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...body, stream: true, clientGeminiKeys }),
+    });
+  } catch (error) {
+    digitizationLogger.log('error', 'api_request_failed', 'Không kết nối được Gemini gateway cho stream.', {
+      requestId,
+      endpoint,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      durationMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt);
+    throw error;
+  }
 
   if (!response.ok) {
+    digitizationLogger.log('error', 'api_response_error', 'Gemini gateway trả lỗi cho stream.', {
+      requestId,
+      endpoint,
+      status: response.status,
+      durationMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt);
     await readApiJson<never>(response, `Server Gemini (${endpoint})`);
   }
 
@@ -681,6 +1037,13 @@ async function callGeminiStream(
     }
   }
 
+  digitizationLogger.log('info', 'api_request_complete', 'Gemini stream đã kết thúc.', {
+    requestId,
+    endpoint,
+    status: response.status,
+    durationMs: Date.now() - requestStartedAt,
+    citationCount: citations.length,
+  }, Date.now() - requestStartedAt);
   return { answer: fullText, citations };
 }
 
@@ -692,7 +1055,48 @@ export async function streamHealthAssistant(
   history: HealthAssistantHistoryMessage[] = [],
   onSources?: (citations: HealthAssistantCitation[]) => void,
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
-  return callGeminiStream('ask-assistant', { question, member, profile, history }, onChunk, onSources);
+  const requestId = createApiRequestId();
+  try {
+    return await callGeminiStream(
+      'ask-assistant',
+      { question, member, profile, history },
+      onChunk,
+      onSources,
+      requestId,
+    );
+  } catch (error) {
+    if (!isNativeApkRuntime() || !isBackendUnavailableError(error)) throw error;
+
+    const clientGeminiKeys = await getSharedGeminiKeysForRequest();
+    const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
+    digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển chat stream sang Gemini SDK trên APK.', {
+      requestId,
+      endpoint: 'ask-assistant',
+      keyCount: clientGeminiKeys.length,
+    });
+    const normalizedHistory = normalizeHealthAssistantHistory(history);
+    const research = await researchHealthQuestionWithPool(question, member.name, {
+      requestContext,
+      requestId,
+    });
+    onSources?.(research.citations);
+    const prompt = createHealthAssistantPrompt(
+      question,
+      member.name,
+      profile,
+      normalizedHistory,
+      research,
+    );
+    const { text } = await executeGeminiStreamWithPool({
+      task: 'assistant',
+      contents: [{ text: prompt }],
+      systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
+      clientGeminiKeys,
+      requestContext,
+      requestId,
+    }, (chunk) => onChunk(chunk));
+    return { answer: text, citations: research.citations };
+  }
 }
 
 export async function analyzeComprehensiveHealth(

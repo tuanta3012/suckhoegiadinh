@@ -32,6 +32,7 @@ export interface RunUnifiedOcrOptions {
   isAutoDetect?: boolean;
   clientGeminiKeys?: string[];
   requestContext?: GeminiRequestContext;
+  requestId?: string;
   signal?: AbortSignal;
   interBatchDelayMs?: number;
   onPlanReady?: (info: { mode: 'whole_file' | 'chunked'; totalPages: number; batchCount: number }) => void;
@@ -126,6 +127,7 @@ export async function runUnifiedHealthDocumentOcr(
         onProgress: options.onProgress,
         clientGeminiKeys: options.clientGeminiKeys,
         requestContext: options.requestContext,
+        requestId: options.requestId,
         preferredProjectId,
         shouldStopRetrying:
           isWholeDocumentPass && effectiveMime === 'application/pdf' && plan.totalPages > 1

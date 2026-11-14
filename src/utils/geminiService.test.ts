@@ -91,18 +91,60 @@ describe('Gemini service backend routing', () => {
       .toBe('https://api.example.com/api/gemini/ask-assistant');
   });
 
-  it('does not execute Gemini on the device when an APK has no configured backend URL', async () => {
+  it('uses the shared device executor when an APK has no configured backend URL', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
     vi.stubEnv('VITE_BACKEND_URL', '');
     vi.stubEnv('VITE_APP_MODE', 'apk');
     vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-device-key']);
+    generateContentMock.mockResolvedValue({ text: 'Câu trả lời từ Gemini trên thiết bị.' });
     globalThis.fetch = vi.fn();
 
-    await expect(askHealthAssistant('Question', member, profile))
-      .rejects.toThrow('Chưa cấu hình máy chủ AI');
+    const result = await askHealthAssistant('Lần gần nhất tôi khám ở đâu?', member, profile);
 
+    expect(result.answer).toBe('Câu trả lời từ Gemini trên thiết bị.');
     expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(generateContentMock).not.toHaveBeenCalled();
+    expect(generateContentMock).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the shared device executor when an APK backend fetch fails', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-device-key']);
+    generateContentMock.mockResolvedValue({ text: 'Câu trả lời sau khi chuyển sang Gemini trực tiếp.' });
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const result = await askHealthAssistant('Lần gần nhất tôi khám ở đâu?', member, profile);
+
+    expect(result.answer).toBe('Câu trả lời sau khi chuyển sang Gemini trực tiếp.');
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(generateContentMock).toHaveBeenCalledOnce();
+  });
+
+  it('streams APK assistant responses directly when the backend URL is missing', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-stream-device-key']);
+    generateContentStreamMock.mockImplementation(async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { text: 'Luồng trả lời trực tiếp.' };
+      },
+    }));
+    globalThis.fetch = vi.fn();
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Lần gần nhất tôi khám ở đâu?',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(result.answer).toBe('Luồng trả lời trực tiếp.');
+    expect(chunks.join('')).toBe(result.answer);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(generateContentStreamMock).toHaveBeenCalledOnce();
   });
 
   it('routes APK chat and its AI-resource keys through the shared backend', async () => {
@@ -203,6 +245,31 @@ describe('Gemini service backend routing', () => {
     const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
     expect(body.clientGeminiKeys).toEqual(['AIzaSy-ocr-key']);
     expect(generateContentMock).not.toHaveBeenCalled();
+  });
+
+  it('runs APK OCR directly when the backend URL is missing', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-ocr-device-key']);
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        title: 'Kết quả khám trực tiếp',
+        type: 'test_result',
+        pageTexts: ['Nội dung trang 1'],
+      }),
+    });
+    globalThis.fetch = vi.fn();
+
+    const result = await extractHealthEventWithProgress(
+      new File(['image'], 'report.jpg', { type: 'image/jpeg' }),
+      member,
+    );
+
+    expect(result.extracted.title).toBe('Kết quả khám trực tiếp');
+    expect(result.contentIndexComplete).toBe(true);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(generateContentMock).toHaveBeenCalledOnce();
   });
 
   it('forwards OCR cancellation to the backend request', async () => {

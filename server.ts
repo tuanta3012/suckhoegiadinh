@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -113,6 +114,10 @@ function getGeminiRequestSignal(res: Response): AbortSignal | undefined {
   return res.locals.geminiAbortSignal as AbortSignal | undefined;
 }
 
+function getGeminiRequestId(res: Response): string | undefined {
+  return res.locals.requestId as string | undefined;
+}
+
 async function startServer() {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -124,7 +129,7 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, X-Requested-With, X-Request-Id');
     res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') {
@@ -172,6 +177,17 @@ async function startServer() {
       return;
     }
 
+    const requestStartedAt = Date.now();
+    const requestedId = req.header('X-Request-Id') || '';
+    const requestId = /^[a-zA-Z0-9._:-]{1,100}$/.test(requestedId) ? requestedId : randomUUID();
+    res.setHeader('X-Request-Id', requestId);
+    res.locals.requestId = requestId;
+    digitizationLogger.log('info', 'api_http_received', 'Backend nhận yêu cầu Gemini.', {
+      requestId,
+      method: req.method,
+      endpoint: req.path,
+    }, undefined, 'server');
+
     const authorization = req.header('Authorization') || '';
     const match = authorization.match(/^Bearer\s+(\S+)$/i);
     let uid = req.ip || 'guest-session';
@@ -205,6 +221,20 @@ async function startServer() {
       res.removeListener('close', abortQueuedRequest);
       const queueIsFull = error instanceof Error && error.message.includes('queue is full');
       if (res.destroyed || res.writableEnded || (admissionAbort.signal.aborted && !admissionTimedOut)) return;
+      digitizationLogger.log(
+        'warn',
+        'api_http_rejected',
+        'Yêu cầu Gemini bị từ chối tại admission queue.',
+        {
+          requestId,
+          endpoint: req.path,
+          status: 429,
+          reason: queueIsFull ? 'queue_full' : 'queue_timeout',
+          durationMs: Date.now() - requestStartedAt,
+        },
+        Date.now() - requestStartedAt,
+        'server',
+      );
       res.setHeader('Retry-After', '10');
       res.status(429).json({
         error: queueIsFull
@@ -229,9 +259,29 @@ async function startServer() {
     const abortActiveRequest = () => {
       if (!res.writableEnded) admissionAbort.abort(new Error('Client disconnected.'));
     };
-    res.once('finish', releaseOnce);
+    digitizationLogger.log('info', 'api_http_admitted', 'Yêu cầu Gemini được nhận vào xử lý.', {
+      requestId,
+      endpoint: req.path,
+      queueWaitMs: Date.now() - requestStartedAt,
+    }, Date.now() - requestStartedAt, 'server');
+    res.once('finish', () => {
+      digitizationLogger.log('info', 'api_http_complete', 'Backend hoàn tất yêu cầu Gemini.', {
+        requestId,
+        endpoint: req.path,
+        status: res.statusCode,
+        durationMs: Date.now() - requestStartedAt,
+      }, Date.now() - requestStartedAt, 'server');
+      releaseOnce();
+    });
     res.once('close', () => {
-      abortActiveRequest();
+      if (!res.writableEnded) {
+        abortActiveRequest();
+        digitizationLogger.log('warn', 'api_http_disconnected', 'Client ngắt kết nối khi tác vụ Gemini đang chạy.', {
+          requestId,
+          endpoint: req.path,
+          durationMs: Date.now() - requestStartedAt,
+        }, Date.now() - requestStartedAt, 'server');
+      }
       releaseOnce();
     });
     res.locals.firebaseUid = uid;
@@ -277,6 +327,7 @@ async function startServer() {
       const { text, modelUsed } = await executeGeminiWithPool({
         task: 'assistant',
         contents,
+        requestId: getGeminiRequestId(res),
         preferredModel: model,
         generationConfig: isRecord(config) ? config : undefined,
         timeoutMs: 60_000,
@@ -354,6 +405,7 @@ async function startServer() {
           memberBirthDate: member?.birthDate,
           isAutoDetect: Boolean(isAutoDetect),
           requestContext,
+          requestId: getGeminiRequestId(res),
           signal: modelAbortController.signal,
           interBatchDelayMs: 2_000,
           onPlanReady: ({ mode, totalPages }) => {
@@ -405,6 +457,7 @@ async function startServer() {
         memberBirthDate: member?.birthDate,
         isAutoDetect: Boolean(isAutoDetect),
         requestContext,
+        requestId: getGeminiRequestId(res),
         signal: getGeminiRequestSignal(res),
         interBatchDelayMs: 2_000,
       });
@@ -455,6 +508,7 @@ async function startServer() {
       const { text, modelUsed } = await executeGeminiWithPool({
         task: 'refinement',
         contents: [{ text: buildRefinePrompt(memberName, events) }],
+        requestId: getGeminiRequestId(res),
         responseMimeType: 'application/json',
         signal: getGeminiRequestSignal(res),
         clientGeminiKeys: resolveServerGeminiKeys(req.body.clientGeminiKeys),
@@ -486,6 +540,7 @@ async function startServer() {
       const { text, modelUsed } = await executeGeminiWithPool({
         task: 'assistant',
         contents: [{ text: buildSummarizePrompt(memberName, member, profile) }],
+        requestId: getGeminiRequestId(res),
         responseMimeType: 'application/json',
         responseSchema: SUMMARIZE_RESPONSE_SCHEMA,
         signal: getGeminiRequestSignal(res),
@@ -518,6 +573,7 @@ async function startServer() {
       const { text, modelUsed } = await executeGeminiWithPool({
         task: 'analysis',
         contents: [{ text: buildComprehensiveAnalysisPrompt(memberName, member, profile) }],
+        requestId: getGeminiRequestId(res),
         responseMimeType: 'application/json',
         responseSchema: COMPREHENSIVE_ANALYSIS_RESPONSE_SCHEMA,
         preferredModel: requestedModel,
@@ -583,7 +639,7 @@ async function startServer() {
           const research = await researchHealthQuestionWithPool(
             currentQuestion,
             memberName,
-            { requestContext, signal: controller.signal },
+            { requestContext, requestId: getGeminiRequestId(res), signal: controller.signal },
           );
           const prompt = createHealthAssistantPrompt(
             currentQuestion,
@@ -600,6 +656,7 @@ async function startServer() {
               contents: prompt,
               systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
               requestContext,
+              requestId: getGeminiRequestId(res),
               signal: controller.signal,
             },
             (chunk, modelUsed) => {
@@ -625,7 +682,7 @@ async function startServer() {
       const research = await researchHealthQuestionWithPool(
         currentQuestion,
         memberName,
-        { requestContext, signal: requestSignal },
+        { requestContext, requestId: getGeminiRequestId(res), signal: requestSignal },
       );
       const prompt = createHealthAssistantPrompt(
         currentQuestion,
@@ -639,6 +696,7 @@ async function startServer() {
         contents: [{ text: prompt }],
         systemInstruction: HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
         requestContext,
+        requestId: getGeminiRequestId(res),
         signal: requestSignal,
       });
 

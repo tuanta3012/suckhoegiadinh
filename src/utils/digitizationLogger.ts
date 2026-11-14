@@ -14,10 +14,25 @@ export interface DigitizationLogEntry {
 }
 
 export const DIGITIZATION_LOGS_STORAGE_KEY = 'family_health_ai_digitization_logs';
+const LOG_TIME_ZONE = 'Asia/Ho_Chi_Minh';
+
+function getLogDateKey(value: string | Date): string | null {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: LOG_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
 
 class DigitizationLogger {
   private logs: DigitizationLogEntry[] = [];
   private readonly MAX_LOGS = 3000;
+  private currentLogDate = getLogDateKey(new Date()) || '';
 
   constructor() {
     try {
@@ -26,7 +41,14 @@ class DigitizationLogger {
         if (stored) {
           const parsed = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            this.logs = parsed;
+            this.logs = parsed.filter((entry): entry is DigitizationLogEntry =>
+              Boolean(
+                entry &&
+                  typeof entry.timestamp === 'string' &&
+                  getLogDateKey(entry.timestamp) === this.currentLogDate,
+              ),
+            );
+            if (this.logs.length !== parsed.length) this.persistLogs();
           }
         }
       }
@@ -49,28 +71,21 @@ class DigitizationLogger {
     message: string,
     data?: any,
     durationMs?: number,
-    source: 'client' | 'server' = 'client',
+    source?: 'client' | 'server',
   ) {
+    this.retainCurrentDay();
     const entry: DigitizationLogEntry = {
       timestamp: new Date().toISOString(),
       level,
       stage,
       message,
       durationMs,
-      source,
+      source: source || (typeof window === 'undefined' ? 'server' : 'client'),
       data,
     };
     this.logs.push(entry);
     if (this.logs.length > this.MAX_LOGS) this.logs.shift();
-
-    // Save to localStorage
-    try {
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(DIGITIZATION_LOGS_STORAGE_KEY, JSON.stringify(this.logs));
-      }
-    } catch (e) {
-      console.warn('[DigitizationLogger] Failed to save logs to localStorage:', e);
-    }
+    this.persistLogs();
 
     const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
     const durStr = durationMs !== undefined ? ` [${durationMs}ms]` : '';
@@ -78,18 +93,14 @@ class DigitizationLogger {
   }
 
   getLogs(): DigitizationLogEntry[] {
+    this.retainCurrentDay();
     return [...this.logs];
   }
 
   clearLogs() {
     this.logs = [];
-    try {
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem(DIGITIZATION_LOGS_STORAGE_KEY);
-      }
-    } catch (e) {
-      console.warn('[DigitizationLogger] Failed to clear logs from localStorage:', e);
-    }
+    this.currentLogDate = getLogDateKey(new Date()) || '';
+    this.persistLogs();
   }
 
   async exportLogsAsFile(
@@ -98,14 +109,17 @@ class DigitizationLogger {
   ): Promise<boolean> {
     try {
       // Kết hợp cả Client logs và Server logs theo trình tự thời gian
-      const clientLogs: DigitizationLogEntry[] = this.logs.map((l) => ({
+      const currentDay = getLogDateKey(new Date());
+      const clientLogs: DigitizationLogEntry[] = this.getLogs().map((l) => ({
         ...l,
         source: l.source || 'client',
       }));
-      const serverLogs: DigitizationLogEntry[] = (customLogs || []).map((l) => ({
+      const serverLogs: DigitizationLogEntry[] = (customLogs || [])
+        .filter((entry) => getLogDateKey(entry.timestamp) === currentDay)
+        .map((l) => ({
         ...l,
         source: l.source || 'server',
-      }));
+        }));
 
       // Hợp nhất và sắp xếp theo mốc thời gian ISO
       const mergedLogs = [...clientLogs, ...serverLogs].sort(
@@ -178,6 +192,34 @@ class DigitizationLogger {
     } catch (e) {
       console.error('[DigitizationLogger] Failed to export logs:', e);
       return false;
+    }
+  }
+
+  private retainCurrentDay(): void {
+    const currentDay = getLogDateKey(new Date()) || '';
+    if (currentDay !== this.currentLogDate) {
+      this.logs = [];
+      this.currentLogDate = currentDay;
+      this.persistLogs();
+      return;
+    }
+
+    const currentLogs = this.logs.filter(
+      (entry) => getLogDateKey(entry.timestamp) === currentDay,
+    );
+    if (currentLogs.length !== this.logs.length) {
+      this.logs = currentLogs;
+      this.persistLogs();
+    }
+  }
+
+  private persistLogs(): void {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(DIGITIZATION_LOGS_STORAGE_KEY, JSON.stringify(this.logs));
+      }
+    } catch (e) {
+      console.warn('[DigitizationLogger] Failed to save logs from the current day:', e);
     }
   }
 }
