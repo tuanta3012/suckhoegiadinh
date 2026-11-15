@@ -240,6 +240,45 @@ import {
 } from '../utils/backNavigation';
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 const DASHBOARD_TAB_ORDER: DashboardTab[] = ['overview', 'timeline', 'assistant', 'family'];
+
+const MEDICAL_EXTRACTED_FIELD_LABELS: Record<string, { label: string; icon?: string }> = {
+  clinicalDiagnosis: { label: 'Chẩn đoán lâm sàng', icon: '📋' },
+  siteOfBiopsy: { label: 'Vị trí sinh thiết / lấy mẫu', icon: '📍' },
+  samplingDate: { label: 'Ngày lấy mẫu', icon: '📅' },
+  receivingDate: { label: 'Ngày nhận mẫu', icon: '📥' },
+  stainingMethod: { label: 'Phương pháp nhuộm', icon: '🧪' },
+  grossDescription: { label: 'Mô tả đại thể (Mắt thường)', icon: '🔍' },
+  microscopicDescription: { label: 'Mô tả vi thể (Kính hiển vi)', icon: '🔬' },
+  pathologicalDiagnosis: { label: 'Kết luận mô bệnh học', icon: '🩺' },
+  immunohistochemistry: { label: 'Hóa mô miễn dịch (IHC)', icon: '🧬' },
+  surgicalMargins: { label: 'Diện cắt / Rìa phẫu thuật', icon: '📏' },
+  margins: { label: 'Tình trạng diện cắt', icon: '📏' },
+  lymphNodes: { label: 'Hạch bạch huyết', icon: '⚪' },
+  histologicalType: { label: 'Phân loại mô học', icon: '🏷️' },
+  histologicalGrade: { label: 'Độ mô học (Grade)', icon: '📊' },
+  tumorSize: { label: 'Kích thước u', icon: '📐' },
+  invasionDepth: { label: 'Độ xâm lấn', icon: '⚡' },
+  specimen: { label: 'Bệnh phẩm', icon: '🧫' },
+  sampleType: { label: 'Loại mẫu', icon: '🧫' },
+  technique: { label: 'Kỹ thuật thực hiện', icon: '⚙️' },
+  procedure: { label: 'Thủ thuật', icon: '🩺' },
+  clinicalHistory: { label: 'Tiền sử lâm sàng', icon: '📜' },
+  conclusion: { label: 'Kết luận chuyên môn', icon: '👉' },
+  recommendation: { label: 'Khuyến nghị', icon: '💡' },
+  notes: { label: 'Ghi chú', icon: '📝' },
+};
+
+function formatMedicalFieldInfo(key: string): { label: string; icon?: string } {
+  if (MEDICAL_EXTRACTED_FIELD_LABELS[key]) {
+    return MEDICAL_EXTRACTED_FIELD_LABELS[key];
+  }
+  const formatted = key
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/^./, (str) => str.toUpperCase());
+  return { label: formatted };
+}
 interface HealthDashboardProps {
   userEmail: string | null;
   userName?: string | null;
@@ -576,6 +615,14 @@ export function HealthDashboard({
         ? 'Đồng bộ dữ liệu'
         : 'Tạo kho dữ liệu';
   const [profiles, setProfiles] = useState<Record<string, HealthProfile>>(offlineStartup.profiles);
+  const [autoDeepAnalysis, setAutoDeepAnalysis] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('family_health_auto_deep_analysis');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
   const [localImportAvailable, setLocalImportAvailable] = useState(false);
   const [isImportingLocalData, setIsImportingLocalData] = useState(false);
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
@@ -1095,9 +1142,24 @@ export function HealthDashboard({
             summary: summarizeTimeline(timeline, currentProfile.summary.narrative),
           };
           const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
+          let aiDeepAnalysis = refinedProfile.aiDeepAnalysis;
+          let aiAnalysis = refinedProfile.aiAnalysis;
+
+          if (autoDeepAnalysis) {
+            try {
+              const deepRes = await analyzeComprehensiveHealth(targetMember, refinedProfile, 'gemini-4-hydrogen');
+              aiDeepAnalysis = deepRes.result;
+              aiAnalysis = deepRes.aiAnalysis;
+            } catch (deepErr) {
+              console.warn('[Auto Summary] Comprehensive 4-layer analysis skipped or failed:', deepErr);
+            }
+          }
+
           const updatedProfile: HealthProfile = {
             ...refinedProfile,
             summary: { ...refinedProfile.summary, narrative },
+            aiDeepAnalysis,
+            aiAnalysis,
             updatedAt: new Date().toISOString(),
           };
           const saveTimer = digitizationLogger.startTimer();
@@ -4035,6 +4097,10 @@ export function HealthDashboard({
       });
     };
     
+    if (!isRecognizablePatientName(patientName)) {
+      return undefined;
+    }
+
     const { matched, candidates } = findMemberByOcrPatientName(
       patientName,
       currentMembers,
@@ -4060,39 +4126,65 @@ export function HealthDashboard({
         }
       }
       if (!profilesRef.current[matched.id]) {
-        const reloaded = await reloadProfiles(workspaceRef.current || currentWorkspace);
-        profilesRef.current = reloaded;
-        setProfiles(reloaded);
+        try {
+          const reloaded = await reloadProfiles(workspaceRef.current || currentWorkspace);
+          profilesRef.current = reloaded;
+          setProfiles(reloaded);
+        } catch (e) {
+          console.warn('[OCR Subject Match] Could not reload profiles for matched member:', e);
+        }
       }
       return matched;
     }
-    // Nếu không có ứng viên nào, không trùng tên với thành viên đã có (tránh tạo bản sao khi lệch ngày sinh/giới tính)
-    // và tên hợp lệ -> Tự động đổi tên thành viên rỗng hoặc tạo thành viên mới
-    const hasSameNameConflict = hasSameNameMemberConflict(patientName, currentMembers);
-    if (candidates.length === 0 && !hasSameNameConflict && isRecognizablePatientName(patientName)) {
+
+    // Nếu có 1 ứng viên gần đúng (ví dụ trùng tên nhưng lệch nhẹ năm sinh/giới tính), tự động chọn ứng viên đó để tránh tạo trùng
+    if (candidates.length === 1) {
       digitizationLogger.log(
         'info',
-        'subject_auto_create',
-        `Không tìm thấy thành viên khớp; tự động tạo/cập nhật hồ sơ cho "${patientName}"`,
-        { patientName }
+        'subject_candidate_match',
+        `Tự động chọn ứng viên duy nhất "${candidates[0].name}" cho chủ thể OCR "${patientName}"`,
+        { patientName, candidateId: candidates[0].id }
       );
-      
-      try {
-        const cleanedPatientName = sanitizeOcrPatientName(patientName) || patientName;
-        const normalizedName = normalizeVietnameseProperName(cleanedPatientName);
-        const emptyPlaceholder = findEmptyPlaceholder();
-        let targetMember: FamilyMember;
-        let updatedWorkspace: HealthDriveWorkspace;
-        if (emptyPlaceholder) {
-          // Ưu tiên CẬP NHẬT/ĐỔI TÊN thành viên rỗng 'Thành viên mới' sẵn có thành "Trương Anh Tuấn"
-          if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+      if (!profilesRef.current[candidates[0].id]) {
+        try {
+          const reloaded = await reloadProfiles(workspaceRef.current || currentWorkspace);
+          profilesRef.current = reloaded;
+          setProfiles(reloaded);
+        } catch (e) {
+          // ignore
+        }
+      }
+      return candidates[0];
+    }
+
+    // Tự động tạo hồ sơ mới hoặc cập nhật thành viên rỗng cho tên nhận diện được
+    const hasSameNameConflict = hasSameNameMemberConflict(patientName, currentMembers);
+    const cleanedPatientName = sanitizeOcrPatientName(patientName) || patientName;
+    const normalizedName = normalizeVietnameseProperName(cleanedPatientName);
+
+    digitizationLogger.log(
+      'info',
+      'subject_auto_create',
+      `Không tìm thấy thành viên khớp chính xác; tự động tạo/cập nhật hồ sơ cho "${normalizedName}"`,
+      { patientName, normalizedName }
+    );
+
+    try {
+      const emptyPlaceholder = findEmptyPlaceholder();
+      let targetMember: FamilyMember;
+      let updatedWorkspace: HealthDriveWorkspace;
+      if (emptyPlaceholder && !hasSameNameConflict) {
+        // Ưu tiên CẬP NHẬT/ĐỔI TÊN thành viên rỗng 'Thành viên mới' sẵn có
+        if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+          try {
             updatedWorkspace = await updateDriveFamilyMember(currentWorkspace, emptyPlaceholder.id, {
               name: normalizedName,
               gender: genderFromOcr(extracted.patientGender, emptyPlaceholder.gender),
               birthDate: extracted.patientBirthDate || emptyPlaceholder.birthDate,
             });
             targetMember = updatedWorkspace.family.members.find(m => m.id === emptyPlaceholder.id)!;
-          } else {
+          } catch (driveErr) {
+            console.warn('[OCR Auto-create] Drive update failed, updating locally:', driveErr);
             targetMember = {
               ...emptyPlaceholder,
               name: normalizedName,
@@ -4109,9 +4201,26 @@ export function HealthDashboard({
             };
           }
         } else {
-          // Nếu không có thành viên rỗng sẵn có -> Tạo mới hoàn toàn
-          const newMemberId = `member_${crypto.randomUUID().slice(0, 12)}`;
-          if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+          targetMember = {
+            ...emptyPlaceholder,
+            name: normalizedName,
+            gender: genderFromOcr(extracted.patientGender, emptyPlaceholder.gender),
+            birthDate: extracted.patientBirthDate || emptyPlaceholder.birthDate,
+          };
+          updatedWorkspace = {
+            ...currentWorkspace,
+            family: {
+              ...currentWorkspace.family,
+              members: currentWorkspace.family.members.map(m => m.id === emptyPlaceholder.id ? targetMember : m),
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        }
+      } else {
+        // Tạo mới hoàn toàn
+        const newMemberId = `member_${crypto.randomUUID().slice(0, 12)}`;
+        if (currentWorkspace.rootFolderId !== 'local_offline_workspace' && driveAuthorized) {
+          try {
             updatedWorkspace = await addDriveFamilyMember(currentWorkspace, {
               id: newMemberId,
               name: normalizedName,
@@ -4120,7 +4229,8 @@ export function HealthDashboard({
               role: 'other',
             });
             targetMember = updatedWorkspace.family.members.find(m => m.id === newMemberId)!;
-          } else {
+          } catch (driveErr) {
+            console.warn('[OCR Auto-create] Drive addMember failed, adding locally:', driveErr);
             targetMember = {
               id: newMemberId,
               name: normalizedName,
@@ -4132,13 +4242,17 @@ export function HealthDashboard({
             };
             const localProfile = { ...createHealthProfile(targetMember), syncPending: true };
             if (offlineOwnerKey) {
-              await localSyncOutbox.enqueueMemberSave(
-                offlineOwnerKey,
-                currentWorkspace.rootFolderId,
-                targetMember,
-                localProfile,
-                true,
-              );
+              try {
+                await localSyncOutbox.enqueueMemberSave(
+                  offlineOwnerKey,
+                  currentWorkspace.rootFolderId,
+                  targetMember,
+                  localProfile,
+                  true,
+                );
+              } catch (e) {
+                // ignore
+              }
             }
             updatedWorkspace = {
               ...currentWorkspace,
@@ -4151,35 +4265,88 @@ export function HealthDashboard({
             profilesRef.current = { ...profilesRef.current, [targetMember.id]: localProfile };
             setProfiles((prev) => ({ ...prev, [targetMember.id]: localProfile }));
           }
+        } else {
+          targetMember = {
+            id: newMemberId,
+            name: normalizedName,
+            gender: genderFromOcr(extracted.patientGender),
+            birthDate: extracted.patientBirthDate,
+            role: 'other',
+            driveFolderId: `local_folder_${newMemberId}`,
+            profileFileId: `local_profile_${newMemberId}`,
+          };
+          const localProfile = { ...createHealthProfile(targetMember), syncPending: true };
+          if (offlineOwnerKey) {
+            try {
+              await localSyncOutbox.enqueueMemberSave(
+                offlineOwnerKey,
+                currentWorkspace.rootFolderId,
+                targetMember,
+                localProfile,
+                true,
+              );
+            } catch (e) {
+              // ignore
+            }
+          }
+          updatedWorkspace = {
+            ...currentWorkspace,
+            family: {
+              ...currentWorkspace.family,
+              members: [...currentWorkspace.family.members, targetMember],
+              updatedAt: new Date().toISOString(),
+            },
+          };
+          profilesRef.current = { ...profilesRef.current, [targetMember.id]: localProfile };
+          setProfiles((prev) => ({ ...prev, [targetMember.id]: localProfile }));
         }
-        workspaceRef.current = updatedWorkspace;
-        setWorkspace(updatedWorkspace);
-        
-        // Ensure profile is loaded for the target member
-        if (!profilesRef.current[targetMember.id]) {
+      }
+
+      workspaceRef.current = updatedWorkspace;
+      setWorkspace(updatedWorkspace);
+
+      if (!profilesRef.current[targetMember.id]) {
+        try {
           const reloaded = await reloadProfiles(updatedWorkspace);
           profilesRef.current = reloaded;
           setProfiles(reloaded);
+        } catch (e) {
+          const fallbackProfile = createHealthProfile(targetMember);
+          profilesRef.current = { ...profilesRef.current, [targetMember.id]: fallbackProfile };
+          setProfiles((prev) => ({ ...prev, [targetMember.id]: fallbackProfile }));
         }
-        
-        showToast(`Đã tự động gán hồ sơ cho "${normalizedName}".`, 'success');
-        return targetMember;
-      } catch (error) {
-        console.error('[OCR Auto-create] Failed to create or update member:', error);
       }
+
+      showToast(`Đã tự động gán hồ sơ cho "${normalizedName}".`, 'success');
+      return targetMember;
+    } catch (error) {
+      console.error('[OCR Auto-create] Ultimate fallback member creation:', error);
+      // Ultimate fail-safe: never return undefined for recognizable patient name
+      const fallbackId = `member_${crypto.randomUUID().slice(0, 12)}`;
+      const fallbackMember: FamilyMember = {
+        id: fallbackId,
+        name: normalizedName,
+        gender: genderFromOcr(extracted.patientGender),
+        birthDate: extracted.patientBirthDate,
+        role: 'other',
+        driveFolderId: `local_folder_${fallbackId}`,
+        profileFileId: `local_profile_${fallbackId}`,
+      };
+      const fallbackProfile = createHealthProfile(fallbackMember);
+      const updatedWorkspace = {
+        ...currentWorkspace,
+        family: {
+          ...currentWorkspace.family,
+          members: [...currentWorkspace.family.members, fallbackMember],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      workspaceRef.current = updatedWorkspace;
+      setWorkspace(updatedWorkspace);
+      profilesRef.current = { ...profilesRef.current, [fallbackMember.id]: fallbackProfile };
+      setProfiles((prev) => ({ ...prev, [fallbackMember.id]: fallbackProfile }));
+      return fallbackMember;
     }
-    digitizationLogger.log(
-      'warn',
-      'subject_match_requires_confirmation',
-      `Không thể khớp chủ thể OCR "${patientName}" tự động (số ứng viên: ${candidates.length}); yêu cầu xác nhận thủ công.`,
-      {
-        patientName,
-        candidateNames: candidates.map((c) => c.name),
-        patientBirthDate: extracted.patientBirthDate,
-        patientGender: extracted.patientGender,
-      }
-    );
-    return undefined;
   }
   function genderFromOcr(
     value?: string,
@@ -5864,13 +6031,6 @@ export function HealthDashboard({
                     <FolderSync className="w-4 h-4 text-emerald-600 shrink-0" />
                     <div className="flex-1 min-w-0">
                       <div className="font-bold text-slate-800">{driveActionLabel}</div>
-                      <div className="text-[10px] text-slate-400 font-normal truncate">
-                        {needsDriveAuthorization
-                          ? 'Cấp lại quyền truy cập Drive'
-                          : hasRemoteWorkspace
-                            ? 'Đồng bộ 2 chiều với Drive'
-                            : 'Khởi tạo thư mục trên Drive'}
-                      </div>
                     </div>
                   </button>
                   {/* 2. Xóa dữ liệu */}
@@ -5885,11 +6045,32 @@ export function HealthDashboard({
                     <Trash2 className="w-4 h-4 text-rose-600 shrink-0" />
                     <div className="flex-1 min-w-0">
                       <div className="font-bold">Xóa dữ liệu</div>
-                      <div className="text-[10px] text-slate-400 font-normal">
-                        {isWorkspaceAdmin ? 'Xóa toàn bộ thư mục Drive & thiết bị' : 'Xóa hồ sơ cá nhân & tài liệu raw'}
-                      </div>
+                      
                     </div>
                   </button>
+                  {/* Toggle: Tự động phân tích 4 lớp sau OCR */}
+                  <div className="p-2 rounded-xl hover:bg-slate-50 flex items-center justify-between text-xs text-slate-700">
+                    <div className="flex-1 min-w-0 pr-2">
+                      <div className="font-bold text-slate-800">Tự động phân tích AI</div>
+                      
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={autoDeepAnalysis}
+                      onClick={() => {
+                        const next = !autoDeepAnalysis;
+                        setAutoDeepAnalysis(next);
+                        try {
+                          localStorage.setItem('family_health_auto_deep_analysis', JSON.stringify(next));
+                        } catch (e) {}
+                        showToast(next ? 'Đã bật tự động phân tích AI.' : 'Đã tắt tự động phân tích AI.', 'info');
+                      }}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${autoDeepAnalysis ? 'bg-emerald-600' : 'bg-slate-300'}`}
+                    >
+                      <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${autoDeepAnalysis ? 'translate-x-4' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
                   {/* 3. Đăng nhập / Đăng xuất & Kết nối lại Drive */}
                   <div className="pt-0.5 pb-0.5 space-y-1">
                     {userEmail ? (
@@ -5902,7 +6083,7 @@ export function HealthDashboard({
                         className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-rose-50 text-rose-600 transition-colors text-left text-xs font-bold"
                       >
                         <LogOut className="w-4 h-4 shrink-0 text-rose-500" />
-                        <span>Đăng xuất tài khoản</span>
+                        <span>Đăng xuất</span>
                       </button>
                     ) : (
                       <button
@@ -7025,24 +7206,86 @@ export function HealthDashboard({
                               </div>
                             </div>
                           )}
-                          {/* Dynamic Extracted Data for Other Documents */}
-                          {event.extractedData && Object.keys(event.extractedData).length > 0 && (
-                            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
-                              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
-                                Dữ liệu chi tiết trích xuất:
-                              </span>
-                              <div className="grid gap-1 sm:grid-cols-2">
-                                {Object.entries(event.extractedData).map(([key, value], idx) => (
-                                  <div key={idx} className="flex items-baseline gap-1 text-[11px]">
-                                    <span className="font-semibold text-slate-600">{key}:</span>
-                                    <span className="text-slate-800">
-                                      {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                                    </span>
+                          {/* Dynamic Extracted Data for Pathology / Specialized Documents */}
+                          {event.extractedData && Object.keys(event.extractedData).length > 0 && (() => {
+                            const entries = Object.entries(event.extractedData);
+                            const narrativeKeys = new Set([
+                              'grossDescription',
+                              'microscopicDescription',
+                              'pathologicalDiagnosis',
+                              'conclusion',
+                              'immunohistochemistry',
+                              'clinicalHistory',
+                            ]);
+                            const shortFields: [string, unknown][] = [];
+                            const narrativeFields: [string, unknown][] = [];
+
+                            for (const [k, v] of entries) {
+                              const strVal = typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+                              if (narrativeKeys.has(k) || strVal.length > 70 || strVal.includes('\n')) {
+                                narrativeFields.push([k, v]);
+                              } else {
+                                shortFields.push([k, v]);
+                              }
+                            }
+
+                            return (
+                              <div className="p-3 rounded-2xl bg-slate-50/90 border border-slate-200/90 text-xs space-y-2.5">
+                                <div className="flex items-center gap-1.5 font-bold text-slate-700 text-[11px] uppercase tracking-wider">
+                                  <FileText className="h-3.5 w-3.5 text-emerald-600" />
+                                  <span>Chi tiết giải phẫu bệnh & dữ liệu trích xuất:</span>
+                                </div>
+
+                                {/* Short Key-Value Meta Grid */}
+                                {shortFields.length > 0 && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                    {shortFields.map(([key, value]) => {
+                                      const { label, icon } = formatMedicalFieldInfo(key);
+                                      const displayVal = typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+                                      return (
+                                        <div
+                                          key={key}
+                                          className="flex flex-col gap-0.5 rounded-xl border border-slate-200/80 bg-white p-2 shadow-xs"
+                                        >
+                                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                                            {icon && <span>{icon}</span>}
+                                            <span>{label}</span>
+                                          </span>
+                                          <span className="text-xs font-semibold text-slate-900 break-words">
+                                            {displayVal}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
-                                ))}
+                                )}
+
+                                {/* Narrative Long-Form Sections */}
+                                {narrativeFields.length > 0 && (
+                                  <div className="space-y-2">
+                                    {narrativeFields.map(([key, value]) => {
+                                      const { label, icon } = formatMedicalFieldInfo(key);
+                                      const displayVal = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '');
+                                      return (
+                                        <div
+                                          key={key}
+                                          className="rounded-xl border border-slate-200/90 bg-white p-2.5 shadow-xs space-y-1"
+                                        >
+                                          <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-700 uppercase tracking-wide">
+                                            {icon && <span className="text-xs">{icon}</span>}
+                                            <span>{label}</span>
+                                          </div>
+                                          <p className="text-xs text-slate-800 leading-relaxed whitespace-pre-line text-left">
+                                            {displayVal}
+                                          </p>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          )}
+                            );
+                          })()}
                           {/* Doctor's Advice & Next Follow-up */}
                           {(event.advice || event.nextFollowUp) && (
                             <div className="pt-2 border-t border-slate-100 text-xs space-y-1">
