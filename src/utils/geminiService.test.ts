@@ -433,6 +433,15 @@ describe('Gemini service backend routing', () => {
           { name: 'Cholesterol', standardKey: 'CHOLESTEROL', value: 5.5 + idx * 0.1, unit: 'mmol/L', status: 'high' },
           { name: 'Vitamin D phụ trợ', standardKey: 'VITAMIN_D', value: 42, unit: 'ng/mL', status: 'normal' },
         ],
+        ...(idx === 19
+          ? {
+              imagingResults: [{
+                modality: 'Siêu âm ổ bụng',
+                findings: 'Thành túi mật có nhiều cấu trúc echo dày, dmax# 5 mm.',
+                conclusion: 'Đa polyp túi mật.',
+              }],
+            }
+          : {}),
         recordedAt: `${date}T00:00:00.000Z`,
       };
     });
@@ -493,6 +502,10 @@ describe('Gemini service backend routing', () => {
     expect(body.profile.aiDeepAnalysis).toBeUndefined();
     expect(body.profile.timeline).toHaveLength(20);
     expect(body.profile.timeline[0].id).toBe('e1');
+    expect(body.profile.timeline[19].imagingResults[0]).toMatchObject({
+      findings: 'Thành túi mật có nhiều cấu trúc echo dày, dmax# 5 mm.',
+      conclusion: 'Đa polyp túi mật.',
+    });
 
     const prepared = prepareDataForDeepDive(member, body.profile);
     expect(prepared.totalEvents).toBe(20);
@@ -510,6 +523,51 @@ describe('Gemini service backend routing', () => {
       'CHOLESTEROL',
       'VITAMIN_D',
     ]);
+    expect(prepared.tm[19].img).toEqual([{
+      mod: 'Siêu âm ổ bụng',
+      finding: 'Thành túi mật có nhiều cấu trúc echo dày, dmax# 5 mm.',
+      conclusion: 'Đa polyp túi mật.',
+    }]);
+  });
+
+  it('preserves quantitative ultrasound findings for assistant questions', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-assistant-imaging-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      answer: 'Hồ sơ ghi nhận polyp túi mật dmax 5 mm.',
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await askHealthAssistant('Kích thước polyp túi mật là bao nhiêu?', member, {
+      ...profile,
+      timeline: [{
+        id: 'ultrasound-1',
+        sourceFileId: 'file-1',
+        sourceFileName: 'ultrasound.pdf',
+        type: 'imaging',
+        title: 'Siêu âm ổ bụng',
+        date: '2026-06-08',
+        diagnoses: [],
+        medications: [],
+        metrics: [],
+        imagingResults: [{
+          modality: 'Siêu âm ổ bụng',
+          findings: 'Đa polyp túi mật, dmax# 5 mm.',
+          conclusion: 'Đa polyp túi mật.',
+        }],
+        recordedAt: '2026-06-08T00:00:00.000Z',
+      }],
+    });
+
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.profile.timeline[0].imagingResults[0]).toMatchObject({
+      findings: 'Đa polyp túi mật, dmax# 5 mm.',
+      conclusion: 'Đa polyp túi mật.',
+    });
   });
 
   it('falls back from APK direct streaming to non-stream execution when stream fails with zero chunks', async () => {

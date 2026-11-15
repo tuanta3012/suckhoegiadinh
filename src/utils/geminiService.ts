@@ -114,7 +114,7 @@ function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
           imagingResults: Array.isArray(evt.imagingResults)
             ? evt.imagingResults.map((img) => ({
                 modality: img.modality,
-                findings: img.conclusion ? '' : String(img.findings || '').slice(0, 300),
+                findings: String(img.findings || ''),
                 conclusion: img.conclusion,
               }))
             : undefined,
@@ -148,7 +148,7 @@ function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
         imagingResults: Array.isArray(evt.imagingResults)
           ? evt.imagingResults.map((img) => ({
               modality: img.modality,
-              findings: img.conclusion ? '' : String(img.findings || '').slice(0, 200),
+              findings: String(img.findings || ''),
               conclusion: img.conclusion,
             }))
           : undefined,

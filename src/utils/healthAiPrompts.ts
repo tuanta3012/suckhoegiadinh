@@ -264,7 +264,7 @@ Nhiệm vụ: Phân tích 4 lớp y khoa chuyên sâu cho thành viên ${memberN
 
 DỮ LIỆU HỒ SƠ SỨC KHỎE (100% dòng thời gian theo thứ tự thời gian):
 ${JSON.stringify(pruned, null, 2)}
-(Chú thích: p=patient, n=name, g=gender, b=birthDate, h=medicalHistory, totalEvents=tổng số mốc khám, period=toàn bộ khoảng thời gian hồ sơ, focusWindow=khung 3 năm gần nhất để phân tích chuyên sâu, inFocus3Y=mốc thuộc 3 năm gần nhất, tm=toàn bộ timeline, d=date, t=title, diag=diagnoses, meds=medications, img=imaging conclusions, phys=physicalExam, bp=bloodPressure, st=status, val=value, hosp=hospitalization, vacc=vaccinations, adv=advice)
+(Chú thích: p=patient, n=name, g=gender, b=birthDate, h=medicalHistory, totalEvents=tổng số mốc khám, period=toàn bộ khoảng thời gian hồ sơ, focusWindow=khung 3 năm gần nhất để phân tích chuyên sâu, inFocus3Y=mốc thuộc 3 năm gần nhất, tm=toàn bộ timeline, d=date, t=title, diag=diagnoses, meds=medications, img=modality/finding/conclusion của kết quả hình ảnh, phys=physicalExam, bp=bloodPressure, st=status, val=value, hosp=hospitalization, vacc=vaccinations, adv=advice)
 
 YÊU CẦU PHÂN TÍCH (BẮT BUỘC):
 1. ĐÁNH GIÁ TỔNG QUAN & ĐIỂM SỨC KHỎE (overallAssessment, healthScore): Khái quát bức tranh tổng thể dựa trên 100% lịch sử khám chữa bệnh, sau đó đi sâu đánh giá thực trạng sức khỏe hiện tại dựa trên dữ liệu 3 năm gần nhất.
@@ -273,6 +273,11 @@ YÊU CẦU PHÂN TÍCH (BẮT BUỘC):
 4. LỚP 3 - Giám sát mạn tính (chronicSurveillance): So sánh diễn tiến từ lúc khởi phát (nền lịch sử) đến tình trạng kiểm soát trong 3 năm gần nhất (khỏi, ổn định, cần giám sát hay tiến triển).
 5. LỚP 4 - Lộ trình hành động & Lời khuyên chuyên gia (roadmap): Đưa ra Cảnh báo đỏ, Khám chuyên khoa cần thiết, và Lịch kiểm tra 3-6-12 tháng sát nhất với bối cảnh lâm sàng 3 năm gần đây.
 
+QUY TẮC BẢO TOÀN ĐỊNH LƯỢNG (BẮT BUỘC):
+- Đọc cả finding và conclusion của từng kết quả hình ảnh; không coi conclusion là phần thay thế finding.
+- Khi hồ sơ có số đo tổn thương/cơ quan (ví dụ kích thước polyp, nang, sỏi, nhân giáp), phải giữ đúng con số, đơn vị và ngày khám khi nêu trong overallAssessment, crossCorrelations hoặc chronicSurveillance. Tuyệt đối không viết “chưa rõ/chưa ghi nhận kích thước” nếu finding/conclusion có số đo.
+- Với xét nghiệm và dấu hiệu sinh tồn, khi nhận xét bất thường hoặc xu hướng phải nêu giá trị, đơn vị, ngày đo và khoảng tham chiếu nếu hồ sơ có; chỉ so sánh cùng chỉ số, đơn vị và phương pháp tương thích.
+- Nếu số đo không có hoặc không đọc được, mới nêu thiếu dữ liệu; không tự suy diễn kích thước, tốc độ tăng trưởng, nguy cơ hay chỉ định can thiệp.
 LƯU Ý: Nếu 3 năm gần nhất có ít dữ liệu, nêu rõ khoảng trống dữ liệu trong 3 năm gần đây thay vì suy diễn. Hồ sơ có thể thiếu dữ liệu do tài liệu chưa tải lên hoặc chưa được số hóa; không có dữ liệu KHÔNG đồng nghĩa với bình thường. Không tự suy diễn kết quả, chẩn đoán hay khuyến nghị. Trả về dữ liệu chính xác theo schema, ngôn ngữ tiếng Việt chuyên nghiệp.`;
 }
 

@@ -173,19 +173,17 @@ export function prepareDataForDeepDive(member: any, profile: any) {
           .filter((m: any): m is NonNullable<typeof m> => m !== null)
       : [];
 
-    // Giữ kết luận hình ảnh (ưu tiên conclusion, fallback findings súc tích)
+    // Keep findings and conclusion separately so measured values are not lost.
     const imagingResults = Array.isArray(evt.imagingResults)
       ? evt.imagingResults
           .map((img: any) => {
             const conclusion = String(img.conclusion || '').trim();
             const findings = String(img.findings || '').trim();
-            const text = conclusion && findings && !conclusion.includes(findings) && findings.length <= 160
-              ? `${conclusion} (${findings})`
-              : (conclusion || findings);
-            if (!text) return null;
+            if (!conclusion && !findings) return null;
             return {
               mod: img.modality || 'Chẩn đoán hình ảnh',
-              con: text.substring(0, inFocus3Y ? 400 : 250),
+              ...(findings ? { finding: findings } : {}),
+              ...(conclusion ? { conclusion } : {}),
             };
           })
           .filter((img: any): img is NonNullable<typeof img> => img !== null)
