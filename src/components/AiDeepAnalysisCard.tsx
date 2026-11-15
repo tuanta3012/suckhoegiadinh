@@ -162,10 +162,9 @@ export function AiDeepAnalysisCard({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2.5 border-b border-slate-100">
         <div className="flex items-center gap-2.5">
           <div
-            className={`w-11 h-11 rounded-xl border flex flex-col items-center justify-center font-black text-sm shadow-2xs shrink-0 ${scoreColor}`}
+            className={`w-11 h-11 rounded-xl border flex items-center justify-center font-black text-sm shadow-2xs shrink-0 ${scoreColor}`}
           >
             <span>{healthScore ?? '—'}</span>
-            <span className="text-[7.5px] font-extrabold uppercase tracking-wider text-slate-500">Điểm AI</span>
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
