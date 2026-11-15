@@ -19,6 +19,7 @@ import type { AiAnalysisBlock, AiDeepAnalysisResult, MedicalHistory } from '../t
 import { formatDateVN } from '../utils/formatters';
 
 interface AiDeepAnalysisCardProps {
+  memberName: string;
   analysis: AiDeepAnalysisResult | undefined;
   aiAnalysis?: AiAnalysisBlock;
   medicalHistory?: MedicalHistory;
@@ -45,6 +46,7 @@ function AnalysisBullet({
 }
 
 export function AiDeepAnalysisCard({
+  memberName,
   analysis,
   aiAnalysis,
   medicalHistory,
@@ -171,7 +173,7 @@ export function AiDeepAnalysisCard({
                 Phân tích Sức khỏe 4 Lớp
               </h4>
               <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[9px] font-bold shrink-0">
-                AI Chuẩn hóa
+                {memberName}
               </span>
             </div>
             <p className="text-[10.5px] text-slate-500 truncate mt-0.5">

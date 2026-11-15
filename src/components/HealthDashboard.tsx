@@ -53,6 +53,7 @@ import {
   X,
 } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
 import { CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import { Camera as CapacitorCamera } from '@capacitor/camera';
@@ -159,6 +160,7 @@ import {
   type ExtractionProgressUpdate,
 } from '../utils/geminiService';
 import type { HealthAssistantCitation } from '../utils/healthAssistantContext';
+import { parseAssistantMessageLinks } from '../utils/assistantMessageLinks';
 import { DigitizationProgressTrackerModal, type TrackerStep } from './DigitizationProgressTrackerModal';
 import { getPdfPageCount } from '../utils/pdfPageBatches';
 import { RawFilesManagerModal } from './RawFilesManagerModal';
@@ -199,15 +201,6 @@ import {
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
 import { digitizationLogger, type DigitizationLogEntry } from '../utils/digitizationLogger';
-import {
-  createDefaultLocalWorkspace,
-  loadGuestLocalState,
-  loadNativeOfflineState,
-  offlineCacheKey,
-  PROFILE_ROOT_KEY,
-  LOCAL_PROFILES_KEY,
-  LOCAL_WORKSPACE_KEY,
-} from '../utils/offlineWorkspaceCache';
 import { buildApiUrl } from '../utils/apiConfig';
 import { getSharedGeminiKeys, setSharedGeminiKeys, trackSharedGeminiKeysLoad } from '../utils/geminiSharedResources';
 import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
@@ -298,6 +291,9 @@ interface ChatMessage {
   timestamp?: string;
   citations?: HealthAssistantCitation[];
 }
+const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
+const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
+const LOCAL_PROFILES_KEY = 'health_offline_profiles_v2';
 const APK_LOCAL_OWNER_KEY = 'apk-local-device';
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 const UPDATE_SERVER_URL =
@@ -313,6 +309,130 @@ const EXTRACTION_NOTIFICATION_PHASES: Record<ExtractionProgressUpdate['stage'], 
 };
 function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
+}
+function createDefaultLocalWorkspace(
+  adminEmail: string | null,
+): HealthDriveWorkspace {
+  return {
+    rootFolderId: 'local_offline_workspace',
+    familyFileId: 'local_family_file',
+    family: {
+      schemaVersion: 1,
+      rawFilesFolderId: 'local_raw_folder',
+      profilesFolderId: 'local_profiles_folder',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      adminEmail: adminEmail || 'offline@user',
+      members: [],
+    },
+  };
+}
+function offlineCacheKey(baseKey: string, userEmail: string | null): string {
+  return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
+}
+function loadNativeOfflineState(userEmail: string | null): {
+  workspace: HealthDriveWorkspace;
+  profiles: Record<string, HealthProfile>;
+} {
+  const fallback = {
+    workspace: createDefaultLocalWorkspace(userEmail),
+    profiles: {} as Record<string, HealthProfile>,
+  };
+  if (fallback.workspace.rootFolderId === 'local_offline_workspace') {
+    fallback.profiles = Object.fromEntries(
+      fallback.workspace.family.members.map((member) => [member.id, createHealthProfile(member)]),
+    );
+  }
+  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
+  const workspaceKey = offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail);
+  const profilesKey = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
+  let serializedWorkspace = localStorage.getItem(workspaceKey);
+  let serializedProfiles = localStorage.getItem(profilesKey);
+  let migratingLegacyCache = false;
+  if (!serializedWorkspace) {
+    const legacyWorkspace = localStorage.getItem(LOCAL_WORKSPACE_KEY);
+    if (legacyWorkspace) {
+      try {
+        const parsed = JSON.parse(legacyWorkspace) as HealthDriveWorkspace;
+        const expectedEmail = userEmail?.trim().toLowerCase() || 'offline@user';
+        const cachedAdminEmail = parsed.family?.adminEmail?.trim().toLowerCase();
+        if (cachedAdminEmail === expectedEmail) {
+          serializedWorkspace = legacyWorkspace;
+          serializedProfiles = localStorage.getItem(LOCAL_PROFILES_KEY);
+          migratingLegacyCache = true;
+        } else {
+          localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+          localStorage.removeItem(LOCAL_PROFILES_KEY);
+        }
+      } catch {
+        localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+        localStorage.removeItem(LOCAL_PROFILES_KEY);
+      }
+    }
+  }
+  if (!serializedWorkspace) return fallback;
+  try {
+    const parsedWorkspace = JSON.parse(serializedWorkspace) as HealthDriveWorkspace;
+    if (
+      !parsedWorkspace?.family ||
+      typeof parsedWorkspace.rootFolderId !== 'string' ||
+      !Array.isArray(parsedWorkspace.family.members)
+    ) {
+      return fallback;
+    }
+    const parsedProfiles = serializedProfiles ? JSON.parse(serializedProfiles) as Record<string, HealthProfile> : {};
+    if (!parsedProfiles || typeof parsedProfiles !== 'object' || Array.isArray(parsedProfiles)) {
+      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
+    }
+    if (migratingLegacyCache) {
+      localStorage.setItem(workspaceKey, serializedWorkspace);
+      if (serializedProfiles) localStorage.setItem(profilesKey, serializedProfiles);
+      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+      localStorage.removeItem(LOCAL_PROFILES_KEY);
+    }
+    if (parsedWorkspace.rootFolderId !== 'local_offline_workspace' && userEmail) {
+      localStorage.setItem(
+        `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
+        parsedWorkspace.rootFolderId,
+      );
+    }
+    if (parsedWorkspace.rootFolderId === 'local_offline_workspace') {
+      for (const member of parsedWorkspace.family.members) {
+        parsedProfiles[member.id] ||= createHealthProfile(member);
+      }
+    }
+    return { workspace: parsedWorkspace, profiles: parsedProfiles };
+  } catch (error) {
+    console.warn('[Offline cache] Could not restore native workspace data.', error);
+    return fallback;
+  }
+}
+function loadGuestLocalState(): {
+  workspace: HealthDriveWorkspace;
+  profiles: Record<string, HealthProfile>;
+} | null {
+  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return null;
+  try {
+    const workspaceValue = localStorage.getItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, null));
+    if (!workspaceValue) return null;
+    const workspace = JSON.parse(workspaceValue) as HealthDriveWorkspace;
+    if (
+      workspace.rootFolderId !== 'local_offline_workspace' ||
+      !Array.isArray(workspace.family?.members)
+    ) return null;
+    const profilesValue = localStorage.getItem(offlineCacheKey(LOCAL_PROFILES_KEY, null));
+    const profiles = profilesValue ? JSON.parse(profilesValue) as Record<string, HealthProfile> : {};
+    if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) {
+      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
+    }
+    for (const member of workspace.family.members) {
+      profiles[member.id] ||= createHealthProfile(member);
+    }
+    return { workspace, profiles };
+  } catch (error) {
+    console.warn('[Offline cache] Could not inspect guest data for Drive import.', error);
+    return null;
+  }
 }
 async function applyPendingMemberDeletions(
   loadedWorkspace: HealthDriveWorkspace,
@@ -342,6 +462,38 @@ function isNetworkUnavailableError(error: unknown): boolean {
   return error instanceof TypeError &&
     /failed to fetch|networkerror|load failed|network request failed/i.test(error.message);
 }
+function renderAssistantMessage(
+  text: string,
+  openExternalUrl: (url: string) => void,
+): React.ReactNode {
+  return parseAssistantMessageLinks(text).map((part, index) => {
+    if (part.type === 'text') return <React.Fragment key={index}>{part.text}</React.Fragment>;
+    if (part.type === 'phone') {
+      return (
+        <a key={index} href={part.href} className="font-semibold underline underline-offset-2">
+          {part.text}
+        </a>
+      );
+    }
+    return (
+      <a
+        key={index}
+        href={part.href}
+        target={Capacitor.isNativePlatform() ? undefined : '_blank'}
+        rel="noopener noreferrer"
+        onClick={Capacitor.isNativePlatform()
+          ? (event) => {
+              event.preventDefault();
+              openExternalUrl(part.href);
+            }
+          : undefined}
+        className="font-semibold underline underline-offset-2 break-all"
+      >
+        {part.text}
+      </a>
+    );
+  });
+}
 const EVENT_TYPE_OPTIONS: Array<{
   value: HealthEvent['type'];
   label: string;
@@ -369,6 +521,9 @@ export function HealthDashboard({
   showToast,
 }: HealthDashboardProps) {
   const [offlineStartup] = useState(() => loadNativeOfflineState(userEmail));
+  const [isOnline, setIsOnline] = useState(
+    () => typeof navigator === 'undefined' || navigator.onLine,
+  );
   const [activeTab, setActiveTabRaw] = useState<DashboardTab>('overview');
   const activeTabRef = useRef<DashboardTab>('overview');
   activeTabRef.current = activeTab;
@@ -522,6 +677,24 @@ export function HealthDashboard({
   const [showAiResourcesModal, setShowAiResourcesModal] = useState(false);
   const memberMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    const refreshConnectivity = () => {
+      if (document.visibilityState === 'visible') {
+        setIsOnline(typeof navigator === 'undefined' || navigator.onLine);
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', refreshConnectivity);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', refreshConnectivity);
+    };
+  }, []);
   useEffect(() => {
     if (activeTab !== 'assistant') return;
     const chatContainer = chatScrollRef.current;
@@ -1622,6 +1795,16 @@ export function HealthDashboard({
     onNotification: showToast,
   });
   const members = prioritizeMemberForEmail(workspace?.family.members || [], userEmail);
+  const openAssistantExternalUrl = useCallback(async (url: string) => {
+    try {
+      await Browser.open({ url });
+    } catch (error) {
+      showToast(
+        error instanceof Error ? `Không thể mở liên kết: ${error.message}` : 'Không thể mở liên kết.',
+        'error',
+      );
+    }
+  }, [showToast]);
   const offlineOwnerKey =
     userEmail?.trim().toLowerCase() ||
     (supportsDurableOfflineQueue() ? 'apk-local-device' : null);
@@ -2083,6 +2266,7 @@ export function HealthDashboard({
     };
   }, [confirm, driveAuthorized, reloadProfiles, showToast, userEmail]);
   const syncStatus = useMemo(() => {
+    if (!isOnline) return 'offline';
     if (isSyncing) return 'syncing';
     if (isLoading || isUploading || isSummarizing || isRefining) return 'busy';
     if (pendingLocalUploadCount > 0 || Object.values(profiles).some((profile) => profile.syncPending)) {
@@ -2093,7 +2277,7 @@ export function HealthDashboard({
     }
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return 'unlinked';
     return 'online';
-  }, [driveAuthorized, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace, userEmail]);
+  }, [driveAuthorized, isOnline, isSyncing, isLoading, isUploading, isSummarizing, isRefining, pendingLocalUploadCount, profiles, workspace, userEmail]);
   // Auto-connect to Drive Workspace on login
   useEffect(() => {
     if (!driveAuthorized || !userEmail || isResettingRef.current || cacheOwnerEmail !== normalizedUserEmail) return;
@@ -5369,7 +5553,12 @@ export function HealthDashboard({
                 ) : (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-slate-400 shrink-0" />
-                    <span className="truncate font-medium text-slate-500">Offline</span>
+                    <span className="truncate font-medium text-slate-500">
+                      Offline
+                      {(pendingLocalUploadCount > 0 || Object.values(profiles).some((profile) => profile.syncPending))
+                        ? ' · chờ đồng bộ'
+                        : ''}
+                    </span>
                   </>
                 )}
               </div>
@@ -6015,6 +6204,7 @@ export function HealthDashboard({
                 {selectedProfile && (
                   <div className="space-y-5">
                     <AiDeepAnalysisCard
+                      memberName={selectedMember?.name || 'Thành viên'}
                       analysis={selectedProfile.aiDeepAnalysis}
                       aiAnalysis={selectedProfile.aiAnalysis}
                       medicalHistory={selectedProfile.medicalHistory}
@@ -6713,7 +6903,9 @@ export function HealthDashboard({
                         <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
                           <Sparkles className="h-6 w-6" />
                         </div>
-                        <p className="text-sm font-bold text-slate-800">Bạn muốn hỏi gì?</p>
+                        <p className="text-sm font-bold text-slate-800">
+                          Xin chào {selectedMember?.name || 'bạn'}! Bạn muốn hỏi gì?
+                        </p>
                         <p className="mt-1 max-w-xs text-xs text-slate-500">
                           Hỏi về hồ sơ sức khỏe hoặc kiến thức y tế tham khảo (không thay thế bác sĩ).
                         </p>
@@ -6751,7 +6943,7 @@ export function HealthDashboard({
                                 : 'rounded-bl-md border border-slate-200/70 bg-slate-50 text-slate-800'
                             }`}
                           >
-                            {msg.text}
+                            {renderAssistantMessage(msg.text, (url) => void openAssistantExternalUrl(url))}
                           </div>
                           {msg.role === 'assistant' && Boolean(msg.citations?.length) && (
                             <div className="mt-1.5 flex flex-wrap gap-1.5 px-1">
