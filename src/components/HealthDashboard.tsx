@@ -61,6 +61,7 @@ import { AppUpdateModal } from './AppUpdateModal';
 import { AiResourcesModal } from './AiResourcesModal';
 import { useAppUpdate } from '../hooks/useAppUpdate';
 import { AppLogo } from './AppLogo';
+import { FontSizeModal } from './FontSizeModal';
 import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
 import { MemberEditModal, type EditableFamilyMember } from './MemberEditModal';
 import { UnresolvedSubjectModal } from './UnresolvedSubjectModal';
@@ -198,6 +199,15 @@ import {
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
 import { digitizationLogger, type DigitizationLogEntry } from '../utils/digitizationLogger';
+import {
+  createDefaultLocalWorkspace,
+  loadGuestLocalState,
+  loadNativeOfflineState,
+  offlineCacheKey,
+  PROFILE_ROOT_KEY,
+  LOCAL_PROFILES_KEY,
+  LOCAL_WORKSPACE_KEY,
+} from '../utils/offlineWorkspaceCache';
 import { buildApiUrl } from '../utils/apiConfig';
 import { getSharedGeminiKeys, setSharedGeminiKeys, trackSharedGeminiKeysLoad } from '../utils/geminiSharedResources';
 import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
@@ -288,9 +298,6 @@ interface ChatMessage {
   timestamp?: string;
   citations?: HealthAssistantCitation[];
 }
-const PROFILE_ROOT_KEY = 'health_family_drive_root_id';
-const LOCAL_WORKSPACE_KEY = 'health_offline_workspace_v2';
-const LOCAL_PROFILES_KEY = 'health_offline_profiles_v2';
 const APK_LOCAL_OWNER_KEY = 'apk-local-device';
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 const UPDATE_SERVER_URL =
@@ -306,130 +313,6 @@ const EXTRACTION_NOTIFICATION_PHASES: Record<ExtractionProgressUpdate['stage'], 
 };
 function isLocalProfileFileId(fileId: string): boolean {
   return /^(?:local_profile_|profile_local_)/.test(fileId);
-}
-function createDefaultLocalWorkspace(
-  adminEmail: string | null,
-): HealthDriveWorkspace {
-  return {
-    rootFolderId: 'local_offline_workspace',
-    familyFileId: 'local_family_file',
-    family: {
-      schemaVersion: 1,
-      rawFilesFolderId: 'local_raw_folder',
-      profilesFolderId: 'local_profiles_folder',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      adminEmail: adminEmail || 'offline@user',
-      members: [],
-    },
-  };
-}
-function offlineCacheKey(baseKey: string, userEmail: string | null): string {
-  return `${baseKey}_${encodeURIComponent(userEmail?.trim().toLowerCase() || 'guest')}`;
-}
-function loadNativeOfflineState(userEmail: string | null): {
-  workspace: HealthDriveWorkspace;
-  profiles: Record<string, HealthProfile>;
-} {
-  const fallback = {
-    workspace: createDefaultLocalWorkspace(userEmail),
-    profiles: {} as Record<string, HealthProfile>,
-  };
-  if (fallback.workspace.rootFolderId === 'local_offline_workspace') {
-    fallback.profiles = Object.fromEntries(
-      fallback.workspace.family.members.map((member) => [member.id, createHealthProfile(member)]),
-    );
-  }
-  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return fallback;
-  const workspaceKey = offlineCacheKey(LOCAL_WORKSPACE_KEY, userEmail);
-  const profilesKey = offlineCacheKey(LOCAL_PROFILES_KEY, userEmail);
-  let serializedWorkspace = localStorage.getItem(workspaceKey);
-  let serializedProfiles = localStorage.getItem(profilesKey);
-  let migratingLegacyCache = false;
-  if (!serializedWorkspace) {
-    const legacyWorkspace = localStorage.getItem(LOCAL_WORKSPACE_KEY);
-    if (legacyWorkspace) {
-      try {
-        const parsed = JSON.parse(legacyWorkspace) as HealthDriveWorkspace;
-        const expectedEmail = userEmail?.trim().toLowerCase() || 'offline@user';
-        const cachedAdminEmail = parsed.family?.adminEmail?.trim().toLowerCase();
-        if (cachedAdminEmail === expectedEmail) {
-          serializedWorkspace = legacyWorkspace;
-          serializedProfiles = localStorage.getItem(LOCAL_PROFILES_KEY);
-          migratingLegacyCache = true;
-        } else {
-          localStorage.removeItem(LOCAL_WORKSPACE_KEY);
-          localStorage.removeItem(LOCAL_PROFILES_KEY);
-        }
-      } catch {
-        localStorage.removeItem(LOCAL_WORKSPACE_KEY);
-        localStorage.removeItem(LOCAL_PROFILES_KEY);
-      }
-    }
-  }
-  if (!serializedWorkspace) return fallback;
-  try {
-    const parsedWorkspace = JSON.parse(serializedWorkspace) as HealthDriveWorkspace;
-    if (
-      !parsedWorkspace?.family ||
-      typeof parsedWorkspace.rootFolderId !== 'string' ||
-      !Array.isArray(parsedWorkspace.family.members)
-    ) {
-      return fallback;
-    }
-    const parsedProfiles = serializedProfiles ? JSON.parse(serializedProfiles) as Record<string, HealthProfile> : {};
-    if (!parsedProfiles || typeof parsedProfiles !== 'object' || Array.isArray(parsedProfiles)) {
-      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
-    }
-    if (migratingLegacyCache) {
-      localStorage.setItem(workspaceKey, serializedWorkspace);
-      if (serializedProfiles) localStorage.setItem(profilesKey, serializedProfiles);
-      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
-      localStorage.removeItem(LOCAL_PROFILES_KEY);
-    }
-    if (parsedWorkspace.rootFolderId !== 'local_offline_workspace' && userEmail) {
-      localStorage.setItem(
-        `${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`,
-        parsedWorkspace.rootFolderId,
-      );
-    }
-    if (parsedWorkspace.rootFolderId === 'local_offline_workspace') {
-      for (const member of parsedWorkspace.family.members) {
-        parsedProfiles[member.id] ||= createHealthProfile(member);
-      }
-    }
-    return { workspace: parsedWorkspace, profiles: parsedProfiles };
-  } catch (error) {
-    console.warn('[Offline cache] Could not restore native workspace data.', error);
-    return fallback;
-  }
-}
-function loadGuestLocalState(): {
-  workspace: HealthDriveWorkspace;
-  profiles: Record<string, HealthProfile>;
-} | null {
-  if (!Capacitor.isNativePlatform() || typeof localStorage === 'undefined') return null;
-  try {
-    const workspaceValue = localStorage.getItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, null));
-    if (!workspaceValue) return null;
-    const workspace = JSON.parse(workspaceValue) as HealthDriveWorkspace;
-    if (
-      workspace.rootFolderId !== 'local_offline_workspace' ||
-      !Array.isArray(workspace.family?.members)
-    ) return null;
-    const profilesValue = localStorage.getItem(offlineCacheKey(LOCAL_PROFILES_KEY, null));
-    const profiles = profilesValue ? JSON.parse(profilesValue) as Record<string, HealthProfile> : {};
-    if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) {
-      throw new Error('Dữ liệu hồ sơ ngoại tuyến không hợp lệ.');
-    }
-    for (const member of workspace.family.members) {
-      profiles[member.id] ||= createHealthProfile(member);
-    }
-    return { workspace, profiles };
-  } catch (error) {
-    console.warn('[Offline cache] Could not inspect guest data for Drive import.', error);
-    return null;
-  }
 }
 async function applyPendingMemberDeletions(
   loadedWorkspace: HealthDriveWorkspace,
@@ -608,7 +491,9 @@ export function HealthDashboard({
       const saved = localStorage.getItem('stk_font_size_scale');
       if (saved !== null) {
         const num = Number(saved);
-        if (Number.isFinite(num) && num >= 50 && num <= 150) return num;
+        if (Number.isFinite(num) && num >= 50 && num <= 150) {
+          return Math.round((num - 50) / 10) * 10 + 50;
+        }
       }
     } catch {
       // ignore
@@ -617,15 +502,22 @@ export function HealthDashboard({
   });
 
   useEffect(() => {
+    const root = document.documentElement;
+    const previousFontSize = root.style.fontSize;
+    root.style.fontSize = `${fontSizeScale}%`;
     try {
       localStorage.setItem('stk_font_size_scale', String(fontSizeScale));
     } catch {
       // ignore
     }
+    return () => {
+      root.style.fontSize = previousFontSize;
+    };
   }, [fontSizeScale]);
 
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const [showFontSizeModal, setShowFontSizeModal] = useState(false);
   const [showRawFilesModal, setShowRawFilesModal] = useState(false);
   const [showAiResourcesModal, setShowAiResourcesModal] = useState(false);
   const memberMenuRef = useRef<HTMLDivElement>(null);
@@ -5728,6 +5620,20 @@ export function HealthDashboard({
                       <span>Tài nguyên AI</span>
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsDropdown(false);
+                      setShowFontSizeModal(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors text-left text-xs font-semibold"
+                  >
+                    <Type className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <span className="flex-1">Cỡ chữ</span>
+                    <span className="text-[10px] text-slate-400 tabular-nums">
+                      {fontSizeScale === 100 ? 'Mặc định' : `${fontSizeScale > 100 ? '+' : ''}${fontSizeScale - 100}%`}
+                    </span>
+                  </button>
                   {/* 6. Phiên bản */}
                   <button
                     type="button"
@@ -7597,6 +7503,12 @@ export function HealthDashboard({
         folderId={workspace?.rootFolderId || 'local_offline_workspace'}
         isAdmin={isWorkspaceAdmin}
         onClose={() => setShowAiResourcesModal(false)}
+      />
+      <FontSizeModal
+        isOpen={showFontSizeModal}
+        scale={fontSizeScale}
+        onChange={setFontSizeScale}
+        onClose={() => setShowFontSizeModal(false)}
       />
       <UploadMemberPickerModal
         isOpen={showUploadMemberPicker}

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
+import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import type { AuthUser } from './types';
 import { HealthDashboard } from './components/HealthDashboard';
 import { SplashScreen } from './components/SplashScreen';
+import { OfflineLockScreen } from './components/OfflineLockScreen';
+import { OfflineCachedView } from './components/OfflineCachedView';
 import { RELEASE_APP_VERSION } from './version';
 import { useToast } from './context/ToastContext';
 import {
@@ -16,6 +19,11 @@ import {
   signOutGoogle,
   trySilentRefresh,
 } from './utils/googleDriveService';
+import { getSecureItem, setSecureItem } from './utils/secureStorage';
+import { hasNativeOfflineCache } from './utils/offlineWorkspaceCache';
+import { verifyDeviceUnlock } from './utils/offlineAppLock';
+
+const LAST_OFFLINE_ACCOUNT_KEY = 'health_last_offline_account_email';
 
 export default function App() {
   const { showToast } = useToast();
@@ -23,6 +31,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [driveAuthorized, setDriveAuthorized] = useState(isGoogleTokenValid());
   const [driveRequestFailed, setDriveRequestFailed] = useState(false);
+  const [authInitialized, setAuthInitialized] = useState(false);
+  const [offlineCacheEmail, setOfflineCacheEmail] = useState<string | null>(null);
+  const [offlineCacheUnlocked, setOfflineCacheUnlocked] = useState(false);
 
   useEffect(() => {
     const initializeStatusBar = async () => {
@@ -55,8 +66,19 @@ export default function App() {
               setCurrentUser(null);
               setDriveAuthorized(false);
               setDriveRequestFailed(false);
+              setAuthInitialized(true);
+              if (Capacitor.isNativePlatform()) {
+                void getSecureItem(LAST_OFFLINE_ACCOUNT_KEY).then((email) => {
+                  if (email && !auth.currentUser?.email && hasNativeOfflineCache(email)) {
+                    setOfflineCacheEmail(email);
+                  }
+                });
+              }
               return;
             }
+            void setSecureItem(LAST_OFFLINE_ACCOUNT_KEY, firebaseUser.email);
+            setOfflineCacheEmail(null);
+            setOfflineCacheUnlocked(false);
             setCurrentUser({
               email: firebaseUser.email,
               name: firebaseUser.displayName || 'Người dùng',
@@ -65,16 +87,26 @@ export default function App() {
               title: 'Quản trị viên',
             });
             setDriveAuthorized(Boolean(token) || isGoogleTokenValid());
+            setAuthInitialized(true);
           },
           () => {
             setCurrentUser(null);
             setDriveAuthorized(false);
             setDriveRequestFailed(false);
+            setAuthInitialized(true);
+            if (Capacitor.isNativePlatform()) {
+              void getSecureItem(LAST_OFFLINE_ACCOUNT_KEY).then((email) => {
+                if (email && !auth.currentUser?.email && hasNativeOfflineCache(email)) {
+                  setOfflineCacheEmail(email);
+                }
+              });
+            }
           }
         );
       })
       .catch((error: unknown) => {
         console.warn('Phiên Google Drive:', error);
+        setAuthInitialized(true);
       });
     const handleDriveExpired = () => {
       setDriveAuthorized(false);
@@ -107,6 +139,27 @@ export default function App() {
     };
   }, [showToast]);
 
+  useEffect(() => {
+    let backgrounded = false;
+    let disposed = false;
+    let listener: { remove: () => Promise<void> } | undefined;
+    void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) {
+        backgrounded = true;
+      } else if (backgrounded) {
+        backgrounded = false;
+        if (offlineCacheUnlocked && !currentUser) setOfflineCacheUnlocked(false);
+      }
+    }).then((registered) => {
+      if (disposed) void registered.remove();
+      else listener = registered;
+    });
+    return () => {
+      disposed = true;
+      void listener?.remove();
+    };
+  }, [currentUser, offlineCacheUnlocked]);
+
   const connectGoogle = useCallback(async () => {
     try {
       const { accessToken } = await signInWithGoogle();
@@ -124,18 +177,61 @@ export default function App() {
 
   const logOut = useCallback(async () => {
     try {
+      const email = currentUser?.email || auth.currentUser?.email;
+      const hasOfflineCopy = Boolean(
+        Capacitor.isNativePlatform() &&
+        email &&
+        hasNativeOfflineCache(email),
+      );
+      if (Capacitor.isNativePlatform() && email) {
+        await setSecureItem(LAST_OFFLINE_ACCOUNT_KEY, email);
+      }
       await signOutGoogle();
       setCurrentUser(null);
       setDriveAuthorized(false);
       setDriveRequestFailed(false);
-      showToast('Đã đăng xuất tài khoản.', 'info');
+      showToast(
+        hasOfflineCopy
+          ? 'Đã đăng xuất. Bản dữ liệu đã lưu trên máy sẽ yêu cầu xác minh vân tay hoặc mã khóa để xem.'
+          : 'Đã đăng xuất tài khoản.',
+        'info',
+      );
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể đăng xuất.', 'error');
     }
-  }, [showToast]);
+  }, [currentUser?.email, showToast]);
 
   if (showSplash) {
     return <SplashScreen onFinished={() => setShowSplash(false)} durationMs={1000} />;
+  }
+  if (!authInitialized) {
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-slate-50 text-sm font-semibold text-slate-500">
+        Đang khôi phục phiên làm việc...
+      </div>
+    );
+  }
+  if (!currentUser && !auth.currentUser?.email && offlineCacheEmail) {
+    if (!offlineCacheUnlocked) {
+      return (
+        <OfflineLockScreen
+          email={offlineCacheEmail}
+          onUnlock={async () => {
+            await verifyDeviceUnlock();
+            setOfflineCacheUnlocked(true);
+          }}
+          onSignIn={() => void connectGoogle()}
+        />
+      );
+    }
+    return (
+      <OfflineCachedView
+        key={offlineCacheEmail}
+        email={offlineCacheEmail}
+        onLock={() => setOfflineCacheUnlocked(false)}
+        onSignIn={() => void connectGoogle()}
+      />
+    );
   }
 
   return (
