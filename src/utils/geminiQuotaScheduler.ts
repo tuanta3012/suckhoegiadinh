@@ -60,6 +60,57 @@ export interface GeminiSchedulerSnapshot {
 }
 
 const DEFAULT_UNAVAILABLE_TTL_MS = 5 * 60_000;
+const RPD_BLOCK_STORAGE_KEY = 'gemini_rpd_blocked_models_v1';
+
+export function getMsUntilNextPacificMidnight(now: Date = new Date()): number {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  const second = Number(parts.find((p) => p.type === 'second')?.value ?? 0);
+
+  const secondsPassedToday = (hour % 24) * 3600 + minute * 60 + second;
+  const secondsInDay = 86400;
+  const secondsRemaining = secondsInDay - secondsPassedToday + 5;
+  return Math.max(60_000, secondsRemaining * 1000);
+}
+
+function getPersistedRpdBlocks(): Record<string, number> {
+  if (typeof window === 'undefined' || !window.localStorage) return {};
+  try {
+    const raw = window.localStorage.getItem(RPD_BLOCK_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePersistedRpdBlock(apiKey: string, model: string, unblockTimestamp: number): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const blocks = getPersistedRpdBlocks();
+    const keySig = apiKey.length > 16 ? apiKey.slice(-16) : apiKey;
+    blocks[`${keySig}:${model}`] = unblockTimestamp;
+    const now = Date.now();
+    for (const k of Object.keys(blocks)) {
+      if (blocks[k] <= now) delete blocks[k];
+    }
+    window.localStorage.setItem(RPD_BLOCK_STORAGE_KEY, JSON.stringify(blocks));
+  } catch {
+    // Ignore storage quota/permission errors
+  }
+}
 
 export class GeminiQuotaScheduler {
   private readonly usage = new Map<string, UsageWindow>();
@@ -72,7 +123,29 @@ export class GeminiQuotaScheduler {
   constructor(
     private readonly projects: GeminiProject[],
     private readonly maxConcurrentPerProject = 1,
-  ) {}
+  ) {
+    this.hydratePersistedBlocks();
+  }
+
+  private hydratePersistedBlocks(): void {
+    const persisted = getPersistedRpdBlocks();
+    const now = Date.now();
+    for (const project of this.projects) {
+      const keySig = project.apiKey.length > 16 ? project.apiKey.slice(-16) : project.apiKey;
+      for (const [keyModel, unblockUntil] of Object.entries(persisted)) {
+        if (typeof unblockUntil === 'number' && unblockUntil > now) {
+          const colonIdx = keyModel.lastIndexOf(':');
+          if (colonIdx > 0) {
+            const sig = keyModel.slice(0, colonIdx);
+            const model = keyModel.slice(colonIdx + 1);
+            if (keySig === sig) {
+              this.disabledProjectModelsUntil.set(`${project.id}:${model}`, unblockUntil);
+            }
+          }
+        }
+      }
+    }
+  }
 
   getProjects(): readonly GeminiProject[] {
     return this.projects;
@@ -225,7 +298,14 @@ export class GeminiQuotaScheduler {
   }
 
   markModelUnavailable(projectId: string, model: string, durationMs = DEFAULT_UNAVAILABLE_TTL_MS): void {
-    this.disabledProjectModelsUntil.set(`${projectId}:${model}`, Date.now() + durationMs);
+    const unblockTimestamp = Date.now() + durationMs;
+    this.disabledProjectModelsUntil.set(`${projectId}:${model}`, unblockTimestamp);
+    if (durationMs > 10 * 60_000) {
+      const project = this.projects.find((p) => p.id === projectId);
+      if (project) {
+        savePersistedRpdBlock(project.apiKey, model, unblockTimestamp);
+      }
+    }
   }
 
   private isProjectDisabled(projectId: string, now: number): boolean {

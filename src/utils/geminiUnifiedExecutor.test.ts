@@ -18,11 +18,13 @@ vi.mock('@google/genai', async (importOriginal) => {
 
 import { createGeminiRequestContext } from './geminiRequestContext';
 import { cleanErrorMessage } from './geminiErrorMessages';
+import { digitizationLogger } from './digitizationLogger';
 import {
   describeGeminiError,
   executeGeminiWithPool,
   getTaskQuota,
   getModelQuota,
+  researchHealthQuestionWithPool,
 } from './geminiUnifiedExecutor';
 import { TASK_MODELS } from './geminiModels';
 
@@ -55,6 +57,7 @@ describe('Gemini unified executor', () => {
   });
 
   it('fails over when Gemini confirms RPD exhaustion for one key', async () => {
+    const logSpy = vi.spyOn(digitizationLogger, 'log');
     generateContentMock
       .mockRejectedValueOnce(Object.assign(
         new Error('Quota exceeded for requests per day (RPD).'),
@@ -77,6 +80,8 @@ describe('Gemini unified executor', () => {
     });
 
     expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(logSpy.mock.calls.some(([level]) => level === 'error')).toBe(false);
+    logSpy.mockRestore();
   });
 
   it('reports RPD exhaustion only after every configured key returns an RPD error', async () => {
@@ -159,4 +164,143 @@ describe('Gemini unified executor', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not classify generic plan/billing 429 without RPD details as daily RPD quota exhaustion', async () => {
+    const billingError = Object.assign(
+      new Error('{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED"}}'),
+      { status: 429 },
+    );
+    expect(describeGeminiError(billingError)).toMatchObject({
+      status: 429,
+      isRateLimit: true,
+      isDailyQuota: false,
+      isPlanOrBillingQuota: true,
+      message: expect.stringContaining('vượt hạn mức sử dụng hoặc gói hiện tại'),
+    });
+    expect(cleanErrorMessage(billingError.message)).not.toContain('quota ngày (RPD)');
+
+    generateContentMock.mockRejectedValue(billingError);
+
+    const requestContext = createGeminiRequestContext([
+      'AIzaSy-test-key-012345678901234567890123456789012345',
+      'AIzaSy-another-test-key-01234567890123456789012345678901',
+    ]);
+
+    await expect(executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: 'Answer the question.' }],
+      requestContext,
+      maxPoolPasses: 2,
+    })).rejects.toThrow('You exceeded your current quota');
+
+    // Stops after 1 pass across the 2 keys instead of sleeping and retrying pass 2
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('confirms daily RPD exhaustion only when Gemini API QuotaFailure details explicitly report PerDay/RPD', () => {
+    const apiRpdDetailsError = Object.assign(
+      new Error(JSON.stringify({
+        error: {
+          code: 429,
+          message: 'You exceeded your current quota, please check your plan and billing details.',
+          status: 'RESOURCE_EXHAUSTED',
+          details: [
+            {
+              '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+              violations: [
+                {
+                  quotaMetric: 'generativelanguage.googleapis.com/generate_content_free_tier_requests',
+                  quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier',
+                },
+              ],
+            },
+          ],
+        },
+      })),
+      { status: 429 },
+    );
+    expect(describeGeminiError(apiRpdDetailsError)).toMatchObject({
+      status: 429,
+      isRateLimit: true,
+      isDailyQuota: true,
+      isPlanOrBillingQuota: false,
+      message: expect.stringContaining('hết quota ngày (RPD'),
+    });
+  });
+
+  it('logs optional search grounding quota failures as warnings and cools down repeated search calls', async () => {
+    const logSpy = vi.spyOn(digitizationLogger, 'log');
+    const billingError = Object.assign(
+      new Error('{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED"}}'),
+      { status: 429 },
+    );
+    generateContentMock.mockRejectedValue(billingError);
+
+    const requestContext = createGeminiRequestContext([
+      'AIzaSy-test-key-012345678901234567890123456789012345',
+      'AIzaSy-another-test-key-01234567890123456789012345678901',
+    ]);
+
+    const first = await researchHealthQuestionWithPool('Chế độ ăn giảm mỡ máu nên lưu ý gì?', 'An', { requestContext });
+    expect(first).toEqual({ summary: null, citations: [] });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(logSpy.mock.calls.some(([level]) => level === 'error')).toBe(false);
+
+    const second = await researchHealthQuestionWithPool('Tăng huyết áp nên kiêng gì?', 'An', { requestContext });
+    expect(second).toEqual({ summary: null, citations: [] });
+    // Second call skips search grounding during cooldown instead of hitting both keys again
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    logSpy.mockRestore();
+  });
+
+  it('rotates to next available key for digitization when the first key returns 503 Service Unavailable', async () => {
+    generateContentMock
+      .mockImplementationOnce(async ({ model }: { model: string }) => {
+        expect(model).toBe('gemini-3.5-flash-lite');
+        throw Object.assign(new Error('503 Service Unavailable'), { status: 503 });
+      })
+      .mockImplementationOnce(async ({ model }: { model: string }) => {
+        expect(model).toBe('gemini-3.5-flash-lite');
+        return { text: '{"title":"Kết quả xét nghiệm"}' };
+      });
+
+    const requestContext = createGeminiRequestContext([
+      'AIzaSy-test-key-012345678901234567890123456789012345',
+      'AIzaSy-second-key-01234567890123456789012345678901234',
+    ]);
+
+    const result = await executeGeminiWithPool({
+      task: 'digitization',
+      contents: [{ text: 'Extract OCR' }],
+      requestContext,
+      maxPoolPasses: 1,
+    });
+
+    expect(result.text).toBe('{"title":"Kết quả xét nghiệm"}');
+    expect(result.modelUsed).toBe('gemini-3.5-flash-lite');
+    expect(result.projectId).toBe('account-2');
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts immediately when signal is cancelled during retry backoff', async () => {
+    const controller = new AbortController();
+    generateContentMock.mockImplementationOnce(async () => {
+      // Trigger abort right after first failure
+      setTimeout(() => controller.abort(), 10);
+      throw Object.assign(new Error('503 Service Unavailable'), { status: 503 });
+    });
+
+    const requestContext = createGeminiRequestContext([
+      'AIzaSy-test-key-012345678901234567890123456789012345',
+    ]);
+
+    await expect(executeGeminiWithPool({
+      task: 'assistant',
+      contents: [{ text: 'Prompt' }],
+      requestContext,
+      signal: controller.signal,
+      maxPoolPasses: 2,
+    })).rejects.toThrow();
+  });
 });
+

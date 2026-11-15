@@ -8,6 +8,7 @@ import {
 export interface GeminiRequestContext {
   projects: GeminiProject[];
   scheduler: GeminiQuotaScheduler;
+  searchGroundingCooldownUntil?: number;
 }
 
 const sharedSchedulerRegistry = new Map<string, GeminiRequestContext>();

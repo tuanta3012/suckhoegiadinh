@@ -171,6 +171,20 @@ describe('Deduplication Service', () => {
       expect(cleaned.metrics).toHaveLength(1);
       expect(cleaned.metrics![0].value).toBe(120);
     });
+
+    it('retains numeric-string and qualitative metrics instead of dropping them', () => {
+      const event: Partial<HealthEvent> = {
+        metrics: [
+          { name: 'Định lượng 25-OH Vitamin D [Huyết Thanh]', value: '26' as any, unit: '' },
+          { name: 'Đạm', standardKey: 'URINE_PRO', value: 'Có phát hiện / Dương Tính', unit: '' },
+        ],
+      };
+      const cleaned = cleanAndDeduplicateEventData(event);
+      expect(cleaned.metrics).toEqual([
+        { name: 'Định lượng 25-OH Vitamin D [Huyết Thanh]', value: 26, unit: '' },
+        { name: 'Đạm', standardKey: 'URINE_PRO', value: 'Có phát hiện / Dương Tính', unit: '' },
+      ]);
+    });
   });
 
   describe('Document / File Duplicate Detection', () => {

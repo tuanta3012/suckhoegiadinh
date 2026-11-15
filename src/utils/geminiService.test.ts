@@ -47,6 +47,7 @@ import {
   analyzeComprehensiveHealth,
   askHealthAssistant,
   extractHealthEventWithProgress,
+  isOcrCancelledError,
   streamHealthAssistant,
 } from './geminiService';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
@@ -203,6 +204,91 @@ describe('Gemini service backend routing', () => {
     expect(result.answer).toBe('Luồng trả lời trực tiếp.');
     expect(chunks.join('')).toBe(result.answer);
     expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(generateContentStreamMock).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the shared device executor when an APK backend returns 404 HTML for streaming', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://ais-pre.example.com');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-apk-404-key']);
+    generateContentStreamMock.mockImplementation(async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { text: 'Trả lời fallback từ APK khi backend 404.' };
+      },
+    }));
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html><html>404</html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Lần gần nhất tôi khám ở đâu?',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(result.answer).toBe('Trả lời fallback từ APK khi backend 404.');
+    expect(chunks.join('')).toBe(result.answer);
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(generateContentStreamMock).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the shared device executor when an APK backend returns 404 HTML for OCR', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://ais-pre.example.com');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-apk-ocr-404-key']);
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        title: 'Đơn thuốc nội khoa',
+        date: '2026-10-12',
+        type: 'prescription',
+        diagnoses: ['Tăng huyết áp'],
+        medications: [],
+        metrics: [],
+      }),
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html><html>404</html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'don-thuoc.jpg', { type: 'image/jpeg' });
+    const result = await extractHealthEventWithProgress(file, member);
+
+    expect(result.extracted.title).toBe('Đơn thuốc nội khoa');
+    expect(result.extracted.date).toBe('2026-10-12');
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(generateContentMock).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the shared client executor when a static preview returns 200 HTML instead of SSE', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-preview-spa-html-key']);
+    generateContentStreamMock.mockImplementation(async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { text: 'Trả lời fallback từ SPA preview.' };
+      },
+    }));
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html><div id="root"></div>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Lần gần nhất tôi khám ở đâu?',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(result.answer).toBe('Trả lời fallback từ SPA preview.');
+    expect(chunks.join('')).toBe(result.answer);
     expect(generateContentStreamMock).toHaveBeenCalledOnce();
   });
 
@@ -392,21 +478,22 @@ describe('Gemini service backend routing', () => {
     expect(generateContentMock).not.toHaveBeenCalled();
   });
 
-  it('does not bypass the central backend when a configured API returns HTML', async () => {
+  it('falls back to the shared device executor when a configured APK backend returns 404 HTML', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
     vi.stubEnv('VITE_APP_MODE', 'apk');
     vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
     vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-device-key']);
+    generateContentMock.mockResolvedValue({ text: 'Câu trả lời dự phòng trên APK.' });
     globalThis.fetch = vi.fn().mockResolvedValue(new Response('<html>Not found</html>', {
       status: 404,
       headers: { 'Content-Type': 'text/html' },
     }));
 
-    await expect(askHealthAssistant('Question', member, profile))
-      .rejects.toThrow('trả về HTML thay vì JSON (HTTP 404)');
+    const result = await askHealthAssistant('Lần gần nhất tôi khám ở đâu?', member, profile);
 
+    expect(result.answer).toBe('Câu trả lời dự phòng trên APK.');
     expect(globalThis.fetch).toHaveBeenCalledOnce();
-    expect(generateContentMock).not.toHaveBeenCalled();
+    expect(generateContentMock).toHaveBeenCalledOnce();
   });
 
   it('compacts bulky profile sources and aiDeepAnalysis while preserving the entire longitudinal timeline for comprehensive analysis', async () => {
@@ -590,4 +677,127 @@ describe('Gemini service backend routing', () => {
     expect(chunks.join('')).toBe('Câu trả lời dự phòng non-stream.');
     expect(generateContentMock).toHaveBeenCalledOnce();
   });
+
+  it('forwards referenced familyContexts including blood pressure vitals to backend and direct fallback', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-family-key']);
+    const tuAnh = { id: 'm2', name: 'Vũ Thị Tú Anh' } as FamilyMember;
+    const tuAnhProfile = {
+      schemaVersion: 2,
+      member: tuAnh,
+      timeline: [{
+        id: 'evt-bp',
+        sourceFileId: 'f-bp',
+        sourceFileName: 'kham.pdf',
+        type: 'comprehensive_exam',
+        title: 'Khám sức khỏe',
+        date: '2026-06-15',
+        physicalExam: { bp_mmHg: '115/75', pulse_bpm: 72 },
+        diagnoses: [],
+        medications: [],
+        metrics: [],
+        recordedAt: '2026-06-15T00:00:00.000Z',
+      }],
+      sources: [],
+      summary: { latestDiagnoses: [], latestMetrics: {} },
+      createdAt: '2026-06-15T00:00:00.000Z',
+      updatedAt: '2026-06-15T00:00:00.000Z',
+    } as unknown as HealthProfile;
+
+    globalThis.fetch = vi.fn().mockResolvedValue(sseResponse([
+      { text: 'Huyết áp của Vũ Thị Tú Anh ngày 2026-06-15 là 115/75 mmHg.' },
+      { type: 'done' },
+    ]));
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Huyết áp của Tú Anh là bao nhiêu ',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+      [],
+      undefined,
+      [{ member: tuAnh, profile: tuAnhProfile }],
+    );
+
+    expect(result.answer).toContain('115/75');
+    const body = JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body));
+    expect(body.familyContexts).toHaveLength(1);
+    expect(body.familyContexts[0].member.name).toBe('Vũ Thị Tú Anh');
+    expect(body.familyContexts[0].profile.timeline[0].physicalExam.bp_mmHg).toBe('115/75');
+
+    // Now test direct APK streaming fallback sends referencedFamilyMembers in prompt JSON
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    generateContentStreamMock.mockImplementation(async (_apiKey: string, args: any) => {
+      const promptJson = JSON.parse(args.contents[0].text);
+      expect(promptJson.referencedFamilyMembers).toHaveLength(1);
+      expect(promptJson.referencedFamilyMembers[0].memberName).toBe('Vũ Thị Tú Anh');
+      expect(promptJson.referencedFamilyMembers[0].healthProfile.latestPhysicalExam.bp_mmHg).toBe('115/75');
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { text: 'Huyết áp của Vũ Thị Tú Anh là 115/75 mmHg.' };
+        },
+      };
+    });
+
+    const directResult = await streamHealthAssistant(
+      'Huyết áp của Tú Anh là bao nhiêu ',
+      member,
+      profile,
+      () => {},
+      [],
+      undefined,
+      [{ member: tuAnh, profile: tuAnhProfile }],
+    );
+    expect(directResult.answer).toContain('115/75');
+  });
+
+  it('correctly detects cancellation errors via isOcrCancelledError', () => {
+    const abortedSignal = AbortSignal.abort();
+    expect(isOcrCancelledError(new DOMException('Aborted', 'AbortError'))).toBe(true);
+    expect(isOcrCancelledError(new Error('Tác vụ số hóa đã được dừng lại.'))).toBe(true);
+    expect(isOcrCancelledError(new Error('OCR was cancelled.'))).toBe(true);
+    expect(isOcrCancelledError(new Error('Failed to fetch'), abortedSignal)).toBe(true);
+    expect(isOcrCancelledError(new Error('503 Service Unavailable'))).toBe(false);
+  });
+
+  it('propagates server SSE error messages instead of swallowing them', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    globalThis.fetch = vi.fn().mockResolvedValue(sseResponse([
+      {
+        type: 'error',
+        error: 'Máy chủ AI Google hiện đang bận hoặc quá tải (503 Service Unavailable).',
+      },
+    ]));
+
+    await expect(extractHealthEventWithProgress(
+      new File(['data'], 'test.pdf', { type: 'application/pdf' }),
+      member,
+    )).rejects.toThrow('503 Service Unavailable');
+  });
+
+  it('does not fall back to direct OCR when an in-flight request is cancelled', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    const controller = new AbortController();
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException('The user aborted a request.', 'AbortError');
+    });
+
+    await expect(extractHealthEventWithProgress(
+      new File(['data'], 'test.pdf', { type: 'application/pdf' }),
+      member,
+      undefined,
+      { signal: controller.signal },
+    )).rejects.toThrow();
+
+    expect(generateContentMock).not.toHaveBeenCalled();
+  });
 });
+

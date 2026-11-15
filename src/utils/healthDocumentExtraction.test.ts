@@ -151,5 +151,45 @@ describe('mergeExtractedBatches', () => {
     expect(merged.physicalExam).toBeUndefined();
     expect(merged.type).toBe('test_result');
   });
+
+  it('coerces string metric values with optional inline units and retains Vitamin D without unit', () => {
+    const merged = mergeExtractedBatches([
+      {
+        firstPage: 5,
+        lastPage: 6,
+        extracted: {
+          title: 'Kết quả xét nghiệm',
+          type: 'test_result',
+          metrics: [
+            {
+              name: 'Định lượng 25-OH Vitamin D [Huyết Thanh]',
+              value: '26',
+              refRange: 'Thiếu hụt: < 20; Không đủ: 20 - 29; Đủ: 30 - 100',
+            },
+            {
+              name: 'Định lượng FT4 [Huyết Thanh]',
+              value: '13,02 pmol/L',
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(merged.metrics).toEqual([
+      {
+        name: 'Định lượng 25-OH Vitamin D [Huyết Thanh]',
+        standardKey: 'VITAMIN_D',
+        value: 26,
+        unit: '',
+        refRange: 'Thiếu hụt: < 20; Không đủ: 20 - 29; Đủ: 30 - 100',
+      },
+      {
+        name: 'Định lượng FT4 [Huyết Thanh]',
+        standardKey: 'FT4',
+        value: 13.02,
+        unit: 'pmol/L',
+      },
+    ]);
+  });
 });
 

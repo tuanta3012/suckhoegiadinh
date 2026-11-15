@@ -33,6 +33,7 @@ import {
   HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
   normalizeComprehensiveAnalysisPayload,
   SUMMARIZE_RESPONSE_SCHEMA,
+  type AssistantFamilyMemberPromptContext,
 } from './src/utils/healthAiPrompts.ts';
 import { runUnifiedHealthDocumentOcr } from './src/utils/healthDocumentOcrRunner.ts';
 import {
@@ -108,6 +109,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function resolveServerGeminiKeys(clientGeminiKeys: unknown): string[] {
   return normalizeGeminiKeysInput(clientGeminiKeys);
+}
+
+function normalizeServerFamilyContexts(raw: unknown): AssistantFamilyMemberPromptContext[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .flatMap((item): AssistantFamilyMemberPromptContext[] => {
+      if (!isRecord(item) || !isRecord(item.member) || typeof item.member.name !== 'string') return [];
+      const memberName = item.member.name.trim().slice(0, 120);
+      if (!memberName) return [];
+      return [{
+        memberName,
+        role: typeof item.member.role === 'string' ? item.member.role.slice(0, 40) : undefined,
+        birthDate: typeof item.member.birthDate === 'string' ? item.member.birthDate.slice(0, 32) : undefined,
+        gender: typeof item.member.gender === 'string' ? item.member.gender.slice(0, 20) : undefined,
+        profile: isRecord(item.profile) ? item.profile : {},
+      }];
+    })
+    .slice(0, 5);
 }
 
 function getGeminiRequestSignal(res: Response): AbortSignal | undefined {
@@ -646,6 +665,8 @@ async function startServer() {
 
       const memberName = typeof member?.name === 'string' ? member.name.slice(0, 120) : 'Thành viên';
       const history = normalizeHealthAssistantHistory(req.body.history);
+      const familyContexts = normalizeServerFamilyContexts(req.body.familyContexts);
+      const extraMemberNames = familyContexts.map((ctx) => ctx.memberName);
       const requestContext = getOrCreateSharedGeminiRequestContext(resolveServerGeminiKeys(req.body.clientGeminiKeys));
 
       if (stream) {
@@ -673,7 +694,12 @@ async function startServer() {
           const research = await researchHealthQuestionWithPool(
             currentQuestion,
             memberName,
-            { requestContext, requestId: getGeminiRequestId(res), signal: controller.signal },
+            {
+              requestContext,
+              requestId: getGeminiRequestId(res),
+              signal: controller.signal,
+              extraMemberNames,
+            },
           );
           const prompt = createHealthAssistantPrompt(
             currentQuestion,
@@ -681,6 +707,7 @@ async function startServer() {
             profile,
             history,
             research,
+            familyContexts,
           );
           writeSse(res, { type: 'sources', citations: research.citations });
 
@@ -717,7 +744,12 @@ async function startServer() {
       const research = await researchHealthQuestionWithPool(
         currentQuestion,
         memberName,
-        { requestContext, requestId: getGeminiRequestId(res), signal: requestSignal },
+        {
+          requestContext,
+          requestId: getGeminiRequestId(res),
+          signal: requestSignal,
+          extraMemberNames,
+        },
       );
       const prompt = createHealthAssistantPrompt(
         currentQuestion,
@@ -725,6 +757,7 @@ async function startServer() {
         profile,
         history,
         research,
+        familyContexts,
       );
       const { text, modelUsed } = await executeGeminiWithPool({
         task: 'assistant',

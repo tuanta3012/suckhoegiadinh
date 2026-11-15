@@ -218,6 +218,58 @@ describe('partitionHealthMetricsForDisplay', () => {
       'AFP',
     ]);
   });
+
+  it('flags 25-OH Vitamin D = 26 as abnormal even with multi-tier Diag refRange and missing unit', () => {
+    const diagVitaminD: HealthMetric = {
+      name: 'Định lượng 25-OH Vitamin D [Huyết Thanh]',
+      value: 26,
+      unit: '',
+      refRange: 'Thiếu hụt: < 20\nKhông đủ: 20 - 29\nĐủ: 30 - 100\nCao: 101 - 150\nNgộ Độc: > 150',
+    };
+    const urineProteinPositive: HealthMetric = {
+      name: 'Đạm',
+      standardKey: 'URINE_PRO',
+      value: 'Có phát hiện / Dương Tính',
+      unit: '',
+      refRange: 'Âm Tính',
+    };
+
+    const { abnormal, normal } = partitionHealthMetricsForDisplay([diagVitaminD, urineProteinPositive], 'male');
+    expect(abnormal.map((item) => item.metric.name)).toEqual([
+      'Định lượng 25-OH Vitamin D [Huyết Thanh]',
+      'Đạm',
+    ]);
+    expect(abnormal[0].rangeStatus).toBe('warning_low');
+    expect(normal).toEqual([]);
+
+    const timeline = [makeEvent('2026-01-06', [diagVitaminD])];
+    expect(extractAbnormalHealthMetricOptions(timeline, 'male')).toEqual([
+      { key: 'VITAMIN_D', label: 'Vitamin D' },
+    ]);
+    const info = resolveHealthMetricDisplayInfo('VITAMIN_D', timeline, 'male');
+    expect(info.normalRangeText).toBe('30 - 100 ng/mL');
+    expect(info.minNormal).toBe(30);
+    expect(info.maxNormal).toBe(100);
+    expect(buildHealthMetricChartData(timeline, 'VITAMIN_D')).toEqual([
+      { date: '2026-01-06', value: 26, unit: 'ng/mL', facility: '' },
+    ]);
+  });
+
+  it('converts nmol/L Vitamin D values to ng/mL for range checking and chart display', () => {
+    expect(
+      getHealthMetricRangeStatus({
+        name: '25-OH Vitamin D',
+        value: 50,
+        unit: 'nmol/L',
+      }),
+    ).toBe('warning_low');
+    expect(
+      buildHealthMetricChartData(
+        [makeEvent('2026-01-06', [{ name: '25-OH Vitamin D', value: 50, unit: 'nmol/L' }])],
+        'VITAMIN_D',
+      ),
+    ).toEqual([{ date: '2026-01-06', value: 20, unit: 'ng/mL', facility: '' }]);
+  });
 });
 
 describe('extractAbnormalHealthMetricOptions & resolveHealthMetricDisplayInfo', () => {

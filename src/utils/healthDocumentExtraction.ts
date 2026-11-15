@@ -50,16 +50,43 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
     for (const metric of result.metrics) {
       if (!isRecord(metric) || typeof metric.name !== 'string' || !metric.name.trim()) continue;
       const name = metric.name.trim();
+      let unit = typeof metric.unit === 'string' ? metric.unit.trim() : '';
+      let value: number | string | undefined;
+
+      if (typeof metric.value === 'number' && Number.isFinite(metric.value)) {
+        value = metric.value;
+      } else if (typeof metric.value === 'string') {
+        const rawVal = metric.value.trim();
+        if (rawVal) {
+          const numericWithUnit = rawVal.match(/^(-?\d+(?:[.,]\d+)?)\s*([a-zA-Zµμ/%^0-9]+(?:\/[a-zA-Zµμ0-9^]+)?)?$/);
+          if (numericWithUnit) {
+            const parsedNum = Number(numericWithUnit[1].replace(',', '.'));
+            if (Number.isFinite(parsedNum)) {
+              value = parsedNum;
+              if (!unit && numericWithUnit[2] && !/^[HLhl*]+$/.test(numericWithUnit[2])) {
+                unit = numericWithUnit[2].trim();
+              }
+            }
+          }
+          if (value === undefined) {
+            value = rawVal;
+          }
+        }
+      }
+      if (value === undefined) continue;
+
       const rawKey = typeof metric.standardKey === 'string' && metric.standardKey.trim()
           ? metric.standardKey
           : name;
-      
-      const standardKey = standardizeMetricKey(rawKey, String(metric.unit || ''), name);
+
+      const standardKey = standardizeMetricKey(rawKey, unit, name);
 
       const cleanedMetric: JsonRecord = {
         ...metric,
         name,
         standardKey,
+        value,
+        unit,
       };
       if (typeof metric.status === 'string') {
         cleanedMetric.status = metric.status.trim();
@@ -69,8 +96,19 @@ export function cleanExtractedJson(value: unknown): JsonRecord {
       }
       const identity = standardKey.toUpperCase();
       const existing = metrics.get(identity);
-      if (!existing || (!existing.refRange && cleanedMetric.refRange)) {
-        metrics.set(identity, cleanedMetric);
+      if (!existing || (!existing.refRange && cleanedMetric.refRange) || (!existing.unit && cleanedMetric.unit)) {
+        const mergedRefRange = cleanedMetric.refRange || existing?.refRange;
+        const mergedMetric: JsonRecord = {
+          ...(existing || {}),
+          ...cleanedMetric,
+          unit: cleanedMetric.unit || (typeof existing?.unit === 'string' ? existing.unit : ''),
+        };
+        if (typeof mergedRefRange === 'string' && mergedRefRange) {
+          mergedMetric.refRange = mergedRefRange;
+        } else {
+          delete mergedMetric.refRange;
+        }
+        metrics.set(identity, mergedMetric);
       }
     }
     result.metrics = Array.from(metrics.values());

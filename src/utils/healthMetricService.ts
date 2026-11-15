@@ -149,6 +149,11 @@ function normalizeMetricForChart(
     if (normalized === 'mmol/l') return { value, unit: 'mmol/L' };
   }
 
+  if (standardKey === 'VITAMIN_D') {
+    if (normalized === 'nmol/l') return { value: Number((value * 0.4006).toFixed(1)), unit: 'ng/mL' };
+    if (normalized === 'ng/ml' || !normalized) return { value, unit: 'ng/mL' };
+  }
+
   return { value, unit };
 }
 
@@ -379,6 +384,10 @@ function normalizeClinicalMetricValue(
   }
   if (standardKey === 'CALCIUM' && source === 'mg/dl' && target === 'mmol/l') {
     return value * 0.2495;
+  }
+  if (standardKey === 'VITAMIN_D' && target === 'ng/ml') {
+    if (source === 'nmol/l') return value * 0.4006;
+    if (!source) return value;
   }
   return undefined;
 }
@@ -709,14 +718,66 @@ interface ParsedRefRange {
   unit: string;
 }
 
+const NORMAL_RANGE_LABEL_RE =
+  /^(?:du|dat|binh thuong|toi uu|ly tuong|mong muon|am tinh|khong phan ung|normal|optimal|sufficient|desirable|negative|non[- ]?reactive)\s*[:\-]?\s*(.+)$/i;
+const ABNORMAL_RANGE_LABEL_RE =
+  /^(?:thieu hut|thieu|khong du|chua du|bat thuong|cao|thap|ngo doc|nguy co|tien dai thao duong|dai thao duong|duong tinh|co phan ung|deficient|insufficient|inadequate|excess|high|low|toxic|abnormal|positive|reactive)\s*[:\-]/i;
+
+function normalizeRangeTextForLabelMatch(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractPrimaryReferenceClause(refRange: string): string | undefined {
+  const trimmed = refRange.trim();
+  if (!trimmed) return undefined;
+
+  // Split multi-band reference strings across newlines, semicolons, pipes, or after a numeric/closing-bracket token before a new "Label:"
+  const segments = trimmed
+    .split(/[\r\n;|]+/)
+    .flatMap((line) => line.split(/(?<=[\d\]\)])\s+(?=[A-Za-zÀ-ỹĐđ][^:\n]{0,24}:)/))
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.length <= 1) {
+    const singleNorm = normalizeRangeTextForLabelMatch(trimmed);
+    const normalMatch = singleNorm.match(NORMAL_RANGE_LABEL_RE);
+    if (normalMatch) return normalMatch[1].trim();
+    if (ABNORMAL_RANGE_LABEL_RE.test(singleNorm)) return undefined;
+    return trimmed;
+  }
+
+  for (const segment of segments) {
+    const norm = normalizeRangeTextForLabelMatch(segment);
+    const normalMatch = norm.match(NORMAL_RANGE_LABEL_RE);
+    if (normalMatch) {
+      return normalMatch[1].trim();
+    }
+  }
+
+  const nonAbnormalSegments = segments.filter(
+    (segment) => !ABNORMAL_RANGE_LABEL_RE.test(normalizeRangeTextForLabelMatch(segment)),
+  );
+  if (nonAbnormalSegments.length > 0) {
+    return nonAbnormalSegments[0];
+  }
+
+  return undefined;
+}
+
 function parseRefRangeForChart(
   standardKey: string,
   refRange?: string,
   unit: string = '',
 ): ParsedRefRange | undefined {
   if (!refRange || typeof refRange !== 'string') return undefined;
-  const trimmed = refRange.trim();
-  if (!trimmed) return undefined;
+  const primaryClause = extractPrimaryReferenceClause(refRange);
+  if (!primaryClause) return undefined;
+  const trimmed = primaryClause.trim();
   const normalized = trimmed.replace(/,/g, '.');
   const cleanUnit = unit.trim();
 
@@ -949,9 +1010,14 @@ export interface CategorizedHealthMetric {
 const EXPLICIT_ABNORMAL_STATUS_RE = /^(?:critical(?:_high|_low)?|warning(?:_high|_low)?|high|low|abnormal|elevated|borderline|out_of_range|positive|cao|thấp|thap|bất\s*thường|bat\s*thuong|vượt\s*ngưỡng|vuot\s*nguong|dương\s*tính|duong\s*tinh|h|l|\+)$/i;
 const EXPLICIT_NORMAL_STATUS_RE = /^(?:normal|ok|within_range|negative|neg|bình\s*thường|binh\s*thuong|âm\s*tính|am\s*tinh|ổn\s*định|on\s*dinh|n)$/i;
 
+const QUALITATIVE_ABNORMAL_VALUE_RE = /(?:dương\s*tính|duong\s*tinh|có\s*phát\s*hiện|co\s*phat\s*hien|có\s*phản\s*ứng|co\s*phan\s*ung|\bpositive\b|\breactive\b|^\s*\++\s*$)/i;
+const QUALITATIVE_NORMAL_VALUE_RE = /^(?:âm\s*tính|am\s*tinh|bình\s*thường|binh\s*thuong|không\s*phản\s*ứng|khong\s*phan\s*ung|không\s*phát\s*hiện|khong\s*phat\s*hien|negative|non[- ]?reactive|normal)$/i;
+
 function evaluateRefRangeStatus(value: number, refRange?: string): HealthMetricRangeStatus | undefined {
   if (!refRange || typeof refRange !== 'string') return undefined;
-  const normalized = refRange.trim().replace(/,/g, '.');
+  const primaryClause = extractPrimaryReferenceClause(refRange);
+  if (!primaryClause) return undefined;
+  const normalized = primaryClause.trim().replace(/,/g, '.');
   if (!normalized) return undefined;
 
   const betweenMatch = normalized.match(/(-?\d+(?:\.\d+)?)\s*(?:-|–|~|to|đến)\s*(-?\d+(?:\.\d+)?)/i);
@@ -1014,6 +1080,16 @@ export function classifyHealthMetricForDisplay(
     baseStatus === 'warning_low'
   ) {
     return { rangeStatus: baseStatus, isAbnormal: true };
+  }
+
+  if (numericValue === undefined && typeof metric.value === 'string') {
+    const rawTextValue = metric.value.trim();
+    if (QUALITATIVE_ABNORMAL_VALUE_RE.test(rawTextValue)) {
+      return { rangeStatus: 'warning_high', isAbnormal: true };
+    }
+    if (QUALITATIVE_NORMAL_VALUE_RE.test(rawTextValue)) {
+      return { rangeStatus: 'normal', isAbnormal: false };
+    }
   }
 
   if (rawStatus && EXPLICIT_NORMAL_STATUS_RE.test(rawStatus)) {

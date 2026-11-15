@@ -318,18 +318,26 @@ export function summarizeTimeline(
     const eventDate = event.date || '';
 
     for (const metric of event.metrics) {
-      if (!metric || typeof metric.value !== 'number' || !Number.isFinite(metric.value)) continue;
-      
+      if (!metric) continue;
+      const numericValue =
+        typeof metric.value === 'number'
+          ? metric.value
+          : typeof metric.value === 'string'
+            ? Number(metric.value.trim().replace(',', '.'))
+            : Number.NaN;
+      if (!Number.isFinite(numericValue)) continue;
+
       const rawKey = metric.standardKey || metric.name || '';
       const stdKey = standardizeMetricKey(rawKey, metric.unit || '', metric.name);
-      
-      if (!stdKey) continue; 
+
+      if (!stdKey) continue;
 
       const previous = latestMetrics[stdKey];
       // Strictly one entry per standardized key, prioritized by latest date
       if (!previous || eventDate >= previous.date) {
         latestMetrics[stdKey] = {
           ...metric,
+          value: numericValue,
           standardKey: stdKey,
           date: eventDate,
         };

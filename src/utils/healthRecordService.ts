@@ -29,7 +29,7 @@ const METRIC_STANDARDIZATION_MAP: Array<{
 }> = [
   { standardKey: 'CREATININ', aliases: ['creatinin', 'creatinine', 'dinh luong creatinin', 'dinh luong creatinine', 'serum creatinine', 'creatinin huyet thanh', 'creatinine huyet thanh'] },
   { standardKey: 'ACID_URIC', aliases: ['acid uric', 'axit uric', 'uric acid', 'dinh luong acid uric', 'dinh luong axit uric', 'serum uric acid'] },
-  { standardKey: 'TSH', aliases: ['tsh', 'hormone kich thich tuyen giap', 'thyroid stimulating hormone'] },
+  { standardKey: 'TSH', aliases: ['tsh', 'dinh luong tsh', 'hormone kich thich tuyen giap', 'thyroid stimulating hormone'] },
   { standardKey: 'WBC', aliases: ['wbc', 'bach cau', 'so luong bach cau', 'white blood cell', 'white blood cells', 'leukocyte count'] },
   { standardKey: 'RBC', aliases: ['rbc', 'hong cau', 'so luong hong cau', 'red blood cell', 'red blood cells', 'erythrocyte count'] },
   { standardKey: 'HGB', aliases: ['hgb', 'hb', 'hemoglobin', 'haemoglobin', 'huyet sac to'] },
@@ -46,12 +46,12 @@ const METRIC_STANDARDIZATION_MAP: Array<{
   { standardKey: 'AST', aliases: ['ast', 'got', 'sgot', 'aspartate aminotransferase'] },
   { standardKey: 'ALT', aliases: ['alt', 'gpt', 'sgpt', 'alanine aminotransferase'] },
   { standardKey: 'GGT', aliases: ['ggt', 'gamma gt', 'gamma glutamyl transferase'] },
-  { standardKey: 'FT4', aliases: ['ft4', 'free t4', 'free thyroxine', 'thyroxine tu do', 't4 tu do'] },
-  { standardKey: 'FT3', aliases: ['ft3', 'free t3', 'free triiodothyronine', 'triiodothyronine tu do', 't3 tu do'] },
+  { standardKey: 'FT4', aliases: ['ft4', 'dinh luong ft4', 'free t4', 'free thyroxine', 'dinh luong free thyroxine', 'thyroxine tu do', 't4 tu do'] },
+  { standardKey: 'FT3', aliases: ['ft3', 'dinh luong ft3', 'free t3', 'free triiodothyronine', 'triiodothyronine tu do', 't3 tu do'] },
   { standardKey: 'CA_ION', aliases: ['ca ion', 'canxi ion hoa', 'canxi ion', 'ionized calcium', 'ca2', 'ca 2'] },
   { standardKey: 'CALCIUM', aliases: ['canxi', 'calcium', 'canxi huyet thanh', 'canxi ca', 'canxi ca huyet thanh', 'dinh luong canxi', 'dinh luong canxi huyet thanh', 'dinh luong canxi ca', 'dinh luong canxi ca huyet thanh', 'serum calcium', 'total calcium', 'canxi toan phan', 'ca'] },
   { standardKey: 'MPV', aliases: ['mpv', 'the tich trung binh tieu cau', 'the tich trung binh tieu cau mpv', 'mean platelet volume'] },
-  { standardKey: 'VITAMIN_D', aliases: ['vitamin d', '25 oh vitamin d', 'vitamin d 25 oh', '25 oh d', '25 hydroxy vitamin d', '25 hydroxyvitamin d', 'dinh luong vitamin d', 'dinh luong 25 oh vitamin d'] },
+  { standardKey: 'VITAMIN_D', aliases: ['vitamin d', 'vitamin d3', '25 oh vitamin d', '25 oh vitamin d3', 'vitamin d 25 oh', '25 oh d', '25 hydroxy vitamin d', '25 hydroxyvitamin d', 'dinh luong vitamin d', 'dinh luong vitamin d3', 'dinh luong 25 oh vitamin d', 'dinh luong 25 oh vitamin d3'] },
   { standardKey: 'MCV', aliases: ['mcv', 'the tich trung binh hong cau', 'mean corpuscular volume'] },
   { standardKey: 'MCH', aliases: ['mch', 'luong hgb trung binh hong cau', 'mean corpuscular hemoglobin'] },
   { standardKey: 'MCHC', aliases: ['mchc', 'nong do hgb trung binh hong cau', 'mean corpuscular hemoglobin concentration'] },
@@ -411,6 +411,30 @@ export function parseRobustJson(text: string): Record<string, any> {
 }
 
 /**
- * Cơ chế delay xử lý (Sleep)
+ * Cơ chế delay xử lý (Sleep), hỗ trợ hủy ngang qua AbortSignal
  */
-export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+export const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  if (signal.aborted) {
+    return Promise.reject(
+      signal.reason instanceof Error ? signal.reason : new Error('OCR was cancelled.'),
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason instanceof Error ? signal.reason : new Error('OCR was cancelled.'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+};

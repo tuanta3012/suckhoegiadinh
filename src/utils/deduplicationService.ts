@@ -522,17 +522,48 @@ export function cleanAndDeduplicateEventData<T extends Partial<HealthEvent>>(eve
     const metricMap = new Map<string, HealthMetric>();
     for (const m of event.metrics) {
       const name = m.name?.trim() || '';
-      if (!name || typeof m.value !== 'number' || !Number.isFinite(m.value)) continue;
+      if (!name) continue;
+      let normalizedValue: number | string | undefined;
+      let unit = typeof m.unit === 'string' ? m.unit.trim() : '';
+      if (typeof m.value === 'number' && Number.isFinite(m.value)) {
+        normalizedValue = m.value;
+      } else if (typeof m.value === 'string') {
+        const rawVal = m.value.trim();
+        if (rawVal) {
+          const numericMatch = rawVal.match(/^(-?\d+(?:[.,]\d+)?)\s*([a-zA-Zµμ/%^0-9]+(?:\/[a-zA-Zµμ0-9^]+)?)?$/);
+          if (numericMatch) {
+            const parsed = Number(numericMatch[1].replace(',', '.'));
+            if (Number.isFinite(parsed)) {
+              normalizedValue = parsed;
+              if (!unit && numericMatch[2] && !/^[HLhl*]+$/.test(numericMatch[2])) {
+                unit = numericMatch[2].trim();
+              }
+            }
+          }
+          if (normalizedValue === undefined) {
+            normalizedValue = rawVal;
+          }
+        }
+      }
+      if (normalizedValue === undefined) continue;
 
       let stdKey = m.standardKey ? m.standardKey.trim().toUpperCase() : undefined;
       if (stdKey) {
-        stdKey = standardizeMetricKey(stdKey, m.unit || '', name);
+        stdKey = standardizeMetricKey(stdKey, unit, name);
       }
 
-      const key = resolveCanonicalMetricKey({ ...m, name, standardKey: stdKey });
+      const key = resolveCanonicalMetricKey({ ...m, name, unit, value: normalizedValue, standardKey: stdKey });
       const existing = metricMap.get(key);
-      if (!existing || (!existing.refRange && m.refRange)) {
-        metricMap.set(key, { ...m, name, standardKey: stdKey });
+      if (!existing || (!existing.refRange && m.refRange) || (!existing.unit && unit)) {
+        metricMap.set(key, {
+          ...(existing || {}),
+          ...m,
+          name,
+          value: normalizedValue,
+          unit: unit || existing?.unit || '',
+          standardKey: stdKey || existing?.standardKey,
+          refRange: m.refRange || existing?.refRange,
+        });
       }
     }
     cleanedMetrics = Array.from(metricMap.values());

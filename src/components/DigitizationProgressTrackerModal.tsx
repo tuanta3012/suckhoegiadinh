@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Scan,
   Sparkles,
+  StopCircle,
   X,
 } from 'lucide-react';
 import type { FamilyMember, HealthEvent } from '../types';
@@ -41,6 +42,7 @@ interface DigitizationProgressTrackerModalProps {
   onReview: () => void;
   onRetry: () => void;
   onManualEntry: () => void;
+  onCancel?: () => void;
   onClose: () => void;
 }
 
@@ -60,10 +62,15 @@ export function DigitizationProgressTrackerModal({
   onReview,
   onRetry,
   onManualEntry,
+  onCancel,
   onClose,
 }: DigitizationProgressTrackerModalProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const prevStepRef = useRef<TrackerStep>(step);
+
+  const isRunning = step !== 'completed' && step !== 'error';
 
   // Generate local image preview thumbnail if file is an image
   useEffect(() => {
@@ -80,24 +87,56 @@ export function DigitizationProgressTrackerModal({
     }
   }, [file]);
 
+  // Reset timer and confirmation when reopening, switching file, or retrying
+  useEffect(() => {
+    const prevStep = prevStepRef.current;
+    prevStepRef.current = step;
+    if (!isOpen) {
+      setElapsedSec(0);
+      setConfirmingCancel(false);
+      return;
+    }
+    if (!isRunning) {
+      setConfirmingCancel(false);
+      return;
+    }
+    if (prevStep === 'error' || prevStep === 'completed') {
+      setElapsedSec(0);
+      setConfirmingCancel(false);
+    }
+  }, [isOpen, isRunning, step]);
+
+  useEffect(() => {
+    setElapsedSec(0);
+    setConfirmingCancel(false);
+  }, [file]);
+
   // Elapsed timer
   useEffect(() => {
-    if (!isOpen || step === 'completed' || step === 'error') {
+    if (!isOpen || !isRunning) {
       return;
     }
     const timer = setInterval(() => {
       setElapsedSec((prev) => prev + 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, [isOpen, step]);
+  }, [isOpen, isRunning]);
+
+  const handleRequestClose = () => {
+    if (isRunning && onCancel) {
+      setConfirmingCancel((prev) => !prev);
+      return;
+    }
+    onClose();
+  };
 
   useBackHandler(
     isOpen && Boolean(file),
     () => {
-      onClose();
+      handleRequestClose();
       return true;
     },
-    BackPriority.MODAL,
+    BackPriority.TOP_MODAL,
   );
 
   if (!isOpen || !file) return null;
@@ -110,7 +149,7 @@ export function DigitizationProgressTrackerModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-xs p-3 overflow-y-auto animate-in fade-in duration-200"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/75 backdrop-blur-xs p-3 overflow-y-auto animate-in fade-in duration-200"
       role="presentation"
     >
       <section
@@ -149,16 +188,18 @@ export function DigitizationProgressTrackerModal({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {step !== 'completed' && step !== 'error' && (
+            {isRunning && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold">
                 <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />
                 <span>{elapsedSec}s</span>
               </span>
             )}
             <button
-              onClick={onClose}
+              type="button"
+              onClick={handleRequestClose}
               className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
-              title="Đóng"
+              title={isRunning ? 'Dừng hoặc đóng' : 'Đóng'}
+              aria-label={isRunning ? 'Dừng hoặc đóng' : 'Đóng'}
             >
               <X className="w-5 h-5" />
             </button>
@@ -167,20 +208,49 @@ export function DigitizationProgressTrackerModal({
 
         {/* Scrollable Body */}
         <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-slate-800">
+          {/* Inline cancel confirmation when user taps X / Back mid-flight */}
+          {confirmingCancel && isRunning && onCancel && (
+            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-950 text-xs space-y-2.5 animate-in fade-in duration-150">
+              <p className="font-bold leading-snug">
+                Tác vụ OCR đang chạy — bạn muốn dừng và hủy giữa chừng?
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmingCancel(false);
+                    onCancel();
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 active:scale-95"
+                >
+                  <StopCircle className="w-3.5 h-3.5" />
+                  <span>Dừng &amp; Hủy OCR</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingCancel(false)}
+                  className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-bold text-xs"
+                >
+                  Tiếp tục chạy
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Progress Bar & Status Pill */}
           <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-slate-800 flex items-center gap-1.5">
+            <div className="flex items-center justify-between text-xs gap-2">
+              <span className="font-bold text-slate-800 flex items-center gap-1.5 min-w-0">
                 {step === 'completed' ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
                 ) : step === 'error' ? (
-                  <AlertCircle className="w-4 h-4 text-rose-600" />
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
                 ) : (
-                  <Sparkles className="w-4 h-4 text-emerald-600 animate-pulse" />
+                  <Sparkles className="w-4 h-4 shrink-0 text-emerald-600 animate-pulse" />
                 )}
-                <span>{progressMessage}</span>
+                <span className="truncate">{progressMessage}</span>
               </span>
-              <span className="font-bold font-mono text-emerald-600 text-sm">
+              <span className={`font-bold font-mono text-sm shrink-0 ${step === 'error' ? 'text-rose-600' : 'text-emerald-600'}`}>
                 {progressPercent}%
               </span>
             </div>
@@ -229,7 +299,8 @@ export function DigitizationProgressTrackerModal({
                     {Array.from({ length: pagesCount }, (_, idx) => {
                       const pageNum = idx + 1;
                       const isDone = pageNum <= displayCurPage || step === 'completed';
-                      const isCurrent = pageNum === displayCurPage + 1 && step !== 'completed';
+                      const isCurrent = pageNum === displayCurPage + 1 && isRunning;
+                      const isFailedPage = pageNum === displayCurPage + 1 && step === 'error';
                       return (
                         <div
                           key={pageNum}
@@ -238,6 +309,8 @@ export function DigitizationProgressTrackerModal({
                               ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                               : isCurrent
                               ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30 ring-2 ring-emerald-400/50 animate-pulse'
+                              : isFailedPage
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                               : 'bg-slate-800/80 text-slate-400 border border-slate-700/60'
                           }`}
                         >
@@ -245,6 +318,8 @@ export function DigitizationProgressTrackerModal({
                             <CheckCircle2 className="w-3 h-3 text-emerald-400" />
                           ) : isCurrent ? (
                             <Loader2 className="w-3 h-3 animate-spin text-white" />
+                          ) : isFailedPage ? (
+                            <AlertCircle className="w-3 h-3 text-rose-400" />
                           ) : (
                             <span className="w-3 h-3 rounded-full bg-slate-700 text-[9px] flex items-center justify-center font-mono">{pageNum}</span>
                           )}
@@ -389,13 +464,24 @@ export function DigitizationProgressTrackerModal({
 
         {/* Footer Actions */}
         <div className="p-3.5 sm:p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-slate-600 transition-colors"
-          >
-            Đóng
-          </button>
+          {isRunning && onCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm active:scale-95 transition-all"
+            >
+              <StopCircle className="w-3.5 h-3.5" />
+              <span>Dừng / Hủy OCR</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-xs font-bold text-slate-600 transition-colors"
+            >
+              Đóng
+            </button>
+          )}
 
           <div className="flex items-center gap-2">
             {step === 'completed' && (
@@ -409,7 +495,7 @@ export function DigitizationProgressTrackerModal({
               </button>
             )}
 
-            {step !== 'completed' && step !== 'error' && (
+            {isRunning && (
               <button
                 type="button"
                 onClick={onReview}

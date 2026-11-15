@@ -22,9 +22,9 @@ import { sleep } from './healthRecordService';
 import { getFirebaseIdToken } from './googleDriveService';
 import { createApiRequestId } from './apiRequestId';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
-import { buildApiUrl } from './apiConfig';
+import { buildApiUrl, hasConfiguredBackendUrl } from './apiConfig';
 import { readApiJson } from './apiResponse';
-import { cleanErrorMessage } from './geminiErrorMessages';
+import { cleanErrorMessage, isRequestCancelledError } from './geminiErrorMessages';
 import { TASK_MODELS } from './geminiModels';
 import {
   buildComprehensiveAnalysisPrompt,
@@ -35,6 +35,7 @@ import {
   HEALTH_ASSISTANT_SYSTEM_INSTRUCTION,
   normalizeComprehensiveAnalysisPayload,
   SUMMARIZE_RESPONSE_SCHEMA,
+  type AssistantFamilyMemberPromptContext,
 } from './healthAiPrompts';
 import {
   executeGeminiStreamWithPool,
@@ -51,7 +52,7 @@ import {
   type HealthAssistantHistoryMessage,
 } from './healthAssistantContext';
 
-export { cleanErrorMessage };
+export { cleanErrorMessage, isRequestCancelledError as isOcrCancelledError };
 
 export interface ExtractionProgressUpdate {
   stage:
@@ -73,10 +74,16 @@ export interface ExtractionProgressUpdate {
 
 class BackendGatewayError extends Error {
   readonly status: number;
-  constructor(message: string, status: number, options?: ErrorOptions) {
+  readonly isMissingGatewayRoute: boolean;
+  constructor(
+    message: string,
+    status: number,
+    options?: ErrorOptions & { isMissingGatewayRoute?: boolean },
+  ) {
     super(message, options);
     this.name = 'BackendGatewayError';
     this.status = status;
+    this.isMissingGatewayRoute = Boolean(options?.isMissingGatewayRoute);
   }
 }
 
@@ -98,7 +105,13 @@ function isUnreachableBackendError(error: unknown): boolean {
 function isBackendUnavailableError(error: unknown): boolean {
   return (
     isUnreachableBackendError(error) ||
-    (error instanceof BackendGatewayError && (error.status === 502 || error.status === 503 || error.status === 504)) ||
+    (error instanceof BackendGatewayError && (
+      error.status === 404 ||
+      error.status === 502 ||
+      error.status === 503 ||
+      error.status === 504 ||
+      error.isMissingGatewayRoute
+    )) ||
     (error instanceof Error && /chưa cấu hình máy chủ AI/i.test(error.message))
   );
 }
@@ -139,21 +152,62 @@ function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
   };
 }
 
+export interface AssistantFamilyMemberContext {
+  member: FamilyMember;
+  profile: HealthProfile;
+}
+
+function normalizeAssistantFamilyContextsInput(raw: unknown): AssistantFamilyMemberContext[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .flatMap((item): AssistantFamilyMemberContext[] => {
+      if (!isRecord(item) || !isRecord(item.member) || typeof item.member.name !== 'string') return [];
+      return [{
+        member: item.member as unknown as FamilyMember,
+        profile: (isRecord(item.profile) ? item.profile : { timeline: [], sources: [], summary: { latestDiagnoses: [], latestMetrics: {} } }) as unknown as HealthProfile,
+      }];
+    })
+    .slice(0, 5);
+}
+
+function toPromptFamilyContexts(
+  contexts: AssistantFamilyMemberContext[],
+): AssistantFamilyMemberPromptContext[] {
+  return contexts.map((ctx) => ({
+    memberName: ctx.member?.name || 'Thành viên',
+    role: typeof ctx.member?.role === 'string' ? ctx.member.role : undefined,
+    birthDate: typeof ctx.member?.birthDate === 'string' ? ctx.member.birthDate : undefined,
+    gender: typeof ctx.member?.gender === 'string' ? ctx.member.gender : undefined,
+    profile: ctx.profile,
+  }));
+}
+
 function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
-  const recentTimeline = Array.isArray(profile?.timeline)
-    ? profile.timeline.slice(-6).map((evt) => ({
-        ...evt,
-        additionalSources: undefined,
-        extractedData: undefined,
-        imagingResults: Array.isArray(evt.imagingResults)
-          ? evt.imagingResults.map((img) => ({
-              modality: img.modality,
-              findings: String(img.findings || ''),
-              conclusion: img.conclusion,
-            }))
-          : undefined,
-      }))
+  const sortedTimeline = Array.isArray(profile?.timeline)
+    ? [...profile.timeline].sort(
+        (a, b) => new Date(a.date || a.recordedAt).getTime() - new Date(b.date || b.recordedAt).getTime(),
+      )
     : [];
+  const latestTen = sortedTimeline.slice(-10);
+  const latestPhysicalExamEvent = [...sortedTimeline]
+    .reverse()
+    .find((evt) => Boolean(evt?.physicalExam));
+  const mergedEvents =
+    latestPhysicalExamEvent && !latestTen.some((evt) => evt.id === latestPhysicalExamEvent.id)
+      ? [latestPhysicalExamEvent, ...latestTen]
+      : latestTen;
+  const recentTimeline = mergedEvents.map((evt) => ({
+    ...evt,
+    additionalSources: undefined,
+    extractedData: undefined,
+    imagingResults: Array.isArray(evt.imagingResults)
+      ? evt.imagingResults.map((img) => ({
+          modality: img.modality,
+          findings: String(img.findings || ''),
+          conclusion: img.conclusion,
+        }))
+      : undefined,
+  }));
   return {
     schemaVersion: profile?.schemaVersion || 2,
     member: profile?.member,
@@ -180,8 +234,12 @@ function isNativeApkRuntime(): boolean {
   );
 }
 
-function hasConfiguredBackendUrl(): boolean {
-  return Boolean((import.meta.env.VITE_BACKEND_URL || '').trim());
+function canFallbackOnMissingGatewayRoute(): boolean {
+  return isNativeApkRuntime() || !hasConfiguredBackendUrl();
+}
+
+function isHtmlGatewayResponse(response: Response): boolean {
+  return response.headers.get('content-type')?.toLowerCase().includes('text/html') ?? false;
 }
 
 function shouldFallbackToDirectGemini(error: unknown): boolean {
@@ -189,7 +247,7 @@ function shouldFallbackToDirectGemini(error: unknown): boolean {
   return (
     !hasConfiguredBackendUrl() &&
     error instanceof BackendGatewayError &&
-    error.status === 404
+    (error.status === 404 || error.isMissingGatewayRoute)
   );
 }
 
@@ -266,12 +324,21 @@ async function runDirectGeminiFallback<T>(
     const member = body.member as FamilyMember;
     const profile = body.profile as HealthProfile;
     const history = normalizeHealthAssistantHistory(body.history);
+    const familyContexts = toPromptFamilyContexts(normalizeAssistantFamilyContextsInput(body.familyContexts));
     const memberName = member?.name || 'Thành viên';
     const research = await researchHealthQuestionWithPool(question, memberName, {
       requestContext,
       requestId,
+      extraMemberNames: familyContexts.map((ctx) => ctx.memberName),
     });
-    const prompt = createHealthAssistantPrompt(question, memberName, profile, history, research);
+    const prompt = createHealthAssistantPrompt(
+      question,
+      memberName,
+      profile,
+      history,
+      research,
+      familyContexts,
+    );
     const { text, modelUsed } = await executeGeminiWithPool({
       task: 'assistant',
       contents: [{ text: prompt }],
@@ -381,11 +448,12 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       if (!response.ok) {
         const status = response.status;
         lastHttpStatus = status;
-        if (status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
+        if (canFallbackOnMissingGatewayRoute() && (status === 404 || isHtmlGatewayResponse(response))) {
           await response.text().catch(() => '');
           throw new BackendGatewayError(
-            'Preview không có route Gemini backend (HTTP 404).',
+            `Không tìm thấy route Gemini backend (HTTP ${status}).`,
             status,
+            { isMissingGatewayRoute: true },
           );
         }
         if ((status === 502 || status === 503 || status === 504) && attempt < maxRetries - 1) {
@@ -409,6 +477,15 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
             status,
           );
         }
+      }
+
+      if (canFallbackOnMissingGatewayRoute() && isHtmlGatewayResponse(response)) {
+        await response.text().catch(() => '');
+        throw new BackendGatewayError(
+          `Gateway trả về HTML thay vì JSON (HTTP ${response.status}).`,
+          response.status,
+          { isMissingGatewayRoute: true },
+        );
       }
 
       const data = await readApiJson<T>(response, `Server Gemini (${endpoint})`);
@@ -667,6 +744,9 @@ async function extractServerHealthEvent(
       }),
     });
   } catch (error) {
+    if (options?.signal?.aborted || isRequestCancelledError(error, options?.signal)) {
+      throw error;
+    }
     if (isNativeApkRuntime() && isUnreachableBackendError(error)) {
       return runDirectHealthDocumentOcr(
         file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
@@ -682,7 +762,10 @@ async function extractServerHealthEvent(
   }
 
   if (!response.ok) {
-    if (response.status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
+    const canFallback =
+      (canFallbackOnMissingGatewayRoute() && (response.status === 404 || isHtmlGatewayResponse(response))) ||
+      (isNativeApkRuntime() && (response.status === 502 || response.status === 503 || response.status === 504));
+    if (canFallback) {
       await response.text().catch(() => '');
       return runDirectHealthDocumentOcr(
         file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
@@ -698,12 +781,23 @@ async function extractServerHealthEvent(
   }
 
   if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    if (canFallbackOnMissingGatewayRoute() && isHtmlGatewayResponse(response)) {
+      await response.text().catch(() => '');
+      return runDirectHealthDocumentOcr(
+        file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
+      );
+    }
     await readApiJson<unknown>(response, 'Server Gemini (extract-health-event)');
     throw new Error('Server Gemini không trả về luồng dữ liệu OCR như mong đợi.');
   }
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Không thể khởi tạo luồng dữ liệu từ server AI.');
+
+  const cancelReaderOnAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  options?.signal?.addEventListener('abort', cancelReaderOnAbort, { once: true });
 
   const decoder = new TextDecoder();
   let buffer = '';
@@ -716,18 +810,29 @@ async function extractServerHealthEvent(
     contentIndexComplete: boolean;
   } | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      if (options?.signal?.aborted) {
+        throw options.signal.reason instanceof Error
+          ? options.signal.reason
+          : new Error('OCR was cancelled.');
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      try {
-        const json = JSON.parse(line.slice(6));
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let json: any;
+        try {
+          json = JSON.parse(line.slice(6));
+        } catch (e) {
+          console.warn('[Gemini Service] Failed to parse SSE line:', line, e);
+          continue;
+        }
         if (json.type === 'progress') {
           onProgress?.({
             stage: 'extracting_content',
@@ -754,13 +859,17 @@ async function extractServerHealthEvent(
         } else if (json.type === 'error') {
           throw new Error(json.error || 'Lỗi xử lý từ server AI.');
         }
-      } catch (e) {
-        if (e instanceof Error && e.message.includes('Lỗi xử lý từ server AI')) throw e;
-        console.warn('[Gemini Service] Failed to parse SSE line:', line, e);
       }
     }
+  } finally {
+    options?.signal?.removeEventListener('abort', cancelReaderOnAbort);
   }
 
+  if (options?.signal?.aborted) {
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new Error('OCR was cancelled.');
+  }
   if (!finalResult) throw new Error('AI không trả về kết quả cuối cùng.');
 
   const durationMs = getDuration();
@@ -902,6 +1011,11 @@ export async function extractHealthEventWithProgress(
   onProgress?.({ stage: 'preparing', progressPercent: 25, message: 'Đang chuẩn bị dữ liệu và mã hóa tệp...' });
 
   try {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason instanceof Error
+        ? options.signal.reason
+        : new Error('OCR was cancelled.');
+    }
     const base64Data = await fileToBase64(file);
     if (options?.signal?.aborted) {
       throw options.signal.reason instanceof Error
@@ -917,6 +1031,16 @@ export async function extractHealthEventWithProgress(
     return await extractServerHealthEvent(file, member, mimeType, base64Data, onProgress, getDuration, options);
   } catch (error) {
     const durationMs = getDuration();
+    if (isRequestCancelledError(error, options?.signal)) {
+      digitizationLogger.log(
+        'warn',
+        'ocr_cancelled',
+        `Đã dừng tác vụ OCR tài liệu "${file.name}".`,
+        { fileName: file.name },
+        durationMs,
+      );
+      throw error;
+    }
     const errorMessage = cleanErrorMessage(error instanceof Error ? error.message : String(error));
     digitizationLogger.log(
       'error',
@@ -1052,8 +1176,13 @@ export async function askHealthAssistant(
   member: FamilyMember,
   profile: HealthProfile,
   history: HealthAssistantHistoryMessage[] = [],
+  familyContexts: AssistantFamilyMemberContext[] = [],
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
   const compactedProfile = compactProfileForAssistant(profile);
+  const compactedFamilyContexts = familyContexts.slice(0, 5).map((ctx) => ({
+    member: ctx.member,
+    profile: compactProfileForAssistant(ctx.profile),
+  }));
   const data = await callGemini<{
     success: boolean;
     answer: string;
@@ -1063,6 +1192,7 @@ export async function askHealthAssistant(
     member,
     profile: compactedProfile,
     history,
+    ...(compactedFamilyContexts.length > 0 ? { familyContexts: compactedFamilyContexts } : {}),
     stream: false,
   });
   if (typeof data.answer !== 'string' || !data.answer.trim()) {
@@ -1134,19 +1264,20 @@ async function callGeminiStream(
 
   if (!response.ok) {
     const status = response.status;
+    if (canFallbackOnMissingGatewayRoute() && (status === 404 || isHtmlGatewayResponse(response))) {
+      await response.text().catch(() => '');
+      throw new BackendGatewayError(
+        `Không tìm thấy route Gemini backend cho stream (HTTP ${status}).`,
+        status,
+        { isMissingGatewayRoute: true },
+      );
+    }
     digitizationLogger.log('error', 'api_response_error', `Gemini gateway trả lỗi cho stream (${endpoint}, HTTP ${status}).`, {
       requestId,
       endpoint,
       status,
       durationMs: Date.now() - requestStartedAt,
     }, Date.now() - requestStartedAt);
-    if (status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
-      await response.text().catch(() => '');
-      throw new BackendGatewayError(
-        'Preview không có route Gemini backend (HTTP 404).',
-        status,
-      );
-    }
     if (status === 502 || status === 503 || status === 504) {
       const textBody = await response.text().catch(() => '');
       throw new BackendGatewayError(
@@ -1158,6 +1289,14 @@ async function callGeminiStream(
   }
 
   if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+    if (canFallbackOnMissingGatewayRoute() && isHtmlGatewayResponse(response)) {
+      await response.text().catch(() => '');
+      throw new BackendGatewayError(
+        `Gateway trả về HTML thay vì luồng dữ liệu (HTTP ${response.status}).`,
+        response.status,
+        { isMissingGatewayRoute: true },
+      );
+    }
     await readApiJson<unknown>(response, `Server Gemini (${endpoint})`);
     throw new Error(`Server Gemini (${endpoint}) không trả về luồng dữ liệu như mong đợi.`);
   }
@@ -1245,9 +1384,14 @@ export async function streamHealthAssistant(
   onChunk: (chunk: string) => void,
   history: HealthAssistantHistoryMessage[] = [],
   onSources?: (citations: HealthAssistantCitation[]) => void,
+  familyContexts: AssistantFamilyMemberContext[] = [],
 ): Promise<{ answer: string; citations: HealthAssistantCitation[] }> {
   const requestId = createApiRequestId();
   const compactedProfile = compactProfileForAssistant(profile);
+  const compactedFamilyContexts = familyContexts.slice(0, 5).map((ctx) => ({
+    member: ctx.member,
+    profile: compactProfileForAssistant(ctx.profile),
+  }));
   let emittedChunks = false;
   const emitChunk = (chunk: string) => {
     if (chunk) emittedChunks = true;
@@ -1257,7 +1401,13 @@ export async function streamHealthAssistant(
   try {
     return await callGeminiStream(
       'ask-assistant',
-      { question, member, profile: compactedProfile, history },
+      {
+        question,
+        member,
+        profile: compactedProfile,
+        history,
+        ...(compactedFamilyContexts.length > 0 ? { familyContexts: compactedFamilyContexts } : {}),
+      },
       emitChunk,
       onSources,
       requestId,
@@ -1288,9 +1438,11 @@ export async function streamHealthAssistant(
         keyCount: clientGeminiKeys.length,
       });
       const normalizedHistory = normalizeHealthAssistantHistory(history);
+      const promptFamilyContexts = toPromptFamilyContexts(compactedFamilyContexts);
       const research = await researchHealthQuestionWithPool(question, member.name, {
         requestContext,
         requestId,
+        extraMemberNames: promptFamilyContexts.map((ctx) => ctx.memberName),
       });
       onSources?.(research.citations);
       const prompt = createHealthAssistantPrompt(
@@ -1299,6 +1451,7 @@ export async function streamHealthAssistant(
         compactedProfile,
         normalizedHistory,
         research,
+        promptFamilyContexts,
       );
 
       let directEmittedChunks = false;
@@ -1498,14 +1651,35 @@ function normalizeExtractedEvent(value: Record<string, unknown>, fileName?: stri
   const metrics: HealthMetric[] = Array.isArray(value.metrics)
     ? value.metrics.flatMap((item) => {
         if (!isRecord(item) || typeof item.name !== 'string' || !item.name.trim()) return [];
-        const numericValue = typeof item.value === 'number' ? item.value : Number(item.value);
-        if (!Number.isFinite(numericValue)) return [];
+        let unit = optionalString(item.unit) || '';
+        let normalizedValue: number | string | undefined;
+        if (typeof item.value === 'number' && Number.isFinite(item.value)) {
+          normalizedValue = item.value;
+        } else if (typeof item.value === 'string') {
+          const rawVal = item.value.trim();
+          if (rawVal) {
+            const numericMatch = rawVal.match(/^(-?\d+(?:[.,]\d+)?)\s*([a-zA-Zµμ/%^0-9]+(?:\/[a-zA-Zµμ0-9^]+)?)?$/);
+            if (numericMatch) {
+              const parsed = Number(numericMatch[1].replace(',', '.'));
+              if (Number.isFinite(parsed)) {
+                normalizedValue = parsed;
+                if (!unit && numericMatch[2] && !/^[HLhl*]+$/.test(numericMatch[2])) {
+                  unit = numericMatch[2].trim();
+                }
+              }
+            }
+            if (normalizedValue === undefined) {
+              normalizedValue = rawVal;
+            }
+          }
+        }
+        if (normalizedValue === undefined) return [];
         return [
           {
             name: item.name.trim(),
             standardKey: optionalString(item.standardKey),
-            value: numericValue,
-            unit: optionalString(item.unit) || '',
+            value: normalizedValue,
+            unit,
             refRange: optionalString(item.refRange),
             status: optionalString(item.status),
           },

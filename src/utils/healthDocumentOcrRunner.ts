@@ -1,4 +1,5 @@
 import { digitizationLogger } from './digitizationLogger';
+import { isRequestCancelledError } from './geminiErrorMessages';
 import { type GeminiRequestContext } from './geminiRequestContext';
 import {
   describeGeminiError,
@@ -56,6 +57,9 @@ export async function runUnifiedHealthDocumentOcr(
   processedPages: number;
   mode: 'whole_file' | 'chunked';
 }> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason instanceof Error ? options.signal.reason : new Error('OCR was cancelled.');
+  }
   const effectiveMime = options.mimeType || 'application/pdf';
   const memberName = options.memberName?.trim() || 'Thành viên gia đình';
   const memberBirth = options.memberBirthDate ? `sinh ngày ${options.memberBirthDate}` : '';
@@ -97,7 +101,7 @@ export async function runUnifiedHealthDocumentOcr(
       if (options.signal?.aborted) throw new Error('OCR was cancelled.');
       if (i > 0 && delayMs > 0) {
         options.onProgress?.('Chờ giây lát trước khi xử lý phần tiếp theo...');
-        await sleep(delayMs);
+        await sleep(delayMs, options.signal);
       }
 
       const batch = batches[i];
@@ -173,14 +177,17 @@ export async function runUnifiedHealthDocumentOcr(
       mode: plan.mode,
     };
   } catch (error) {
+    if (options.signal?.aborted || isRequestCancelledError(error, options.signal)) {
+      throw error;
+    }
     const details = describeGeminiError(error);
     const canFallbackChunk =
       effectiveMime === 'application/pdf' &&
       plan.mode === 'whole_file' &&
-      !options.signal?.aborted &&
+      plan.totalPages > 1 &&
       !details.isInvalidKey &&
       !details.isRateLimit &&
-      shouldFallbackToBatchedPdfOcr(error, plan.totalPages);
+      (shouldFallbackToBatchedPdfOcr(error, plan.totalPages) || details.status === 503);
 
     if (!canFallbackChunk) {
       throw error;
@@ -198,6 +205,9 @@ export async function runUnifiedHealthDocumentOcr(
     );
 
     const fallbackBatches = await splitPdfIntoBatches(options.base64Data, fallbackBatchPages, 100);
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error ? options.signal.reason : new Error('OCR was cancelled.');
+    }
     const result = await executeBatchList(fallbackBatches, false);
     return {
       ...result,

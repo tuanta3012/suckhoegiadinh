@@ -1,12 +1,34 @@
 import { Capacitor } from '@capacitor/core';
 
+export function normalizeBackendOrigin(rawValue: unknown): string {
+  if (typeof rawValue !== 'string') return '';
+  const trimmed = rawValue.trim().replace(/\/+$/, '');
+  if (!trimmed || /[\s,]/.test(trimmed) || /YOUR_DEPLOYED_API_ORIGIN/i.test(trimmed)) {
+    return '';
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    const cleanPath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${cleanPath}`;
+  } catch {
+    return '';
+  }
+}
+
+export function hasConfiguredBackendUrl(): boolean {
+  return Boolean(normalizeBackendOrigin(import.meta.env.VITE_BACKEND_URL));
+}
+
 /**
  * Returns the base backend API URL.
  * - On Web (browser): returns empty string '' to use same-origin relative requests (/api/gemini/...)
  * - On Native Android: requires VITE_BACKEND_URL to point to a deployed backend.
  */
 export function getApiBaseUrl(): string {
-  const envUrl = (import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
+  const envUrl = normalizeBackendOrigin(import.meta.env.VITE_BACKEND_URL);
   if (envUrl) {
     return envUrl;
   }

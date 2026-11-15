@@ -13,6 +13,7 @@ import {
   LoaderCircle,
   PlayCircle,
   RefreshCw,
+  StopCircle,
   X,
 } from 'lucide-react';
 import type { FamilyMember, HealthProfile, HealthSource } from '../types';
@@ -21,6 +22,9 @@ import { fileFromLocalSource } from '../utils/localSyncOutbox';
 import { formatDateVN } from '../utils/formatters';
 import type { OcrRecoveryJob } from '../utils/ocrRecoveryStorage';
 import { BackPriority, useBackHandler } from '../utils/backNavigation';
+import { isOcrCancelledError } from '../utils/geminiService';
+
+export type RawOcrRunOutcome = 'completed' | 'needs_review' | 'cancelled' | 'error';
 
 interface RawFilesManagerModalProps {
   isOpen: boolean;
@@ -32,7 +36,8 @@ interface RawFilesManagerModalProps {
   localOwnerKey: string;
   isBatchBusy?: boolean;
   onClose: () => void;
-  onRunOcrForSource: (member: FamilyMember, source: HealthSource) => Promise<void>;
+  onRunOcrForSource: (member: FamilyMember, source: HealthSource) => Promise<RawOcrRunOutcome | void>;
+  onCancelOcr?: () => void;
   onRefreshWorkspace: () => Promise<void>;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
@@ -83,6 +88,7 @@ export function RawFilesManagerModal({
   isBatchBusy = false,
   onClose,
   onRunOcrForSource,
+  onCancelOcr,
   onRefreshWorkspace,
   showToast,
 }: RawFilesManagerModalProps) {
@@ -231,7 +237,7 @@ export function RawFilesManagerModal({
   useBackHandler(
     isOpen && Boolean(workspace),
     () => {
-      if (!processingId && !viewingId) onClose();
+      if (!viewingId) onClose();
       return true;
     },
     BackPriority.MODAL,
@@ -549,29 +555,44 @@ export function RawFilesManagerModal({
                         <span>Xem</span>
                       </button>
 
-                      <button
-                        type="button"
-                        disabled={isProcessing || isBatchBusy || isDeletedRaw}
-                        onClick={async () => {
-                          setProcessingId(source.driveFileId);
-                          try {
-                            await onRunOcrForSource(member, source);
-                            showToast(`Đã chạy lại OCR cho ${source.fileName}`, 'success');
-                          } catch (error) {
-                            showToast(error instanceof Error ? error.message : 'Lỗi chạy lại OCR.', 'error');
-                          } finally {
-                            setProcessingId(null);
-                          }
-                        }}
-                        className="min-h-[34px] px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 active:scale-95"
-                      >
-                        {isProcessing ? (
-                          <RefreshCw className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <PlayCircle className="w-3 h-3 text-emerald-400" />
-                        )}
-                        <span>{isProcessing ? 'Đang OCR' : 'OCR lại'}</span>
-                      </button>
+                      {isProcessing && onCancelOcr ? (
+                        <button
+                          type="button"
+                          onClick={() => onCancelOcr()}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap active:scale-95"
+                        >
+                          <StopCircle className="w-3 h-3" />
+                          <span>Dừng OCR</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isProcessing || isBatchBusy || isDeletedRaw}
+                          onClick={async () => {
+                            setProcessingId(source.driveFileId);
+                            try {
+                              const outcome = await onRunOcrForSource(member, source);
+                              if (outcome === 'completed' || outcome === undefined) {
+                                showToast(`Đã chạy lại OCR cho ${source.fileName}`, 'success');
+                              }
+                            } catch (error) {
+                              if (!isOcrCancelledError(error)) {
+                                showToast(error instanceof Error ? error.message : 'Lỗi chạy lại OCR.', 'error');
+                              }
+                            } finally {
+                              setProcessingId(null);
+                            }
+                          }}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 active:scale-95"
+                        >
+                          {isProcessing ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <PlayCircle className="w-3 h-3 text-emerald-400" />
+                          )}
+                          <span>{isProcessing ? 'Đang OCR' : 'OCR lại'}</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

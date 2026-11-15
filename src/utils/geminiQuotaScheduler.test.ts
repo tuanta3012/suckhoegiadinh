@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { GeminiQuotaScheduler, parseGeminiProjects } from './geminiQuotaScheduler';
+import {
+  GeminiQuotaScheduler,
+  getMsUntilNextPacificMidnight,
+  parseGeminiProjects,
+} from './geminiQuotaScheduler';
 import { createGeminiRequestContext } from './geminiRequestContext';
 
 const quota = { rpm: 1 };
@@ -154,4 +158,31 @@ describe('GeminiQuotaScheduler', () => {
     ocrLease.release();
     assistantLease.release();
   });
+
+  it('calculates remaining milliseconds until Pacific midnight within valid range', () => {
+    const msUntilMidnight = getMsUntilNextPacificMidnight();
+    expect(msUntilMidnight).toBeGreaterThanOrEqual(60_000);
+    expect(msUntilMidnight).toBeLessThanOrEqual(86_405_000);
+  });
+
+  it('blocks only the affected model on a project upon RPD error and leaves other models active', async () => {
+    const scheduler = new GeminiQuotaScheduler([
+      { id: 'one', apiKey: 'test-api-key-for-rpd-blocking-001' },
+      { id: 'two', apiKey: 'test-api-key-for-rpd-blocking-002' },
+    ]);
+
+    // Block only model-a on project 'one'
+    scheduler.markModelUnavailable('one', 'model-a', 60_000);
+
+    // Project 'one' should still be available for model-b
+    const leaseModelB = await scheduler.acquire('analysis', 'model-b', quota, new Set(), 100, 'one');
+    expect(leaseModelB.project.id).toBe('one');
+    leaseModelB.release();
+
+    // Project 'one' should be unavailable for model-a, so it acquires project 'two'
+    const leaseModelA = await scheduler.acquire('assistant', 'model-a', quota, new Set(), 100);
+    expect(leaseModelA.project.id).toBe('two');
+    leaseModelA.release();
+  });
 });
+
