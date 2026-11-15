@@ -180,6 +180,19 @@ function isNativeApkRuntime(): boolean {
   );
 }
 
+function hasConfiguredBackendUrl(): boolean {
+  return Boolean((import.meta.env.VITE_BACKEND_URL || '').trim());
+}
+
+function shouldFallbackToDirectGemini(error: unknown): boolean {
+  if (isNativeApkRuntime()) return isBackendUnavailableError(error);
+  return (
+    !hasConfiguredBackendUrl() &&
+    error instanceof BackendGatewayError &&
+    error.status === 404
+  );
+}
+
 async function runDirectGeminiFallback<T>(
   endpoint: string,
   body: Record<string, unknown>,
@@ -190,7 +203,7 @@ async function runDirectGeminiFallback<T>(
     throw new Error('Chưa có API key trong Tài nguyên AI để chạy trực tiếp trên thiết bị.');
   }
   const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
-  digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển sang Gemini SDK trên APK.', {
+  digitizationLogger.log('warn', 'api_direct_fallback', 'Không có route Gemini backend; chuyển sang Gemini SDK trên client.', {
     requestId,
     endpoint,
     keyCount: clientGeminiKeys.length,
@@ -368,6 +381,13 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
       if (!response.ok) {
         const status = response.status;
         lastHttpStatus = status;
+        if (status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
+          await response.text().catch(() => '');
+          throw new BackendGatewayError(
+            'Preview không có route Gemini backend (HTTP 404).',
+            status,
+          );
+        }
         if ((status === 502 || status === 503 || status === 504) && attempt < maxRetries - 1) {
           const backoff = (attempt + 1) * 1500;
           digitizationLogger.log('warn', 'api_attempt_retry', 'Gemini gateway trả lỗi tạm thời; sẽ thử lại.', {
@@ -419,7 +439,7 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
         },
         Date.now() - attemptStartedAt,
       );
-      if (isNativeApkRuntime() && isBackendUnavailableError(error)) {
+      if (shouldFallbackToDirectGemini(error)) {
         try {
           return await runDirectGeminiFallback<T>(endpoint, body, clientGeminiKeys, requestId);
         } catch (fallbackError) {
@@ -662,6 +682,12 @@ async function extractServerHealthEvent(
   }
 
   if (!response.ok) {
+    if (response.status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
+      await response.text().catch(() => '');
+      return runDirectHealthDocumentOcr(
+        file, member, mimeType, base64Data, clientGeminiKeys, requestId, onProgress, options,
+      );
+    }
     digitizationLogger.log('error', 'api_response_error', 'Gemini gateway trả lỗi cho OCR.', {
       requestId,
       endpoint: 'extract-health-event',
@@ -784,7 +810,7 @@ async function runDirectHealthDocumentOcr(
   contentIndexPages: string[];
   contentIndexComplete: boolean;
 }> {
-  digitizationLogger.log('warn', 'api_direct_fallback', 'Chạy OCR bằng Gemini SDK trực tiếp trên APK.', {
+  digitizationLogger.log('warn', 'api_direct_fallback', 'Chạy OCR bằng Gemini SDK trực tiếp trên client.', {
     requestId,
     endpoint: 'extract-health-event',
     keyCount: clientGeminiKeys.length,
@@ -1114,6 +1140,13 @@ async function callGeminiStream(
       status,
       durationMs: Date.now() - requestStartedAt,
     }, Date.now() - requestStartedAt);
+    if (status === 404 && !isNativeApkRuntime() && !hasConfiguredBackendUrl()) {
+      await response.text().catch(() => '');
+      throw new BackendGatewayError(
+        'Preview không có route Gemini backend (HTTP 404).',
+        status,
+      );
+    }
     if (status === 502 || status === 503 || status === 504) {
       const textBody = await response.text().catch(() => '');
       throw new BackendGatewayError(
@@ -1234,7 +1267,7 @@ export async function streamHealthAssistant(
       const cleaned = cleanErrorMessage(getRawErrorDetails(error).errorMessage);
       throw new Error(cleaned, { cause: error });
     }
-    if (!isNativeApkRuntime() || !isBackendUnavailableError(error)) {
+    if (!shouldFallbackToDirectGemini(error)) {
       const rawInfo = getRawErrorDetails(error);
       digitizationLogger.log('error', 'assistant_stream_error', `Trợ lý AI stream thất bại: ${rawInfo.errorMessage}`, {
         requestId,
@@ -1249,7 +1282,7 @@ export async function streamHealthAssistant(
     try {
       const clientGeminiKeys = await getSharedGeminiKeysForRequest();
       const requestContext = getOrCreateSharedGeminiRequestContext(clientGeminiKeys);
-      digitizationLogger.log('warn', 'api_direct_fallback', 'Backend không truy cập được; chuyển chat stream sang Gemini SDK trên APK.', {
+      digitizationLogger.log('warn', 'api_direct_fallback', 'Preview không có route backend; chuyển chat stream sang Gemini SDK trên client.', {
         requestId,
         endpoint: 'ask-assistant',
         keyCount: clientGeminiKeys.length,

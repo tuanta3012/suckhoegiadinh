@@ -91,6 +91,65 @@ describe('Gemini service backend routing', () => {
       .toBe('https://api.example.com/api/gemini/ask-assistant');
   });
 
+  it('uses the shared client executor when a static preview has no Gemini API route', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-preview-key']);
+    generateContentMock.mockResolvedValue({ text: 'Câu trả lời từ preview.' });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    const result = await askHealthAssistant('Lần gần nhất tôi khám ở đâu?', member, profile);
+
+    expect(result.answer).toBe('Câu trả lời từ preview.');
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(generateContentMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not use the client executor when a configured backend route returns 404', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', 'https://api.example.com');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-preview-key']);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    await expect(askHealthAssistant('Lần gần nhất tôi khám ở đâu?', member, profile))
+      .rejects.toThrow('trả về HTML thay vì JSON (HTTP 404)');
+
+    expect(generateContentMock).not.toHaveBeenCalled();
+  });
+
+  it('streams from the shared client executor when a static preview returns 404', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(false);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-preview-stream-key']);
+    generateContentStreamMock.mockImplementation(async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { text: 'Câu trả lời streaming từ preview.' };
+      },
+    }));
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('<!doctype html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+
+    const chunks: string[] = [];
+    const result = await streamHealthAssistant(
+      'Lần gần nhất tôi khám ở đâu?',
+      member,
+      profile,
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(result.answer).toBe('Câu trả lời streaming từ preview.');
+    expect(chunks.join('')).toBe(result.answer);
+    expect(generateContentStreamMock).toHaveBeenCalledOnce();
+  });
+
   it('uses the shared device executor when an APK has no configured backend URL', async () => {
     vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
     vi.stubEnv('VITE_BACKEND_URL', '');
