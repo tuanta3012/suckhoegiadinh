@@ -45,6 +45,7 @@ import {
   Sparkles,
   Stethoscope,
   Trash2,
+  Type,
   User,
   UserPlus,
   Users,
@@ -602,6 +603,27 @@ export function HealthDashboard({
   const [selectedAbnormalMetricByEvent, setSelectedAbnormalMetricByEvent] = useState<Record<string, number | null>>({});
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
+  const [fontSizeScale, setFontSizeScale] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('stk_font_size_scale');
+      if (saved !== null) {
+        const num = Number(saved);
+        if (Number.isFinite(num) && num >= 50 && num <= 150) return num;
+      }
+    } catch {
+      // ignore
+    }
+    return 100;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('stk_font_size_scale', String(fontSizeScale));
+    } catch {
+      // ignore
+    }
+  }, [fontSizeScale]);
+
   const [showMemberDropdown, setShowMemberDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [showRawFilesModal, setShowRawFilesModal] = useState(false);
