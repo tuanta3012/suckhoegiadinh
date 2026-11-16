@@ -2500,6 +2500,31 @@ export function HealthDashboard({
       setShowAiResourcesModal(false);
     }
   }, [canManageAiResources, showAiResourcesModal]);
+  const purgeDeletedWorkspaceState = useCallback((email?: string | null) => {
+    const cleanEmail = email ? email.trim().toLowerCase() : null;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(PROFILE_ROOT_KEY);
+      if (cleanEmail) {
+        localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanEmail}`);
+        localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, cleanEmail));
+        localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, cleanEmail));
+      }
+      localStorage.removeItem(LOCAL_WORKSPACE_KEY);
+      localStorage.removeItem(LOCAL_PROFILES_KEY);
+    }
+    if (cleanEmail) {
+      void clearWorkspaceCache(cleanEmail).catch(() => {});
+    }
+    const emptyWs = createDefaultLocalWorkspace(cleanEmail);
+    workspaceRef.current = emptyWs;
+    profilesRef.current = {};
+    setWorkspace(emptyWs);
+    setProfiles({});
+    setProfileErrors({});
+    setErrorMessage('');
+    showToast('Kho dữ liệu trên Google Drive đã bị xóa. Ứng dụng đã tự động dọn sạch dữ liệu cũ trên thiết bị.', 'info');
+  }, [showToast]);
+
   const openWorkspace = useCallback(
     async (id: string): Promise<boolean> => {
       const authIdentity = authIdentityRef.current;
@@ -2535,15 +2560,13 @@ export function HealthDashboard({
         showToast('Đã kết nối thư mục Google Drive thành công.', 'success');
         return true;
       } catch (error) {
-        const isNotFound = error instanceof Error && /file not found|404|not found/i.test(error.message);
+        const message = error instanceof Error ? error.message : '';
+        const isNotFound = /file not found|\b404\b|not found|không tìm thấy tệp|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json/i.test(message);
         if (isNotFound) {
+          purgeDeletedWorkspaceState(userEmail);
           if (userEmail) {
-            localStorage.removeItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`);
-            void clearWorkspaceCache(userEmail);
+            void unregisterHealthWorkspace(id.trim()).catch(() => {});
           }
-          localStorage.removeItem(PROFILE_ROOT_KEY);
-          void unregisterHealthWorkspace(id.trim()).catch(() => {});
-          setErrorMessage('');
         } else {
           setErrorMessage(
             error instanceof Error ? error.message : 'Không thể mở thư mục Drive.'
@@ -2554,7 +2577,7 @@ export function HealthDashboard({
         setIsLoading(false);
       }
     },
-    [reloadProfiles, showToast, userEmail]
+    [purgeDeletedWorkspaceState, reloadProfiles, showToast, userEmail]
   );
   useEffect(() => {
     if (!driveAuthorized || !userEmail) return;
