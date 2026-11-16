@@ -2,7 +2,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
-      return request.auth != null && request.auth.token.email != null;
+      return request.auth != null &&
+        request.auth.token.email != null &&
+        request.auth.token.email_verified == true;
     }
 
     function authenticatedEmail() {
@@ -39,7 +41,7 @@ service cloud.firestore {
 
     match /workspaceAccess/{email} {
         allow get: if signedIn() &&
-          (authenticatedEmail() == email || resource.data.adminUid == request.auth.uid);
+          (authenticatedEmail() == email || (resource != null && resource.data.adminUid == request.auth.uid));
         allow list: if signedIn() && resource.data.adminUid == request.auth.uid;
         allow create: if signedIn() &&
           request.resource.data.email == email &&
@@ -88,9 +90,16 @@ service cloud.firestore {
     }
 
     match /invitations/{email} {
-      allow get: if signedIn();
-      allow list: if signedIn();
-      allow create, update, delete: if signedIn();
+      allow get: if signedIn() && (
+        authenticatedEmail() == email ||
+        (resource != null && resource.data.adminEmail == authenticatedEmail())
+      );
+      allow list: if signedIn() && resource.data.adminEmail == authenticatedEmail();
+      allow create, update, delete: if signedIn() && (
+        authenticatedEmail() == email ||
+        (request.resource != null && request.resource.data.adminEmail == authenticatedEmail()) ||
+        (resource != null && resource.data.adminEmail == authenticatedEmail())
+      );
     }
 
     // Legacy support (optional, but good for transition)

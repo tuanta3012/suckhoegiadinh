@@ -630,6 +630,7 @@ export interface FileDuplicateMatch {
   existingSource: HealthSource;
   linkedEvent?: HealthEvent;
   isExactContentMatch: boolean;
+  matchedContribution?: NonNullable<HealthSource['sourceContributions']>[number];
   memberId?: string;
   memberName?: string;
 }
@@ -642,23 +643,57 @@ export function detectDuplicateFile(
 ): FileDuplicateMatch | null {
   if (!profile.sources || profile.sources.length === 0) return null;
 
+  const isSha256 = Boolean(fileHash && /^[a-f0-9]{64}$/i.test(fileHash));
+  if (!isSha256) return null;
+
+  const findLinkedEvent = (source: HealthSource): HealthEvent | undefined => {
+    const targetIds = new Set<string>([source.driveFileId]);
+    if (source.mergedIntoFileId) targetIds.add(source.mergedIntoFileId);
+    return profile.timeline.find(
+      (ev) =>
+        targetIds.has(ev.sourceFileId) ||
+        ev.sourceFileName === source.fileName ||
+        Boolean(ev.additionalSources?.some((item) => targetIds.has(item.driveFileId))),
+    );
+  };
+
   for (const source of profile.sources) {
+    if (source.relocatedToMemberId) continue;
     const hashMatch = Boolean(
       source.fileHash &&
-      fileHash &&
-      /^[a-f0-9]{64}$/i.test(fileHash) &&
       /^[a-f0-9]{64}$/i.test(source.fileHash) &&
       source.fileHash === fileHash
     );
     if (hashMatch) {
-      const linkedEvent = profile.timeline.find(
-        (ev) => ev.sourceFileId === source.driveFileId || ev.sourceFileName === source.fileName
-      );
+      const canonicalTarget =
+        source.mergedIntoFileId
+          ? profile.sources.find((candidate) => candidate.driveFileId === source.mergedIntoFileId && !candidate.rawDeletedAt) || source
+          : source;
+      return {
+        existingSource: canonicalTarget,
+        linkedEvent: findLinkedEvent(source),
+        isExactContentMatch: true,
+        memberId: member?.id || profile.member.id,
+        memberName: member?.name || profile.member.name,
+      };
+    }
 
+    const contributionMatch = source.sourceContributions?.find(
+      (contribution) =>
+        contribution.hashAlgorithm === 'sha256' &&
+        /^[a-f0-9]{64}$/i.test(contribution.fileHash) &&
+        contribution.fileHash === fileHash,
+    );
+    if (contributionMatch) {
+      const linkedEvent =
+        (contributionMatch.mergedIntoEventId
+          ? profile.timeline.find((ev) => ev.id === contributionMatch.mergedIntoEventId)
+          : undefined) || findLinkedEvent(source);
       return {
         existingSource: source,
         linkedEvent,
         isExactContentMatch: true,
+        matchedContribution: contributionMatch,
         memberId: member?.id || profile.member.id,
         memberName: member?.name || profile.member.name,
       };

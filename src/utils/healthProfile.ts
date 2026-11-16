@@ -91,6 +91,10 @@ function isHealthSource(value: unknown): value is HealthSource {
       (value.contentIndexPages === undefined ||
         (Array.isArray(value.contentIndexPages) && value.contentIndexPages.every((page) => typeof page === 'string'))) &&
       (value.contentIndexComplete === undefined || typeof value.contentIndexComplete === 'boolean') &&
+      (value.mergedIntoFileId === undefined || typeof value.mergedIntoFileId === 'string') &&
+      (value.mergedIntoFileName === undefined || typeof value.mergedIntoFileName === 'string') &&
+      (value.mergedDisposition === undefined || value.mergedDisposition === 'included' || value.mergedDisposition === 'duplicate') &&
+      (value.mergedReason === undefined || typeof value.mergedReason === 'string') &&
       (value.sourceContributions === undefined ||
         (Array.isArray(value.sourceContributions) &&
           value.sourceContributions.every((contribution) =>
@@ -99,7 +103,12 @@ function isHealthSource(value: unknown): value is HealthSource {
             typeof contribution.fileHash === 'string' &&
             (contribution.hashAlgorithm === 'sha256' || contribution.hashAlgorithm === 'md5') &&
             typeof contribution.uploadedAt === 'string' &&
-            (contribution.disposition === 'included' || contribution.disposition === 'duplicate')))),
+            (contribution.disposition === 'included' || contribution.disposition === 'duplicate') &&
+            (contribution.reason === undefined || typeof contribution.reason === 'string') &&
+            (contribution.fileSize === undefined || (typeof contribution.fileSize === 'number' && Number.isFinite(contribution.fileSize))) &&
+            (contribution.totalPages === undefined || (typeof contribution.totalPages === 'number' && Number.isFinite(contribution.totalPages))) &&
+            (contribution.mergedIntoEventId === undefined || typeof contribution.mergedIntoEventId === 'string') &&
+            (contribution.sourceDriveFileId === undefined || typeof contribution.sourceDriveFileId === 'string')))),
   );
 }
 
@@ -221,6 +230,20 @@ export function mergeHealthProfiles(
       continue;
     }
 
+    const rawContributions = [
+      ...(previous.sourceContributions || []),
+      ...(source.sourceContributions || []),
+    ];
+    const uniqueContributions = new Map<string, (typeof rawContributions)[0]>();
+    for (const item of rawContributions) {
+      const key = item.fileName.trim().toLowerCase();
+      const existing = uniqueContributions.get(key);
+      if (!existing || (item.uploadedAt || '') >= (existing.uploadedAt || '')) {
+        uniqueContributions.set(key, item);
+      }
+    }
+    const mergedContributions = [...uniqueContributions.values()];
+
     const selected = source.status === 'processed' ? source : previous;
     sources.set(source.driveFileId, {
       ...previous,
@@ -230,6 +253,11 @@ export function mergeHealthProfiles(
         : source.subjectStatus || previous.subjectStatus,
       rawDeletedAt: previous.rawDeletedAt || source.rawDeletedAt,
       relocatedToMemberId: source.relocatedToMemberId || previous.relocatedToMemberId,
+      mergedIntoFileId: selected.mergedIntoFileId || source.mergedIntoFileId || previous.mergedIntoFileId,
+      mergedIntoFileName: selected.mergedIntoFileName || source.mergedIntoFileName || previous.mergedIntoFileName,
+      mergedDisposition: selected.mergedDisposition || source.mergedDisposition || previous.mergedDisposition,
+      mergedReason: selected.mergedReason || source.mergedReason || previous.mergedReason,
+      ...(mergedContributions.length > 0 ? { sourceContributions: mergedContributions } : {}),
     });
   }
 
@@ -237,18 +265,223 @@ export function mergeHealthProfiles(
     (left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt),
   );
   const mergedSources = [...sources.values()].sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt));
+
+  const changedFromCurrent = didTimelineEventsChange(current.timeline, timeline);
+  const changedFromIncoming = didTimelineEventsChange(incoming.timeline, timeline);
+  const timelineChangedOnBothSides = changedFromCurrent && changedFromIncoming;
+  const maxEventRecordedAt = resolveLatestIsoTimestamp(
+    ...timeline.map((item) => item.recordedAt),
+  );
+
+  let timelineUpdatedAt = resolveLatestIsoTimestamp(
+    current.timelineUpdatedAt,
+    incoming.timelineUpdatedAt,
+  );
+  if (timelineChangedOnBothSides) {
+    timelineUpdatedAt = resolveLatestIsoTimestamp(timelineUpdatedAt, maxEventRecordedAt, now);
+  } else if (changedFromCurrent || changedFromIncoming) {
+    timelineUpdatedAt = resolveLatestIsoTimestamp(timelineUpdatedAt, maxEventRecordedAt);
+  }
+
+  let latestInvalidatedAt = resolveLatestIsoTimestamp(
+    current.aiAnalysisInvalidatedAt,
+    incoming.aiAnalysisInvalidatedAt,
+    timelineChangedOnBothSides ? now : undefined,
+  );
+  // Handle legacy profiles where one device modified timeline without setting timelineUpdatedAt
+  if (
+    changedFromCurrent &&
+    !incoming.timelineUpdatedAt &&
+    !incoming.aiAnalysisInvalidatedAt &&
+    current.aiDeepAnalysis
+  ) {
+    latestInvalidatedAt = resolveLatestIsoTimestamp(
+      latestInvalidatedAt,
+      incoming.updatedAt,
+      maxEventRecordedAt,
+    );
+  }
+  if (
+    changedFromIncoming &&
+    !current.timelineUpdatedAt &&
+    !current.aiAnalysisInvalidatedAt &&
+    incoming.aiDeepAnalysis
+  ) {
+    latestInvalidatedAt = resolveLatestIsoTimestamp(
+      latestInvalidatedAt,
+      current.updatedAt,
+      maxEventRecordedAt,
+    );
+  }
+
+  const chosenDeepAnalysis = pickNewerByTimestamp(
+    current.aiDeepAnalysis,
+    incoming.aiDeepAnalysis,
+    (item) => item.analyzedAt,
+  );
+  const getAiBlockTs = (profile: HealthProfile) =>
+    profile.aiAnalysis?.analyzedAt ||
+    profile.aiDeepAnalysis?.analyzedAt ||
+    profile.aiAnalysis?.lastAnalyzedDate;
+  const chosenAiAnalysis =
+    current.aiAnalysis && incoming.aiAnalysis
+      ? isTimestampStrictlyAfter(getAiBlockTs(incoming), getAiBlockTs(current))
+        ? incoming.aiAnalysis
+        : isTimestampStrictlyAfter(getAiBlockTs(current), getAiBlockTs(incoming))
+          ? current.aiAnalysis
+          : incoming.aiAnalysis
+      : incoming.aiAnalysis || current.aiAnalysis;
+
+  const candidateAnalyzedAt = resolveLatestIsoTimestamp(
+    chosenDeepAnalysis?.analyzedAt,
+    chosenAiAnalysis?.analyzedAt,
+    chosenAiAnalysis?.lastAnalyzedDate,
+  );
+
+  const shouldInvalidateAiAnalysis = Boolean(
+    (chosenDeepAnalysis || chosenAiAnalysis) &&
+      (timeline.length === 0 ||
+        (latestInvalidatedAt &&
+          (!candidateAnalyzedAt ||
+            !isTimestampStrictlyAfter(candidateAnalyzedAt, latestInvalidatedAt))) ||
+        (timelineUpdatedAt &&
+          (!candidateAnalyzedAt ||
+            isTimestampStrictlyAfter(timelineUpdatedAt, candidateAnalyzedAt)))),
+  );
+
+  const nextAiDeepAnalysis = shouldInvalidateAiAnalysis ? undefined : chosenDeepAnalysis;
+  const nextAiAnalysis = shouldInvalidateAiAnalysis ? undefined : chosenAiAnalysis;
+  const nextInvalidatedAt = shouldInvalidateAiAnalysis
+    ? resolveLatestIsoTimestamp(latestInvalidatedAt, timelineUpdatedAt, timeline.length === 0 ? now : undefined)
+    : !nextAiDeepAnalysis && !nextAiAnalysis
+      ? latestInvalidatedAt
+      : undefined;
+
+  const currentMedHistoryTs = current.medicalHistory
+    ? current.medicalHistoryUpdatedAt || current.updatedAt
+    : undefined;
+  const incomingMedHistoryTs = incoming.medicalHistory
+    ? incoming.medicalHistoryUpdatedAt || incoming.updatedAt
+    : undefined;
+
+  let nextMedicalHistory = current.medicalHistory;
+  let nextMedicalHistoryUpdatedAt = current.medicalHistoryUpdatedAt;
+  if (incoming.medicalHistory && current.medicalHistory) {
+    if (isTimestampStrictlyAfter(currentMedHistoryTs, incomingMedHistoryTs)) {
+      nextMedicalHistory = current.medicalHistory;
+      nextMedicalHistoryUpdatedAt = currentMedHistoryTs;
+    } else {
+      nextMedicalHistory = incoming.medicalHistory;
+      nextMedicalHistoryUpdatedAt = incomingMedHistoryTs;
+    }
+  } else if (incoming.medicalHistory) {
+    nextMedicalHistory = incoming.medicalHistory;
+    nextMedicalHistoryUpdatedAt = incomingMedHistoryTs;
+  } else if (current.medicalHistory) {
+    nextMedicalHistory = current.medicalHistory;
+    nextMedicalHistoryUpdatedAt = currentMedHistoryTs;
+  }
+
   return {
     schemaVersion: 2,
     member: incoming.member || current.member,
     timeline,
+    ...(timelineUpdatedAt ? { timelineUpdatedAt } : {}),
     sources: mergedSources,
     summary: summarizeTimeline(timeline, incoming.summary.narrative || current.summary.narrative),
-    aiAnalysis: incoming.aiAnalysis || current.aiAnalysis,
-    aiDeepAnalysis: incoming.aiDeepAnalysis || current.aiDeepAnalysis,
-    medicalHistory: incoming.medicalHistory || current.medicalHistory,
+    aiAnalysis: nextAiAnalysis,
+    aiDeepAnalysis: nextAiDeepAnalysis,
+    ...(nextInvalidatedAt ? { aiAnalysisInvalidatedAt: nextInvalidatedAt } : {}),
+    medicalHistory: nextMedicalHistory,
+    ...(nextMedicalHistoryUpdatedAt ? { medicalHistoryUpdatedAt: nextMedicalHistoryUpdatedAt } : {}),
     createdAt: current.createdAt || incoming.createdAt,
     updatedAt: now,
   };
+}
+
+function parseComparableEpoch(value?: string): number | null {
+  if (!value || !value.trim()) return null;
+  const trimmed = value.trim();
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? Date.parse(`${trimmed}T00:00:00.000Z`)
+    : Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveLatestIsoTimestamp(...values: Array<string | undefined>): string | undefined {
+  let latestValue: string | undefined;
+  let latestEpoch = Number.NEGATIVE_INFINITY;
+  for (const candidate of values) {
+    if (!candidate || !candidate.trim()) continue;
+    const epoch = parseComparableEpoch(candidate);
+    if (epoch !== null) {
+      if (latestValue === undefined || epoch > latestEpoch) {
+        latestEpoch = epoch;
+        latestValue = candidate;
+      }
+    } else if (latestValue === undefined || candidate > latestValue) {
+      latestValue = candidate;
+    }
+  }
+  return latestValue;
+}
+
+function isTimestampStrictlyAfter(later?: string, earlier?: string): boolean {
+  if (!later || !later.trim()) return false;
+  if (!earlier || !earlier.trim()) return true;
+  const laterTrimmed = later.trim();
+  const earlierTrimmed = earlier.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(earlierTrimmed) && !/^\d{4}-\d{2}-\d{2}$/.test(laterTrimmed)) {
+    return laterTrimmed.slice(0, 10) > earlierTrimmed;
+  }
+  const laterEpoch = parseComparableEpoch(laterTrimmed);
+  const earlierEpoch = parseComparableEpoch(earlierTrimmed);
+  if (laterEpoch !== null && earlierEpoch !== null) {
+    return laterEpoch > earlierEpoch;
+  }
+  return laterTrimmed > earlierTrimmed;
+}
+
+function pickNewerByTimestamp<T>(
+  current: T | undefined,
+  incoming: T | undefined,
+  getTimestamp: (value: T) => string | undefined,
+): T | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  const currentTs = getTimestamp(current);
+  const incomingTs = getTimestamp(incoming);
+  if (isTimestampStrictlyAfter(currentTs, incomingTs)) return current;
+  return incoming;
+}
+
+function normalizeTimelineSignature(timeline: HealthEvent[]): string {
+  return JSON.stringify(
+    [...timeline]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((item) => ({
+        id: item.id,
+        type: item.type,
+        title: item.title,
+        date: item.date,
+        facility: item.facility || '',
+        doctorName: item.doctorName || '',
+        diagnoses: item.diagnoses || [],
+        medications: item.medications || [],
+        metrics: item.metrics || [],
+        imagingResults: item.imagingResults || [],
+        vaccinations: item.vaccinations || [],
+        hospitalization: item.hospitalization || null,
+        advice: item.advice || '',
+        nextFollowUp: item.nextFollowUp || '',
+        notes: item.notes || '',
+      })),
+  );
+}
+
+function didTimelineEventsChange(left: HealthEvent[], right: HealthEvent[]): boolean {
+  if (left.length !== right.length) return true;
+  return normalizeTimelineSignature(left) !== normalizeTimelineSignature(right);
 }
 
 function sameHealthEventContent(left: HealthEvent, right: HealthEvent): boolean {
@@ -285,8 +518,12 @@ export function digitizeHealthSource(
   return {
     ...profile,
     timeline,
+    timelineUpdatedAt: now,
     sources,
     summary: summarizeTimeline(timeline, profile.summary.narrative),
+    aiDeepAnalysis: undefined,
+    aiAnalysis: undefined,
+    aiAnalysisInvalidatedAt: now,
     updatedAt: now,
   };
 }
@@ -461,15 +698,53 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
       ? raw.contentIndexPages.filter((page: unknown): page is string => typeof page === 'string')
       : undefined,
     contentIndexComplete: typeof raw.contentIndexComplete === 'boolean' ? raw.contentIndexComplete : undefined,
+    mergedIntoFileId: raw.mergedIntoFileId ? String(raw.mergedIntoFileId) : undefined,
+    mergedIntoFileName: raw.mergedIntoFileName ? String(raw.mergedIntoFileName) : undefined,
+    mergedDisposition:
+      raw.mergedDisposition === 'duplicate' || raw.mergedDisposition === 'included'
+        ? raw.mergedDisposition
+        : undefined,
+    mergedReason: raw.mergedReason ? String(raw.mergedReason) : undefined,
     sourceContributions: Array.isArray(raw.sourceContributions)
-      ? raw.sourceContributions.filter((contribution: unknown) =>
-          isJsonRecord(contribution) &&
-          typeof contribution.fileName === 'string' &&
-          typeof contribution.fileHash === 'string' &&
-          (contribution.hashAlgorithm === 'sha256' || contribution.hashAlgorithm === 'md5') &&
-          typeof contribution.uploadedAt === 'string' &&
-          (contribution.disposition === 'included' || contribution.disposition === 'duplicate'),
-        ) as HealthSource['sourceContributions']
+      ? (() => {
+          const valid = (raw.sourceContributions.filter((contribution: unknown) =>
+            isJsonRecord(contribution) &&
+            typeof contribution.fileName === 'string' &&
+            typeof contribution.fileHash === 'string' &&
+            (contribution.hashAlgorithm === 'sha256' || contribution.hashAlgorithm === 'md5') &&
+            typeof contribution.uploadedAt === 'string' &&
+            (contribution.disposition === 'included' || contribution.disposition === 'duplicate'),
+          ) as NonNullable<HealthSource['sourceContributions']>).map((contribution) => ({
+            fileName: contribution.fileName,
+            fileHash: contribution.fileHash,
+            hashAlgorithm: contribution.hashAlgorithm,
+            uploadedAt: contribution.uploadedAt,
+            disposition: contribution.disposition,
+            ...(typeof contribution.reason === 'string' ? { reason: contribution.reason } : {}),
+            ...(typeof contribution.fileSize === 'number' && Number.isFinite(contribution.fileSize)
+              ? { fileSize: contribution.fileSize }
+              : {}),
+            ...(typeof contribution.totalPages === 'number' && Number.isFinite(contribution.totalPages)
+              ? { totalPages: contribution.totalPages }
+              : {}),
+            ...(typeof contribution.mergedIntoEventId === 'string'
+              ? { mergedIntoEventId: contribution.mergedIntoEventId }
+              : {}),
+            ...(typeof contribution.sourceDriveFileId === 'string'
+              ? { sourceDriveFileId: contribution.sourceDriveFileId }
+              : {}),
+          }));
+
+          const uniqueByFileName = new Map<string, (typeof valid)[0]>();
+          for (const item of valid) {
+            const key = item.fileName.trim().toLowerCase();
+            const existing = uniqueByFileName.get(key);
+            if (!existing || (item.uploadedAt || '') >= (existing.uploadedAt || '')) {
+              uniqueByFileName.set(key, item);
+            }
+          }
+          return [...uniqueByFileName.values()];
+        })()
       : undefined,
   };
 }
@@ -518,11 +793,18 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
     schemaVersion: 2,
     member: { ...(data.member || member), ...member },
     timeline,
+    ...(typeof data.timelineUpdatedAt === 'string' ? { timelineUpdatedAt: data.timelineUpdatedAt } : {}),
     sources,
     summary: data.summary || { latestDiagnoses: [], latestMetrics: {} },
     aiAnalysis: data.aiAnalysis,
     aiDeepAnalysis: data.aiDeepAnalysis,
+    ...(typeof data.aiAnalysisInvalidatedAt === 'string'
+      ? { aiAnalysisInvalidatedAt: data.aiAnalysisInvalidatedAt }
+      : {}),
     medicalHistory: data.medicalHistory,
+    ...(typeof data.medicalHistoryUpdatedAt === 'string'
+      ? { medicalHistoryUpdatedAt: data.medicalHistoryUpdatedAt }
+      : {}),
     createdAt: data.createdAt || new Date().toISOString(),
     updatedAt: data.updatedAt || new Date().toISOString(),
   };

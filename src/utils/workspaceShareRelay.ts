@@ -1,3 +1,4 @@
+import { onAuthStateChanged } from 'firebase/auth';
 import {
   collection,
   doc,
@@ -11,6 +12,72 @@ import {
 } from 'firebase/firestore';
 import { getSignedInGoogleEmail } from './googleDriveService';
 import { firestoreAuth as auth, firestoreDb as db } from './firebaseFirestore';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+function isFirestorePermissionError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code || '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  return code === 'permission-denied' || /missing or insufficient permissions/i.test(message);
+}
+
+function buildFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null,
+): Error {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || [],
+    },
+    operationType,
+    path,
+  };
+  const serialized = JSON.stringify(errInfo);
+  console.error('Firestore Error: ', serialized);
+  return new Error(serialized);
+}
+
+function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null,
+): never {
+  throw buildFirestoreError(error, operationType, path);
+}
 
 const ACCESS_COLLECTION = 'workspaceAccess';
 const LEGACY_FAMILIES_COLLECTION = 'families';
@@ -128,13 +195,24 @@ function toAssignedFolder(assignment: HealthWorkspaceAssignment): HealthAssigned
 }
 
 async function readWorkspaceAccess(email: string): Promise<WorkspaceAccessRecord | null> {
-  const snapshot = await getDoc(doc(db, ACCESS_COLLECTION, normalizeEmail(email)));
-  return snapshot.exists() ? snapshot.data() as WorkspaceAccessRecord : null;
+  const cleanEmail = normalizeEmail(email);
+  const path = `${ACCESS_COLLECTION}/${cleanEmail}`;
+  try {
+    const snapshot = await getDoc(doc(db, ACCESS_COLLECTION, cleanEmail));
+    return snapshot.exists() ? snapshot.data() as WorkspaceAccessRecord : null;
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, path);
+  }
 }
 
 async function getLegacyFamilyById(familyId: string): Promise<LegacyFamilyRegistry | null> {
-  const snapshot = await getDoc(doc(db, LEGACY_FAMILIES_COLLECTION, familyId));
-  return snapshot.exists() ? snapshot.data() as LegacyFamilyRegistry : null;
+  const path = `${LEGACY_FAMILIES_COLLECTION}/${familyId}`;
+  try {
+    const snapshot = await getDoc(doc(db, LEGACY_FAMILIES_COLLECTION, familyId));
+    return snapshot.exists() ? snapshot.data() as LegacyFamilyRegistry : null;
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, path);
+  }
 }
 
 async function readLegacyAssignedFolder(email: string): Promise<HealthAssignedFolder | null> {
@@ -142,40 +220,70 @@ async function readLegacyAssignedFolder(email: string): Promise<HealthAssignedFo
   const uid = auth.currentUser?.uid;
 
   if (uid) {
-    const links = await getDocs(query(
-      collection(db, LEGACY_USER_LINKS_COLLECTION, uid, 'families'),
-      where('status', '==', 'active'),
-    ));
-    for (const link of links.docs) {
-      const familyId = String(link.data().familyId || link.id);
-      const family = await getLegacyFamilyById(familyId);
-      if (family?.status === 'active') {
-        return {
-          folderId: family.rootFolderId,
-          status: 'active',
-          adminEmail: normalizeEmail(family.adminEmail),
-          memberEmail: cleanEmail,
-          familyFileId: family.familyFileId,
-          updatedAt: family.updatedAt,
-        };
+    const linksPath = `${LEGACY_USER_LINKS_COLLECTION}/${uid}/families`;
+    try {
+      const links = await getDocs(query(
+        collection(db, LEGACY_USER_LINKS_COLLECTION, uid, 'families'),
+        where('status', '==', 'active'),
+      ));
+      for (const link of links.docs) {
+        const familyId = String(link.data().familyId || link.id);
+        try {
+          const family = await getLegacyFamilyById(familyId);
+          if (family?.status === 'active') {
+            return {
+              folderId: family.rootFolderId,
+              status: 'active',
+              adminEmail: normalizeEmail(family.adminEmail),
+              memberEmail: cleanEmail,
+              familyFileId: family.familyFileId,
+              updatedAt: family.updatedAt,
+            };
+          }
+        } catch (error) {
+          if (isFirestorePermissionError(error)) {
+            console.warn(`[WorkspaceAccess] Bỏ qua liên kết legacy không còn quyền truy cập (${familyId}).`);
+            continue;
+          }
+          throw error;
+        }
       }
+    } catch (error) {
+      if (isFirestorePermissionError(error)) {
+        return handleFirestoreError(error, OperationType.LIST, linksPath);
+      }
+      throw error;
     }
   }
 
-  const invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  const invitationPath = `${LEGACY_INVITATIONS_COLLECTION}/${cleanEmail}`;
+  let invitationSnapshot;
+  try {
+    invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, invitationPath);
+  }
   if (!invitationSnapshot.exists()) return null;
   const invitation = invitationSnapshot.data() as LegacyInvitation;
-  const family = await getLegacyFamilyById(invitation.familyId);
-  if (!family || family.status !== 'active') return null;
+  try {
+    const family = await getLegacyFamilyById(invitation.familyId);
+    if (!family || family.status !== 'active') return null;
 
-  return {
-    folderId: family.rootFolderId,
-    status: 'active',
-    adminEmail: normalizeEmail(family.adminEmail),
-    memberEmail: cleanEmail,
-    familyFileId: family.familyFileId,
-    updatedAt: family.updatedAt,
-  };
+    return {
+      folderId: family.rootFolderId,
+      status: 'active',
+      adminEmail: normalizeEmail(family.adminEmail),
+      memberEmail: cleanEmail,
+      familyFileId: family.familyFileId,
+      updatedAt: family.updatedAt,
+    };
+  } catch (error) {
+    if (isFirestorePermissionError(error)) {
+      console.warn(`[WorkspaceAccess] Lời mời legacy (${invitation.familyId}) không còn quyền truy cập.`);
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function readLegacyWorkspaceAssignment(email: string): Promise<HealthWorkspaceAssignment | null> {
@@ -183,7 +291,13 @@ async function readLegacyWorkspaceAssignment(email: string): Promise<HealthWorks
   if (!folder) return null;
 
   const cleanEmail = normalizeEmail(email);
-  const invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  const invitationPath = `${LEGACY_INVITATIONS_COLLECTION}/${cleanEmail}`;
+  let invitationSnapshot;
+  try {
+    invitationSnapshot = await getDoc(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, invitationPath);
+  }
   const invitation = invitationSnapshot.exists()
     ? invitationSnapshot.data() as LegacyInvitation
     : null;
@@ -215,8 +329,14 @@ export async function registerHealthWorkspaceRelay(
     throw new Error('Email Admin không khớp với tài khoản Google đang đăng nhập.');
   }
 
+  const accessPath = `${ACCESS_COLLECTION}/${cleanEmail}`;
   const accessRef = doc(db, ACCESS_COLLECTION, cleanEmail);
-  const existingSnapshot = await getDoc(accessRef);
+  let existingSnapshot;
+  try {
+    existingSnapshot = await getDoc(accessRef);
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, accessPath);
+  }
   const existing = existingSnapshot.exists()
     ? existingSnapshot.data() as WorkspaceAccessRecord
     : null;
@@ -240,7 +360,11 @@ export async function registerHealthWorkspaceRelay(
     migrationComplete: sameWorkspace && existing?.status === 'active' && existing.migrationComplete === true,
     source: 'family_member',
   };
-  await setDoc(accessRef, record, { merge: true });
+  try {
+    await setDoc(accessRef, record, { merge: true });
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.WRITE, accessPath);
+  }
 }
 
 export async function publishHealthWorkspaceAssignments(
@@ -259,8 +383,14 @@ export async function publishHealthWorkspaceAssignments(
     throw new Error('Chỉ Admin đang đăng nhập mới được cập nhật danh sách thành viên.');
   }
 
+  const adminPath = `${ACCESS_COLLECTION}/${cleanAdminEmail}`;
   const adminRef = doc(db, ACCESS_COLLECTION, cleanAdminEmail);
-  const adminSnapshot = await getDoc(adminRef);
+  let adminSnapshot;
+  try {
+    adminSnapshot = await getDoc(adminRef);
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.GET, adminPath);
+  }
   if (
     !adminSnapshot.exists() ||
     adminSnapshot.data()?.adminUid !== adminUid ||
@@ -300,7 +430,11 @@ export async function publishHealthWorkspaceAssignments(
       ...(member.source ? { source: member.source } : {}),
     }, { merge: true });
   }
-  await batch.commit();
+  try {
+    await batch.commit();
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.WRITE, ACCESS_COLLECTION);
+  }
 }
 
 export async function readHealthAssignedFolder(email: string): Promise<HealthAssignedFolder | null> {
@@ -327,10 +461,16 @@ export async function findAdminWorkspaceRelay(email: string): Promise<{ rootFold
 
 export async function listHealthWorkspaceAssignments(familyId: string): Promise<HealthWorkspaceAssignment[]> {
   const uid = authenticatedUid();
-  const accessSnapshot = await getDocs(query(
-    collection(db, ACCESS_COLLECTION),
-    where('adminUid', '==', uid),
-  ));
+  const cleanAdminEmail = authenticatedEmail();
+  let accessSnapshot;
+  try {
+    accessSnapshot = await getDocs(query(
+      collection(db, ACCESS_COLLECTION),
+      where('adminUid', '==', uid),
+    ));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.LIST, ACCESS_COLLECTION);
+  }
   const records = new Map<string, HealthWorkspaceAssignment>();
   const activeAccessRecords = accessSnapshot.docs
     .map(snapshot => snapshot.data() as WorkspaceAccessRecord)
@@ -345,10 +485,16 @@ export async function listHealthWorkspaceAssignments(familyId: string): Promise<
   );
   if (adminRecord?.migrationComplete) return [...records.values()];
 
-  const legacyInvitations = await getDocs(query(
-    collection(db, LEGACY_INVITATIONS_COLLECTION),
-    where('familyId', '==', familyId),
-  ));
+  let legacyInvitations;
+  try {
+    legacyInvitations = await getDocs(query(
+      collection(db, LEGACY_INVITATIONS_COLLECTION),
+      where('familyId', '==', familyId),
+      where('adminEmail', '==', cleanAdminEmail),
+    ));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.LIST, LEGACY_INVITATIONS_COLLECTION);
+  }
   for (const snapshot of legacyInvitations.docs) {
     const invitation = snapshot.data() as LegacyInvitation;
     const email = normalizeEmail(snapshot.id);
@@ -388,10 +534,15 @@ export async function removeHealthWorkspaceAssignment(familyId: string, memberEm
     throw new Error('Không thể thu hồi quyền của Admin đang quản lý Workspace.');
   }
 
-  const ownedAccessRecords = await getDocs(query(
-    collection(db, ACCESS_COLLECTION),
-    where('adminUid', '==', authenticatedUid()),
-  ));
+  let ownedAccessRecords;
+  try {
+    ownedAccessRecords = await getDocs(query(
+      collection(db, ACCESS_COLLECTION),
+      where('adminUid', '==', authenticatedUid()),
+    ));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.LIST, ACCESS_COLLECTION);
+  }
   const accessRecord = ownedAccessRecords.docs.find(snapshot => {
     const data = snapshot.data() as WorkspaceAccessRecord;
     return data.email === cleanEmail && data.rootFolderId === familyId;
@@ -399,16 +550,26 @@ export async function removeHealthWorkspaceAssignment(familyId: string, memberEm
   const batch = writeBatch(db);
   if (accessRecord) batch.delete(accessRecord.ref);
   batch.delete(doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail));
-  await batch.commit();
+  try {
+    await batch.commit();
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.DELETE, `${ACCESS_COLLECTION}/${cleanEmail}`);
+  }
 }
 
 export async function unregisterHealthWorkspace(familyId: string): Promise<void> {
   await assertWorkspaceAdmin(familyId);
   const uid = authenticatedUid();
-  const accessSnapshot = await getDocs(query(
-    collection(db, ACCESS_COLLECTION),
-    where('adminUid', '==', uid),
-  ));
+  const cleanAdminEmail = authenticatedEmail();
+  let accessSnapshot;
+  try {
+    accessSnapshot = await getDocs(query(
+      collection(db, ACCESS_COLLECTION),
+      where('adminUid', '==', uid),
+    ));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.LIST, ACCESS_COLLECTION);
+  }
   const batch = writeBatch(db);
   const now = Date.now();
   for (const snapshot of accessSnapshot.docs) {
@@ -418,12 +579,22 @@ export async function unregisterHealthWorkspace(familyId: string): Promise<void>
     }
   }
 
-  const legacyInvitations = await getDocs(query(
-    collection(db, LEGACY_INVITATIONS_COLLECTION),
-    where('familyId', '==', familyId),
-  ));
+  let legacyInvitations;
+  try {
+    legacyInvitations = await getDocs(query(
+      collection(db, LEGACY_INVITATIONS_COLLECTION),
+      where('familyId', '==', familyId),
+      where('adminEmail', '==', cleanAdminEmail),
+    ));
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.LIST, LEGACY_INVITATIONS_COLLECTION);
+  }
   for (const invitation of legacyInvitations.docs) batch.delete(invitation.ref);
-  await batch.commit();
+  try {
+    await batch.commit();
+  } catch (error) {
+    return handleFirestoreError(error, OperationType.WRITE, ACCESS_COLLECTION);
+  }
 }
 
 export function subscribeHealthWorkspaceAssignments(
@@ -432,50 +603,80 @@ export function subscribeHealthWorkspaceAssignments(
   onError?: (error: Error) => void,
 ): () => void {
   const cleanEmail = normalizeEmail(email);
-  const accessRef = doc(db, ACCESS_COLLECTION, cleanEmail);
-  const legacyInviteRef = doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail);
+  const accessPath = `${ACCESS_COLLECTION}/${cleanEmail}`;
+  const legacyInvitePath = `${LEGACY_INVITATIONS_COLLECTION}/${cleanEmail}`;
   let hasCurrentRecord = false;
   let disposed = false;
+  let unsubscribeAccess: (() => void) | undefined;
+  let unsubscribeLegacy: (() => void) | undefined;
 
-  const reportError = (error: unknown) => {
-    const normalizedError = error instanceof Error ? error : new Error(String(error));
+  const reportError = (error: unknown, path: string | null = accessPath) => {
+    const normalizedError = isFirestorePermissionError(error)
+      ? buildFirestoreError(error, OperationType.GET, path)
+      : error instanceof Error
+        ? error
+        : new Error(String(error));
     console.error('[WorkspaceAccess] Subscription error:', normalizedError);
     onError?.(normalizedError);
   };
 
-  const unsubscribeAccess = onSnapshot(accessRef, snapshot => {
-    hasCurrentRecord = snapshot.exists();
-    if (snapshot.exists()) {
-      try {
-        onAssignmentChange(toAssignment(snapshot.data() as WorkspaceAccessRecord));
-      } catch (error) {
-        reportError(error);
-      }
-      return;
-    }
-    void readLegacyWorkspaceAssignment(cleanEmail)
-      .then(assignment => {
-        if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
-      })
-      .catch(reportError);
-  }, reportError);
+  const attachListeners = () => {
+    if (disposed || unsubscribeAccess) return;
+    const accessRef = doc(db, ACCESS_COLLECTION, cleanEmail);
+    const legacyInviteRef = doc(db, LEGACY_INVITATIONS_COLLECTION, cleanEmail);
 
-  const unsubscribeLegacy = onSnapshot(legacyInviteRef, snapshot => {
-    if (hasCurrentRecord) return;
-    if (!snapshot.exists()) {
-      onAssignmentChange(null);
-      return;
-    }
-    void readLegacyWorkspaceAssignment(cleanEmail)
-      .then(assignment => {
-        if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
-      })
-      .catch(reportError);
-  }, reportError);
+    unsubscribeAccess = onSnapshot(accessRef, snapshot => {
+      hasCurrentRecord = snapshot.exists();
+      if (snapshot.exists()) {
+        try {
+          onAssignmentChange(toAssignment(snapshot.data() as WorkspaceAccessRecord));
+        } catch (error) {
+          reportError(error, accessPath);
+        }
+        return;
+      }
+      void readLegacyWorkspaceAssignment(cleanEmail)
+        .then(assignment => {
+          if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
+        })
+        .catch(error => reportError(error, legacyInvitePath));
+    }, error => reportError(error, accessPath));
+
+    unsubscribeLegacy = onSnapshot(legacyInviteRef, snapshot => {
+      if (hasCurrentRecord) return;
+      if (!snapshot.exists()) {
+        onAssignmentChange(null);
+        return;
+      }
+      void readLegacyWorkspaceAssignment(cleanEmail)
+        .then(assignment => {
+          if (!disposed && !hasCurrentRecord) onAssignmentChange(assignment);
+        })
+        .catch(error => reportError(error, legacyInvitePath));
+    }, error => reportError(error, legacyInvitePath));
+  };
+
+  const isAuthEmailMatched = () =>
+    Boolean(auth.currentUser?.email && normalizeEmail(auth.currentUser.email) === cleanEmail);
+
+  let unsubscribeAuth: (() => void) | undefined;
+  if (isAuthEmailMatched() || typeof (auth as { onAuthStateChanged?: unknown }).onAuthStateChanged !== 'function') {
+    attachListeners();
+  } else {
+    unsubscribeAuth = onAuthStateChanged(auth, user => {
+      if (disposed) return;
+      if (user?.email && normalizeEmail(user.email) === cleanEmail) {
+        unsubscribeAuth?.();
+        unsubscribeAuth = undefined;
+        attachListeners();
+      }
+    });
+  }
 
   return () => {
     disposed = true;
-    unsubscribeAccess();
-    unsubscribeLegacy();
+    unsubscribeAuth?.();
+    unsubscribeAccess?.();
+    unsubscribeLegacy?.();
   };
 }

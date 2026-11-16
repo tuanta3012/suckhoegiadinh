@@ -5,8 +5,9 @@ import {
   getValidGoogleAccessToken,
   trySilentRefresh,
 } from './googleDriveService';
-import type { FamilyMember, HealthFamily, HealthProfile } from '../types';
+import type { FamilyMember, HealthFamily, HealthProfile, HealthSource } from '../types';
 import {
+  addHealthSource,
   canDeleteRawSource,
   excludeDeletedFamilyMembers,
   mergeFamilyMemberTombstones,
@@ -2137,3 +2138,177 @@ export async function cleanupDuplicateRawFilesOnDrive(
 
   return { deletedFilesCount, freedSpaceBytes, cleanedFilesDetails };
 }
+
+export interface WorkspaceSyncVersionSnapshot {
+  familyVersion: string;
+  profileVersions: Record<string, string>;
+  digest: string;
+}
+
+interface DriveVersionMetadata {
+  id: string;
+  name?: string;
+  modifiedTime?: string;
+  version?: string;
+  headRevisionId?: string;
+}
+
+function buildVersionToken(meta?: Partial<DriveVersionMetadata> | null): string {
+  if (!meta) return '';
+  return [meta.version || '', meta.modifiedTime || '', meta.headRevisionId || ''].join(':');
+}
+
+/**
+ * Kiểm tra nhẹ metadata (modifiedTime / version / headRevisionId) của family.json
+ * và thư mục profiles trên Google Drive mà không cần tải nội dung tệp JSON.
+ */
+export async function fetchWorkspaceSyncVersionSnapshot(
+  workspace: HealthDriveWorkspace,
+): Promise<WorkspaceSyncVersionSnapshot> {
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return { familyVersion: '', profileVersions: {}, digest: '' };
+  }
+
+  const profileQueryParams = new URLSearchParams({
+    q: driveQuery(workspace.family.profilesFolderId),
+    fields: 'files(id,name,modifiedTime,version,headRevisionId)',
+    pageSize: '1000',
+    supportsAllDrives: 'true',
+    includeItemsFromAllDrives: 'true',
+  });
+
+  const [familyMeta, profilesList] = await Promise.all([
+    driveRequest<DriveVersionMetadata>(
+      `${DRIVE_API}/files/${encodeURIComponent(workspace.familyFileId)}?fields=id,modifiedTime,version,headRevisionId&supportsAllDrives=true`,
+    ),
+    driveRequest<{ files?: DriveVersionMetadata[] }>(
+      `${DRIVE_API}/files?${profileQueryParams.toString()}`,
+    ),
+  ]);
+
+  const familyVersion = buildVersionToken(familyMeta);
+  const profileVersions: Record<string, string> = {};
+  for (const file of profilesList.files || []) {
+    if (file.id) {
+      profileVersions[file.id] = buildVersionToken(file);
+    }
+  }
+
+  const sortedProfileDigest = Object.entries(profileVersions)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, token]) => `${id}=${token}`)
+    .join('|');
+
+  return {
+    familyVersion,
+    profileVersions,
+    digest: `${workspace.rootFolderId}#${familyVersion}#${sortedProfileDigest}`,
+  };
+}
+
+export interface OrphanRawFileDetail {
+  memberId: string;
+  memberName: string;
+  fileId: string;
+  fileName: string;
+}
+
+export interface OrphanRawFileReconciliationResult {
+  recoveredCount: number;
+  updatedProfiles: Record<string, HealthProfile>;
+  details: OrphanRawFileDetail[];
+}
+
+function collectTrackedSourceIdsForProfile(profile: HealthProfile): Set<string> {
+  const tracked = new Set<string>();
+  for (const source of profile.sources || []) {
+    if (source.driveFileId) tracked.add(source.driveFileId);
+    for (const contrib of source.sourceContributions || []) {
+      if (contrib.sourceDriveFileId) tracked.add(contrib.sourceDriveFileId);
+    }
+  }
+  for (const event of profile.timeline || []) {
+    if (event.sourceFileId) tracked.add(event.sourceFileId);
+    for (const extra of event.additionalSources || []) {
+      if (extra.driveFileId) tracked.add(extra.driveFileId);
+    }
+  }
+  return tracked;
+}
+
+/**
+ * Đối chiếu nhẹ thư mục raw_files/ của từng thành viên khi đồng bộ thủ công
+ * để phát hiện các tệp mồ côi (đã tải lên Drive nhưng chưa ghi vào profile.sources).
+ */
+export async function reconcileOrphanRawFilesForWorkspace(
+  workspace: HealthDriveWorkspace,
+  profiles: Record<string, HealthProfile>,
+): Promise<OrphanRawFileReconciliationResult> {
+  if (workspace.rootFolderId === LOCAL_WORKSPACE_ID) {
+    return { recoveredCount: 0, updatedProfiles: {}, details: [] };
+  }
+
+  const updatedProfiles: Record<string, HealthProfile> = {};
+  const details: OrphanRawFileDetail[] = [];
+
+  for (const member of workspace.family.members) {
+    if (
+      !member.driveFolderId ||
+      member.driveFolderId.startsWith('local_') ||
+      !member.profileFileId ||
+      isLocalProfileFileId(member.profileFileId)
+    ) {
+      continue;
+    }
+
+    const baseProfile = profiles[member.id];
+    if (!baseProfile) continue;
+
+    try {
+      const rawFiles = await listRawFiles(member);
+      if (!rawFiles || rawFiles.length === 0) continue;
+
+      const trackedIds = collectTrackedSourceIdsForProfile(baseProfile);
+      let nextProfile = baseProfile;
+      const memberOrphans: OrphanRawFileDetail[] = [];
+
+      for (const file of rawFiles) {
+        if (!file.id || file.trashed || file.mimeType === FOLDER_MIME) continue;
+        if (trackedIds.has(file.id)) continue;
+
+        const orphanSource: HealthSource = {
+          driveFileId: file.id,
+          fileName: file.name || 'Tài liệu y tế',
+          mimeType: file.mimeType || 'application/octet-stream',
+          uploadedAt: file.createdTime || file.modifiedTime || new Date().toISOString(),
+          status: 'pending',
+          ...(file.size && Number.isFinite(Number(file.size)) ? { fileSize: Number(file.size) } : {}),
+          ...(file.md5Checksum ? { fileHash: file.md5Checksum } : {}),
+        };
+        nextProfile = addHealthSource(nextProfile, orphanSource);
+        trackedIds.add(file.id);
+        memberOrphans.push({
+          memberId: member.id,
+          memberName: member.name,
+          fileId: file.id,
+          fileName: orphanSource.fileName,
+        });
+      }
+
+      if (memberOrphans.length > 0) {
+        const saved = await saveHealthProfile(member.profileFileId, nextProfile);
+        updatedProfiles[member.id] = saved;
+        details.push(...memberOrphans);
+      }
+    } catch (error) {
+      console.warn(`[Orphan Reconcile] Không thể đối chiếu raw_files của ${member.name}:`, error);
+    }
+  }
+
+  return {
+    recoveredCount: details.length,
+    updatedProfiles,
+    details,
+  };
+}
+

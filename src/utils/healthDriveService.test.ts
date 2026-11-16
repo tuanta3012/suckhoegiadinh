@@ -3,14 +3,17 @@ import {
   ensureDriveFolderAccess,
   deleteDriveFile,
   deleteDriveFamilyMember,
+  fetchWorkspaceSyncVersionSnapshot,
   findExistingHealthWorkspace,
   openHealthWorkspace,
   openAssignedHealthWorkspace,
+  reconcileOrphanRawFilesForWorkspace,
   resolveSingleFamilyManifestFile,
   stampHealthWorkspaceFolder,
   syncHealthWorkspaceMemberAssignments,
   updateDriveFamilyMember,
 } from './healthDriveService';
+import { createHealthProfile } from './healthProfile';
 import {
   findAdminWorkspaceRelay,
   listHealthWorkspaceAssignments,
@@ -854,6 +857,149 @@ describe('resolveSingleFamilyManifestFile', () => {
       expect(found?.rootFolderId).toBe('folder-real');
       expect(found?.family.members).toHaveLength(1);
       expect(registerHealthWorkspaceRelay).toHaveBeenCalledWith('folder-real', 'family-real', 'user@example.com');
+    });
+  });
+
+  describe('fetchWorkspaceSyncVersionSnapshot & reconcileOrphanRawFilesForWorkspace', () => {
+    const originalFetch = globalThis.fetch;
+    const workspace = {
+      rootFolderId: 'workspace-sync-1',
+      familyFileId: 'family-sync-1',
+      family: {
+        schemaVersion: 1 as const,
+        adminEmail: 'user@example.com',
+        rawFilesFolderId: 'raw-root-1',
+        profilesFolderId: 'profiles-root-1',
+        members: [
+          {
+            id: 'member-1',
+            name: 'Anh Tuấn',
+            role: 'father',
+            email: 'user@example.com',
+            driveFolderId: 'raw-folder-1',
+            profileFileId: 'profile-file-1',
+          },
+        ],
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('detects remote Drive changes using lightweight modifiedTime/version metadata requests', async () => {
+      let profileModifiedTime = '2026-11-16T08:00:00.000Z';
+      globalThis.fetch = vi.fn().mockImplementation(async (rawUrl: string) => {
+        const url = new URL(rawUrl);
+        if (url.pathname.endsWith('/family-sync-1')) {
+          return new Response(JSON.stringify({
+            id: 'family-sync-1',
+            modifiedTime: '2026-11-16T07:00:00.000Z',
+            version: '3',
+          }), { status: 200 });
+        }
+        if (url.pathname.endsWith('/files')) {
+          return new Response(JSON.stringify({
+            files: [
+              {
+                id: 'profile-file-1',
+                name: 'member-1.json',
+                modifiedTime: profileModifiedTime,
+                version: '5',
+              },
+            ],
+          }), { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const firstSnapshot = await fetchWorkspaceSyncVersionSnapshot(workspace);
+      const repeatSnapshot = await fetchWorkspaceSyncVersionSnapshot(workspace);
+      expect(firstSnapshot.digest).toBe(repeatSnapshot.digest);
+
+      profileModifiedTime = '2026-11-16T08:05:00.000Z';
+      const changedSnapshot = await fetchWorkspaceSyncVersionSnapshot(workspace);
+      expect(changedSnapshot.digest).not.toBe(firstSnapshot.digest);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(6);
+    });
+
+    it('detects orphan files in raw_files and appends them as pending sources into profile.sources', async () => {
+      const existingProfile = {
+        ...createHealthProfile(workspace.family.members[0]),
+        sources: [
+          {
+            driveFileId: 'tracked-file-1',
+            fileName: 'tracked.pdf',
+            mimeType: 'application/pdf',
+            uploadedAt: '2026-11-10T08:00:00.000Z',
+            status: 'processed' as const,
+          },
+        ],
+      };
+
+      let savedBodyText = '';
+      globalThis.fetch = vi.fn().mockImplementation(async (rawUrl: string, init?: RequestInit) => {
+        const url = new URL(rawUrl);
+        if (url.pathname.endsWith('/files') && url.searchParams.has('q')) {
+          return new Response(JSON.stringify({
+            files: [
+              {
+                id: 'tracked-file-1',
+                name: 'tracked.pdf',
+                mimeType: 'application/pdf',
+                createdTime: '2026-11-10T08:00:00.000Z',
+              },
+              {
+                id: 'orphan-file-99',
+                name: 'phieu-kham-bi-sot.pdf',
+                mimeType: 'application/pdf',
+                createdTime: '2026-11-16T09:00:00.000Z',
+                size: '45678',
+                md5Checksum: 'abc123',
+              },
+            ],
+          }), { status: 200 });
+        }
+        if (url.pathname.endsWith('/profile-file-1') && url.searchParams.get('alt') === 'media') {
+          return new Response(JSON.stringify(existingProfile), {
+            status: 200,
+            headers: { etag: '"etag-1"' },
+          });
+        }
+        if (url.pathname.endsWith('/profile-file-1') && init?.method === 'PATCH') {
+          savedBodyText = typeof init.body === 'string'
+            ? init.body
+            : init.body instanceof Blob
+              ? await init.body.text()
+              : '';
+          return new Response(JSON.stringify({
+            id: 'profile-file-1',
+            name: 'member-1.json',
+            mimeType: 'application/json',
+            createdTime: '2026-11-10T08:00:00.000Z',
+          }), { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const result = await reconcileOrphanRawFilesForWorkspace(workspace, {
+        'member-1': existingProfile,
+      });
+
+      expect(result.recoveredCount).toBe(1);
+      expect(result.details).toEqual([
+        {
+          memberId: 'member-1',
+          memberName: 'Anh Tuấn',
+          fileId: 'orphan-file-99',
+          fileName: 'phieu-kham-bi-sot.pdf',
+        },
+      ]);
+      const reconciledSources = result.updatedProfiles['member-1'].sources;
+      expect(reconciledSources.some((s) => s.driveFileId === 'orphan-file-99' && s.status === 'pending')).toBe(true);
+      expect(savedBodyText).toContain('orphan-file-99');
     });
   });
 });

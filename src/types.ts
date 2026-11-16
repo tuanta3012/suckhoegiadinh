@@ -114,12 +114,21 @@ export interface HealthSource {
   processedPages?: number;
   contentIndexPages?: string[];
   contentIndexComplete?: boolean;
+  mergedIntoFileId?: string;
+  mergedIntoFileName?: string;
+  mergedDisposition?: 'included' | 'duplicate';
+  mergedReason?: string;
   sourceContributions?: Array<{
     fileName: string;
     fileHash: string;
     hashAlgorithm: 'sha256' | 'md5';
     uploadedAt: string;
     disposition: 'included' | 'duplicate';
+    reason?: string;
+    fileSize?: number;
+    totalPages?: number;
+    mergedIntoEventId?: string;
+    sourceDriveFileId?: string;
   }>;
 }
 
@@ -191,6 +200,7 @@ export interface AiDeepAnalysisResult {
 
 export interface AiAnalysisBlock {
   lastAnalyzedDate?: string;
+  analyzedAt?: string;
   overviewSummary?: string;
   criticalAlerts?: string[];
   chronicConditionsTracking?: string[];
@@ -205,11 +215,14 @@ export interface HealthProfile {
   schemaVersion: 1 | 2;
   member: FamilyMember;
   medicalHistory?: MedicalHistory;
+  medicalHistoryUpdatedAt?: string;
   timeline: HealthEvent[];
+  timelineUpdatedAt?: string;
   sources: HealthSource[];
   summary: HealthSummary;
   aiDeepAnalysis?: AiDeepAnalysisResult;
   aiAnalysis?: AiAnalysisBlock;
+  aiAnalysisInvalidatedAt?: string;
   createdAt: string;
   updatedAt: string;
   syncPending?: boolean;

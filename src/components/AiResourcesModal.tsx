@@ -10,6 +10,7 @@ import {
   testGeminiApiKey,
 } from '../utils/geminiSharedResources';
 import { BackPriority, useBackHandler } from '../utils/backNavigation';
+import { digitizationLogger } from '../utils/digitizationLogger';
 
 interface AiResourcesModalProps {
   isOpen: boolean;
@@ -53,6 +54,13 @@ export function AiResourcesModal({ isOpen, folderId, isAdmin, onClose }: AiResou
       active = false;
     };
   }, [canEdit, folderId, isOpen]);
+
+  useEffect(() => {
+    if (!error) return;
+    digitizationLogger.log('error', 'ai_resources_error', error);
+    const timer = window.setTimeout(() => setError(''), 1000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
 
   useBackHandler(
     isOpen,

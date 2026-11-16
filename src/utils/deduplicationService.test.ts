@@ -254,6 +254,83 @@ describe('Deduplication Service', () => {
       );
       expect(match).toBeNull();
     });
+
+    it('detects exact re-upload of a file previously absorbed into canonical sourceContributions', () => {
+      const absorbedHash = '9999999999999999999999999999999999999999999999999999999999999999';
+      const profileWithContribution: HealthProfile = {
+        ...mockProfile,
+        sources: [
+          {
+            ...mockProfile.sources[0],
+            sourceContributions: [
+              {
+                fileName: 'Xet nghiem mau 2026 tuanta.pdf',
+                fileHash: absorbedHash,
+                hashAlgorithm: 'sha256',
+                uploadedAt: '2026-11-16T00:47:50.000Z',
+                disposition: 'included',
+                reason: 'Nội dung là một phần nằm trọn trong tài liệu đầy đủ hơn',
+                mergedIntoEventId: 'ev_1',
+              },
+            ],
+          },
+        ],
+      };
+
+      const match = detectDuplicateFile(
+        { name: 'Xet nghiem mau 2026 tuanta.pdf', size: 338503 },
+        absorbedHash,
+        profileWithContribution,
+      );
+
+      expect(match).not.toBeNull();
+      expect(match?.isExactContentMatch).toBe(true);
+      expect(match?.existingSource.driveFileId).toBe('file_drive_1');
+      expect(match?.matchedContribution?.fileName).toBe('Xet nghiem mau 2026 tuanta.pdf');
+      expect(match?.linkedEvent?.id).toBe('ev_1');
+    });
+
+    it('resolves canonical source and linked event when a trashed duplicate source is re-uploaded', () => {
+      const trashedHash = '8888888888888888888888888888888888888888888888888888888888888888';
+      const profileWithTrashedDup: HealthProfile = {
+        ...mockProfile,
+        timeline: [
+          {
+            ...mockProfile.timeline[0],
+            additionalSources: [
+              { driveFileId: 'file_drive_1', fileName: 'tuanta-2025.pdf' },
+              { driveFileId: 'file_drive_trashed', fileName: 'Xet nghiem mau 2025 tuanta.pdf' },
+            ],
+          },
+        ],
+        sources: [
+          { ...mockProfile.sources[0], fileName: 'tuanta-2025.pdf' },
+          {
+            driveFileId: 'file_drive_trashed',
+            fileName: 'Xet nghiem mau 2025 tuanta.pdf',
+            fileSize: 726500,
+            fileHash: trashedHash,
+            mimeType: 'application/pdf',
+            uploadedAt: '2026-11-16T00:46:22.000Z',
+            status: 'processed',
+            rawDeletedAt: '2026-11-16T00:46:39.000Z',
+            mergedIntoFileId: 'file_drive_1',
+            mergedIntoFileName: 'tuanta-2025.pdf',
+            mergedDisposition: 'included',
+          },
+        ],
+      };
+
+      const match = detectDuplicateFile(
+        { name: 'Xet nghiem mau 2025 tuanta.pdf', size: 726500 },
+        trashedHash,
+        profileWithTrashedDup,
+      );
+
+      expect(match).not.toBeNull();
+      expect(match?.existingSource.driveFileId).toBe('file_drive_1');
+      expect(match?.linkedEvent?.id).toBe('ev_1');
+    });
   });
 
   describe('Event Duplicate Detection & Smart Merge', () => {

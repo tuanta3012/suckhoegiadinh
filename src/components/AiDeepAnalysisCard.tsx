@@ -28,6 +28,7 @@ interface AiDeepAnalysisCardProps {
   onRetry?: () => void;
   onRefine?: () => void;
   isRefining?: boolean;
+  isInvalidated?: boolean;
   error?: string;
 }
 
@@ -55,6 +56,7 @@ export function AiDeepAnalysisCard({
   onRetry,
   onRefine,
   isRefining,
+  isInvalidated,
   error,
 }: AiDeepAnalysisCardProps) {
   if (!analysis && !aiAnalysis) {
@@ -107,6 +109,14 @@ export function AiDeepAnalysisCard({
           </div>
         ) : (
           <div className="space-y-2.5">
+            {isInvalidated && (
+              <div className="rounded-xl bg-amber-50 border border-amber-200/80 px-3 py-2 flex items-start gap-2 text-xs text-amber-900">
+                <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  Hồ sơ khám vừa cập nhật — phân tích AI trước đó đã được làm mới. Bấm nút bên dưới để phân tích lại.
+                </p>
+              </div>
+            )}
             <div className="text-xs text-slate-600">
               <AnalysisBullet label="Tóm tắt">
                 {narrativeSummary || 'Chưa có phân tích AI. Bấm nút bên dưới để tổng hợp hồ sơ.'}

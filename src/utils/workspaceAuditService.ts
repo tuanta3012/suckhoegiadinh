@@ -235,13 +235,20 @@ export async function cleanupWorkspaceDuplicates(
         if (!canonicalSource) continue;
         const sourceContributions = [
           ...(canonicalSource.sourceContributions || []),
-          ...duplicateFiles.map((file) => ({
-            fileName: file.name,
-            fileHash: file.md5Checksum || checksum,
-            hashAlgorithm: 'md5' as const,
-            uploadedAt: file.createdTime || now,
-            disposition: 'duplicate' as const,
-          })),
+          ...duplicateFiles.map((file) => {
+            const dupSource = profile.sources.find((item) => item.driveFileId === file.id);
+            return {
+              fileName: file.name,
+              fileHash: file.md5Checksum || checksum,
+              hashAlgorithm: 'md5' as const,
+              uploadedAt: file.createdTime || now,
+              disposition: 'duplicate' as const,
+              reason: 'Trùng chính xác checksum MD5 với tệp gốc đã lưu',
+              fileSize: dupSource?.fileSize ?? (file.size ? Number(file.size) : undefined),
+              totalPages: dupSource?.totalPages,
+              sourceDriveFileId: file.id,
+            };
+          }),
         ].filter((item, index, list) =>
           list.findIndex((candidate) =>
             candidate.fileHash === item.fileHash &&
@@ -293,6 +300,10 @@ export async function cleanupWorkspaceDuplicates(
                       status: 'processed' as const,
                       digitizedAt: source.digitizedAt || canonicalSource.digitizedAt,
                       rawDeletedAt: deleteTime,
+                      mergedIntoFileId: canonical.id,
+                      mergedIntoFileName: canonical.name,
+                      mergedDisposition: 'duplicate' as const,
+                      mergedReason: 'Trùng chính xác nội dung tệp gốc trên Drive',
                     }
                   : source,
               ),
@@ -395,12 +406,21 @@ export async function cleanupWorkspaceDuplicates(
           }
 
           const now = new Date().toISOString();
+          const disposition = (containmentRelation === 'equivalent' ? 'duplicate' : 'included') as 'duplicate' | 'included';
+          const reason =
+            disposition === 'duplicate'
+              ? 'Trùng toàn bộ nội dung với tài liệu đã lưu'
+              : 'Nội dung nằm trọn trong tài liệu đầy đủ hơn';
           const contribution = {
             fileName: redundant.fileName,
             fileHash: redundant.fileHash || '',
             hashAlgorithm: 'sha256' as const,
             uploadedAt: redundant.uploadedAt,
-            disposition: (containmentRelation === 'equivalent' ? 'duplicate' : 'included') as 'duplicate' | 'included',
+            disposition,
+            reason,
+            fileSize: redundant.fileSize,
+            totalPages: redundant.totalPages,
+            sourceDriveFileId: redundant.driveFileId,
           };
           const canonicalContributions = [
             ...(canonical.sourceContributions || []),
@@ -451,7 +471,14 @@ export async function cleanupWorkspaceDuplicates(
               ...prepared,
               sources: prepared.sources.map((source) =>
                 source.driveFileId === redundant.driveFileId
-                  ? { ...source, rawDeletedAt: deleteTime }
+                  ? {
+                      ...source,
+                      rawDeletedAt: deleteTime,
+                      mergedIntoFileId: canonical.driveFileId,
+                      mergedIntoFileName: canonical.fileName,
+                      mergedDisposition: disposition,
+                      mergedReason: reason,
+                    }
                   : source,
               ),
               updatedAt: deleteTime,

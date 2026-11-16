@@ -48,9 +48,14 @@ interface ManagedRawEntry {
   key: string;
   member: FamilyMember;
   source: HealthSource;
+  canonicalSource?: HealthSource;
+  absorbedContribution?: NonNullable<HealthSource['sourceContributions']>[number];
   recoveryJob?: OcrRecoveryJob;
   isProcessed: boolean;
   isErrorOrPending: boolean;
+  isMergedAway: boolean;
+  mergedBadgeLabel?: string;
+  mergedDescription?: string;
   errorHint?: string;
 }
 
@@ -127,9 +132,57 @@ export function RawFilesManagerModal({
         ]),
       );
 
+      const resolveCanonicalForDeletedSource = (deletedSource: HealthSource): HealthSource | undefined => {
+        if (deletedSource.mergedIntoFileId) {
+          const direct = sources.find(
+            (candidate) => candidate.driveFileId === deletedSource.mergedIntoFileId && !candidate.rawDeletedAt,
+          );
+          if (direct) return direct;
+        }
+        const byContribution = sources.find(
+          (candidate) =>
+            !candidate.rawDeletedAt &&
+            !candidate.relocatedToMemberId &&
+            candidate.sourceContributions?.some(
+              (item) =>
+                (item.sourceDriveFileId && item.sourceDriveFileId === deletedSource.driveFileId) ||
+                (deletedSource.fileHash && item.fileHash === deletedSource.fileHash) ||
+                item.fileName === deletedSource.fileName,
+            ),
+        );
+        if (byContribution) return byContribution;
+
+        const linkedTimelineEvent = (prof?.timeline || []).find(
+          (ev) =>
+            ev.sourceFileId === deletedSource.driveFileId ||
+            ev.additionalSources?.some((item) => item.driveFileId === deletedSource.driveFileId),
+        );
+        if (linkedTimelineEvent) {
+          return sources.find(
+            (candidate) =>
+              candidate.driveFileId === linkedTimelineEvent.sourceFileId &&
+              candidate.driveFileId !== deletedSource.driveFileId &&
+              !candidate.rawDeletedAt,
+          );
+        }
+        return undefined;
+      };
+
+      const representedContributionKeys = new Set<string>();
+      const seenFileNamesForMember = new Set<string>();
+
       for (const source of sources) {
         if (source.relocatedToMemberId || seenFileIds.has(source.driveFileId)) continue;
         seenFileIds.add(source.driveFileId);
+        representedContributionKeys.add(`id:${source.driveFileId}`);
+        if (source.fileHash) representedContributionKeys.add(`hash:${source.fileHash}`);
+        if (source.fileName) {
+          const normName = source.fileName.trim().toLowerCase();
+          representedContributionKeys.add(`name:${normName}`);
+          if (!source.rawDeletedAt) {
+            seenFileNamesForMember.add(normName);
+          }
+        }
 
         const recoveryJob = recoveryByFileId.get(source.driveFileId);
         const isDeletedRaw = Boolean(source.rawDeletedAt);
@@ -140,6 +193,25 @@ export function RawFilesManagerModal({
           !isProcessed ||
           isUnresolved ||
           (Boolean(recoveryJob) && recoveryJob?.status !== 'processing');
+
+        const canonicalSource = isDeletedRaw ? resolveCanonicalForDeletedSource(source) : undefined;
+        const targetFileName = canonicalSource?.fileName || source.mergedIntoFileName;
+        const isDuplicateDisposition =
+          source.mergedDisposition === 'duplicate' ||
+          Boolean(source.mergedReason && (
+            source.mergedReason.toLowerCase().includes('trùng') ||
+            source.mergedReason.toLowerCase().includes('bao hàm')
+          ));
+        const mergedBadgeLabel = isDeletedRaw
+          ? isDuplicateDisposition
+            ? 'Trùng lặp'
+            : 'Hợp nhất'
+          : undefined;
+        const mergedDescription = isDeletedRaw
+          ? targetFileName
+            ? `↳ Gộp vào: ${targetFileName}`
+            : '↳ Đã gộp vào hồ sơ'
+          : undefined;
 
         let errorHint: string | undefined;
         if (isUnresolved || recoveryJob?.status === 'needs_review') {
@@ -159,11 +231,74 @@ export function RawFilesManagerModal({
           key: source.driveFileId,
           member,
           source,
+          canonicalSource,
           recoveryJob,
           isProcessed,
           isErrorOrPending,
+          isMergedAway: isDeletedRaw,
+          mergedBadgeLabel,
+          mergedDescription,
           errorHint,
         });
+      }
+
+      // Surface preflight-absorbed files recorded only inside canonical sourceContributions
+      for (const canonical of sources) {
+        if (canonical.relocatedToMemberId || canonical.rawDeletedAt || !canonical.sourceContributions?.length) {
+          continue;
+        }
+        for (let idx = 0; idx < canonical.sourceContributions.length; idx++) {
+          const contribution = canonical.sourceContributions[idx];
+          const normContribName = contribution.fileName.trim().toLowerCase();
+          if (
+            seenFileNamesForMember.has(normContribName) ||
+            (contribution.sourceDriveFileId && representedContributionKeys.has(`id:${contribution.sourceDriveFileId}`)) ||
+            (contribution.fileHash && representedContributionKeys.has(`hash:${contribution.fileHash}`)) ||
+            representedContributionKeys.has(`name:${normContribName}`)
+          ) {
+            continue;
+          }
+          seenFileNamesForMember.add(normContribName);
+          representedContributionKeys.add(`name:${normContribName}`);
+          if (contribution.fileHash) representedContributionKeys.add(`hash:${contribution.fileHash}`);
+
+          const syntheticId = `absorbed:${canonical.driveFileId}:${idx}:${contribution.fileName}`;
+          const isDuplicate =
+            contribution.disposition === 'duplicate' ||
+            Boolean(contribution.reason && (
+              contribution.reason.toLowerCase().includes('trùng') ||
+              contribution.reason.toLowerCase().includes('bao hàm')
+            )) ||
+            true;
+          const mergedBadgeLabel = isDuplicate ? 'Trùng lặp' : 'Hợp nhất';
+          const mergedDescription = `↳ Gộp vào: ${canonical.fileName}`;
+
+          entries.push({
+            key: syntheticId,
+            member,
+            source: {
+              driveFileId: syntheticId,
+              fileName: contribution.fileName,
+              mimeType: 'application/pdf',
+              uploadedAt: contribution.uploadedAt,
+              status: 'processed',
+              fileSize: contribution.fileSize,
+              totalPages: contribution.totalPages,
+              processedPages: contribution.totalPages,
+              mergedIntoFileId: canonical.driveFileId,
+              mergedIntoFileName: canonical.fileName,
+              mergedDisposition: contribution.disposition,
+              mergedReason: contribution.reason,
+            },
+            canonicalSource: canonical,
+            absorbedContribution: contribution,
+            isProcessed: true,
+            isErrorOrPending: false,
+            isMergedAway: true,
+            mergedBadgeLabel,
+            mergedDescription,
+          });
+        }
       }
     }
 
@@ -189,6 +324,7 @@ export function RawFilesManagerModal({
         recoveryJob: job,
         isProcessed: false,
         isErrorOrPending: true,
+        isMergedAway: false,
         errorHint:
           job.status === 'needs_review'
             ? 'Chưa rõ chủ thể — cần chọn thành viên'
@@ -200,6 +336,7 @@ export function RawFilesManagerModal({
 
     return entries.sort((a, b) => {
       if (a.isErrorOrPending !== b.isErrorOrPending) return a.isErrorOrPending ? -1 : 1;
+      if (a.isMergedAway !== b.isMergedAway) return a.isMergedAway ? 1 : -1;
       return (b.source.uploadedAt || '').localeCompare(a.source.uploadedAt || '');
     });
   }, [members, profiles, recoveryByFileId, recoveryJobs, selectedMemberId]);
@@ -455,24 +592,47 @@ export function RawFilesManagerModal({
               </p>
             </div>
           ) : (
-            visibleEntries.map(({ key, member, source, isProcessed, isErrorOrPending, errorHint }) => {
+            visibleEntries.map(({
+              key,
+              member,
+              source,
+              canonicalSource,
+              absorbedContribution,
+              isProcessed,
+              isErrorOrPending,
+              isMergedAway,
+              mergedBadgeLabel,
+              mergedDescription,
+              errorHint,
+            }) => {
+              const viewTarget = isMergedAway ? canonicalSource : source;
               const isProcessing = processingId === source.driveFileId;
-              const isViewing = viewingId === source.driveFileId;
-              const isDeletedRaw = Boolean(source.rawDeletedAt);
+              const isViewing = viewTarget ? viewingId === viewTarget.driveFileId : false;
               const indexedPageCount = source.contentIndexPages?.length || 0;
-              const totalPages =
-                typeof source.totalPages === 'number' && source.totalPages > 0
-                  ? source.totalPages
-                  : Math.max(indexedPageCount, 1);
+              const hasExplicitPages = typeof source.totalPages === 'number' && source.totalPages > 0;
+              const totalPages = hasExplicitPages
+                ? source.totalPages!
+                : indexedPageCount > 0
+                  ? indexedPageCount
+                  : absorbedContribution
+                    ? 0
+                    : 1;
               const processedPages = isProcessed
                 ? Math.max(source.processedPages || 0, indexedPageCount, totalPages)
                 : Math.max(source.processedPages || 0, indexedPageCount);
+              const absorbedNames = !isMergedAway && source.sourceContributions?.length
+                ? Array.from(new Set(source.sourceContributions.map((item) => item.fileName)))
+                : [];
 
               return (
                 <div
                   key={key}
-                  className={`py-2.5 px-2 rounded-xl transition-colors ${
-                    isErrorOrPending ? 'bg-amber-50/50 my-1' : 'hover:bg-slate-50/80'
+                  className={`py-2 px-2.5 rounded-xl transition-all ${
+                    isMergedAway
+                      ? 'opacity-60 bg-slate-50/70 border border-slate-200/60 hover:opacity-90'
+                      : isErrorOrPending
+                        ? 'bg-amber-50/50 border border-amber-200/50 my-1'
+                        : 'hover:bg-slate-50/80 border border-transparent'
                   }`}
                 >
                   {/* Line 1: Icon + Filename + Compact Badge */}
@@ -480,8 +640,8 @@ export function RawFilesManagerModal({
                     <div className="flex items-center gap-2 min-w-0 flex-1">
                       <span
                         className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${
-                          isDeletedRaw
-                            ? 'bg-slate-100 text-slate-500'
+                          isMergedAway
+                            ? 'bg-slate-200/70 text-slate-500'
                             : isErrorOrPending
                               ? 'bg-amber-100 text-amber-700'
                               : 'bg-emerald-100 text-emerald-700'
@@ -494,7 +654,9 @@ export function RawFilesManagerModal({
                         )}
                       </span>
                       <span
-                        className="text-xs font-bold text-slate-900 truncate"
+                        className={`text-xs truncate ${
+                          isMergedAway ? 'font-medium text-slate-600' : 'font-bold text-slate-900'
+                        }`}
                         title={source.fileName}
                       >
                         {source.fileName}
@@ -503,15 +665,17 @@ export function RawFilesManagerModal({
 
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap shrink-0 tabular-nums ${
-                        isDeletedRaw
-                          ? 'bg-slate-100 text-slate-600'
+                        isMergedAway
+                          ? mergedBadgeLabel === 'Hợp nhất'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-slate-200/90 text-slate-700'
                           : isErrorOrPending
                             ? 'bg-amber-100 text-amber-900'
                             : 'bg-emerald-100 text-emerald-800'
                       }`}
                     >
-                      {isDeletedRaw
-                        ? 'Đã gộp'
+                      {isMergedAway
+                        ? mergedBadgeLabel || 'Trùng lặp'
                         : isErrorOrPending
                           ? source.subjectStatus === 'unresolved'
                             ? 'Chưa rõ chủ thể'
@@ -520,9 +684,25 @@ export function RawFilesManagerModal({
                     </span>
                   </div>
 
-                  {/* Optional concise error hint */}
-                  {errorHint && !isDeletedRaw && (
-                    <p className="mt-1 pl-8 text-[11px] font-medium text-amber-800 truncate">
+                  {/* Optional concise single-line hint / merge provenance */}
+                  {isMergedAway && mergedDescription && (
+                    <p
+                      className="mt-0.5 pl-8 text-[11px] font-medium text-slate-500 truncate"
+                      title={source.mergedReason || mergedDescription}
+                    >
+                      {mergedDescription}
+                    </p>
+                  )}
+                  {!isMergedAway && absorbedNames.length > 0 && (
+                    <p
+                      className="mt-0.5 pl-8 text-[11px] font-medium text-emerald-700 truncate"
+                      title={`Đã gộp kèm: ${absorbedNames.join(', ')}`}
+                    >
+                      + Kèm: {absorbedNames[0]}{absorbedNames.length > 1 ? ` (+${absorbedNames.length - 1})` : ''}
+                    </p>
+                  )}
+                  {errorHint && !isMergedAway && (
+                    <p className="mt-0.5 pl-8 text-[11px] font-medium text-amber-800 truncate">
                       {errorHint}
                     </p>
                   )}
@@ -533,7 +713,7 @@ export function RawFilesManagerModal({
                       {[
                         memberFilter === 'all' ? member.name : null,
                         formatCompactSize(source.fileSize),
-                        `${totalPages} tr`,
+                        totalPages > 0 ? `${totalPages} tr` : null,
                         source.uploadedAt ? formatDateVN(source.uploadedAt) : null,
                       ]
                         .filter(Boolean)
@@ -543,55 +723,61 @@ export function RawFilesManagerModal({
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
-                        disabled={isViewing || isDeletedRaw}
-                        onClick={() => void handleViewSource(source)}
-                        className="min-h-[34px] px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45"
+                        disabled={isViewing || !viewTarget}
+                        onClick={() => viewTarget && void handleViewSource(viewTarget)}
+                        className={`min-h-[30px] px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 ${
+                          isMergedAway
+                            ? 'border-slate-300 bg-white hover:bg-slate-100 text-slate-700'
+                            : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold'
+                        }`}
                       >
                         {isViewing ? (
                           <LoaderCircle className="w-3 h-3 animate-spin" />
                         ) : (
                           <Eye className="w-3 h-3" />
                         )}
-                        <span>Xem</span>
+                        <span>{isMergedAway && viewTarget ? 'Xem file chính' : 'Xem'}</span>
                       </button>
 
-                      {isProcessing && onCancelOcr ? (
-                        <button
-                          type="button"
-                          onClick={() => onCancelOcr()}
-                          className="min-h-[34px] px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap active:scale-95"
-                        >
-                          <StopCircle className="w-3 h-3" />
-                          <span>Dừng OCR</span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={isProcessing || isBatchBusy || isDeletedRaw}
-                          onClick={async () => {
-                            setProcessingId(source.driveFileId);
-                            try {
-                              const outcome = await onRunOcrForSource(member, source);
-                              if (outcome === 'completed' || outcome === undefined) {
-                                showToast(`Đã chạy lại OCR cho ${source.fileName}`, 'success');
+                      {!isMergedAway && (
+                        isProcessing && onCancelOcr ? (
+                          <button
+                            type="button"
+                            onClick={() => onCancelOcr()}
+                            className="min-h-[34px] px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap active:scale-95"
+                          >
+                            <StopCircle className="w-3 h-3" />
+                            <span>Dừng OCR</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isProcessing || isBatchBusy}
+                            onClick={async () => {
+                              setProcessingId(source.driveFileId);
+                              try {
+                                const outcome = await onRunOcrForSource(member, source);
+                                if (outcome === 'completed' || outcome === undefined) {
+                                  showToast(`Đã chạy lại OCR cho ${source.fileName}`, 'success');
+                                }
+                              } catch (error) {
+                                if (!isOcrCancelledError(error)) {
+                                  showToast(error instanceof Error ? error.message : 'Lỗi chạy lại OCR.', 'error');
+                                }
+                              } finally {
+                                setProcessingId(null);
                               }
-                            } catch (error) {
-                              if (!isOcrCancelledError(error)) {
-                                showToast(error instanceof Error ? error.message : 'Lỗi chạy lại OCR.', 'error');
-                              }
-                            } finally {
-                              setProcessingId(null);
-                            }
-                          }}
-                          className="min-h-[34px] px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 active:scale-95"
-                        >
-                          {isProcessing ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <PlayCircle className="w-3 h-3 text-emerald-400" />
-                          )}
-                          <span>{isProcessing ? 'Đang OCR' : 'OCR lại'}</span>
-                        </button>
+                            }}
+                            className="min-h-[34px] px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 active:scale-95"
+                          >
+                            {isProcessing ? (
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <PlayCircle className="w-3 h-3 text-emerald-400" />
+                            )}
+                            <span>{isProcessing ? 'Đang OCR' : 'OCR lại'}</span>
+                          </button>
+                        )
                       )}
                     </div>
                   </div>

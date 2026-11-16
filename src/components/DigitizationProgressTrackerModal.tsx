@@ -17,6 +17,7 @@ import {
 import type { FamilyMember, HealthEvent } from '../types';
 import type { DriveFile } from '../utils/healthDriveService';
 import { BackPriority, useBackHandler } from '../utils/backNavigation';
+import { digitizationLogger } from '../utils/digitizationLogger';
 
 export type TrackerStep =
   | 'uploading_drive'
@@ -68,9 +69,25 @@ export function DigitizationProgressTrackerModal({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [visibleError, setVisibleError] = useState<string | null>(error || null);
   const prevStepRef = useRef<TrackerStep>(step);
 
   const isRunning = step !== 'completed' && step !== 'error';
+
+  useEffect(() => {
+    if (!error) {
+      setVisibleError(null);
+      return;
+    }
+    setVisibleError(error);
+    digitizationLogger.log('error', 'ocr_tracker_error', error, {
+      fileName: file?.name,
+      memberId: member.id,
+      step,
+    });
+    const timer = window.setTimeout(() => setVisibleError(null), 1000);
+    return () => window.clearTimeout(timer);
+  }, [error, file?.name, member.id, step]);
 
   // Generate local image preview thumbnail if file is an image
   useEffect(() => {
@@ -334,31 +351,14 @@ export function DigitizationProgressTrackerModal({
             return null;
           })()}
 
-          {/* Error Banner if any */}
-          {error && (
-            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-1.5">
+          {/* Error Banner if any (auto-hides after 1s) */}
+          {visibleError && (
+            <div role="alert" className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-1.5">
               <div className="font-bold flex items-center gap-1.5 text-rose-800">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
                 <span>Không thể hoàn tất phân tích tự động</span>
               </div>
-              <p className="text-[11px] leading-relaxed text-rose-700">{error}</p>
-              <div className="pt-1 flex gap-2">
-                <button
-                  type="button"
-                  onClick={onRetry}
-                  className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] flex items-center gap-1 active:scale-95"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Thử lại với AI</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={onManualEntry}
-                  className="px-3 py-1.5 rounded-xl bg-white border border-rose-300 hover:bg-rose-100 text-rose-800 font-bold text-[11px]"
-                >
-                  Nhập thông tin thủ công
-                </button>
-              </div>
+              <p className="text-[11px] leading-relaxed text-rose-700">{visibleError}</p>
             </div>
           )}
 
@@ -484,6 +484,26 @@ export function DigitizationProgressTrackerModal({
           )}
 
           <div className="flex items-center gap-2">
+            {step === 'error' && (
+              <>
+                <button
+                  type="button"
+                  onClick={onManualEntry}
+                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs"
+                >
+                  Nhập thủ công
+                </button>
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm active:scale-95"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Thử lại AI</span>
+                </button>
+              </>
+            )}
+
             {step === 'completed' && (
               <button
                 type="button"

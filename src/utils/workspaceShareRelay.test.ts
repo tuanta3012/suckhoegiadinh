@@ -4,6 +4,7 @@ import {
   publishHealthWorkspaceAssignments,
   readHealthWorkspaceAssignment,
   registerHealthWorkspaceRelay,
+  subscribeHealthWorkspaceAssignments,
 } from './workspaceShareRelay';
 
 const mocks = vi.hoisted(() => {
@@ -223,5 +224,49 @@ describe('workspace access relay', () => {
 
     expect(assignments.map(assignment => assignment.memberEmail)).toContain('member@example.com');
     expect(mocks.getDocs).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips inaccessible legacy family links and resolves null when no active assignment exists', async () => {
+    mocks.getDocs.mockResolvedValueOnce({
+      docs: [{ id: 'stale-family', data: () => ({ familyId: 'stale-family', status: 'active' }) }],
+    });
+    mocks.getDoc
+      .mockRejectedValueOnce(Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }))
+      .mockResolvedValueOnce({ exists: () => false });
+
+    const onAssignmentChange = vi.fn();
+    const onError = vi.fn();
+    mocks.onSnapshot.mockImplementationOnce((_ref, onNext) => {
+      onNext({ exists: () => false });
+      return () => undefined;
+    }).mockImplementationOnce(() => () => undefined);
+
+    const unsubscribe = subscribeHealthWorkspaceAssignments('admin@example.com', onAssignmentChange, onError);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    unsubscribe();
+
+    expect(onAssignmentChange).toHaveBeenCalledWith(null);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports structured FirestoreErrorInfo JSON when onSnapshot emits permission-denied', () => {
+    const onAssignmentChange = vi.fn();
+    const onError = vi.fn();
+    mocks.onSnapshot
+      .mockImplementationOnce((_ref, _onNext, onSnapError) => {
+        onSnapError(Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }));
+        return () => undefined;
+      })
+      .mockImplementationOnce(() => () => undefined);
+
+    const unsubscribe = subscribeHealthWorkspaceAssignments('admin@example.com', onAssignmentChange, onError);
+    unsubscribe();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    const err = onError.mock.calls[0][0] as Error;
+    const parsed = JSON.parse(err.message) as { operationType: string; path: string; authInfo: { email: string } };
+    expect(parsed.operationType).toBe('get');
+    expect(parsed.path).toBe('workspaceAccess/admin@example.com');
+    expect(parsed.authInfo.email).toBe('admin@example.com');
   });
 });

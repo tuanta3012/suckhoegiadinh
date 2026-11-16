@@ -27,7 +27,10 @@ export function getSignedInGoogleEmail(): string | null {
 }
 const isNative = Capacitor.isNativePlatform();
 const provider = new GoogleAuthProvider();
-provider.addScope('https://www.googleapis.com/auth/drive');
+export const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+export const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+provider.addScope(GOOGLE_DRIVE_SCOPE);
+provider.addScope(GOOGLE_CALENDAR_SCOPE);
 provider.setCustomParameters({ prompt: 'select_account' });
 
 const ACCESS_TOKEN_KEY = 'health_google_drive_access_token';
@@ -153,7 +156,7 @@ export async function ensureGoogleAuthInitialized(): Promise<void> {
 
   googleAuthInitialization = GoogleAuth.initialize({
     clientId: firebaseConfig.oAuthClientId,
-    scopes: ['profile', 'email', 'openid', 'https://www.googleapis.com/auth/drive'],
+    scopes: ['profile', 'email', 'openid', GOOGLE_DRIVE_SCOPE, GOOGLE_CALENDAR_SCOPE],
     grantOfflineAccess: false,
   })
     .then(() => {
@@ -266,13 +269,18 @@ export function initGoogleAuth(
   });
 }
 
-export async function signInWithGoogle(): Promise<{ user: User; accessToken: string }> {
+export async function signInWithGoogle(
+  options: { forceConsent?: boolean; loginHintEmail?: string | null } = {},
+): Promise<{ user: User; accessToken: string }> {
   await firebasePersistenceReady;
   let user: User;
   let accessToken: string | null;
 
   if (isNative) {
     await ensureGoogleAuthInitialized();
+    if (options.forceConsent) {
+      await GoogleAuth.signOut().catch(() => undefined);
+    }
     const result = await GoogleAuth.signIn();
     accessToken = result.authentication.accessToken;
     if (!accessToken) throw new Error('Đăng nhập Google thành công nhưng không nhận được quyền Google Drive.');
@@ -282,7 +290,20 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
     user = (await signInWithCredential(auth, credential)).user;
   } else {
     try {
-      const result = await signInWithPopup(auth, provider);
+      const activeProvider = options.forceConsent
+        ? (() => {
+            const consentProvider = new GoogleAuthProvider();
+            consentProvider.addScope(GOOGLE_DRIVE_SCOPE);
+            consentProvider.addScope(GOOGLE_CALENDAR_SCOPE);
+            const params: Record<string, string> = { prompt: 'consent select_account' };
+            if (options.loginHintEmail?.trim()) {
+              params.login_hint = options.loginHintEmail.trim().toLowerCase();
+            }
+            consentProvider.setCustomParameters(params);
+            return consentProvider;
+          })()
+        : provider;
+      const result = await signInWithPopup(auth, activeProvider);
       user = result.user;
       accessToken = GoogleAuthProvider.credentialFromResult(result)?.accessToken || null;
     } catch (popupError: unknown) {

@@ -290,4 +290,193 @@ describe('health profile', () => {
       parseHealthProfile({ ...profile, sources: [{ driveFileId: 'source-1' }] }, member),
     ).toThrow('tài liệu nguồn thiếu trường bắt buộc');
   });
+
+  it('preserves sourceContributions and mergedInto provenance metadata on parse and merge', () => {
+    const canonicalSource = {
+      driveFileId: 'source-main',
+      fileName: 'tuanta 2026.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-03-10T08:00:00.000Z',
+      status: 'processed' as const,
+      sourceContributions: [
+        {
+          fileName: 'Xet nghiem mau 2026 tuanta.pdf',
+          fileHash: 'a'.repeat(64),
+          hashAlgorithm: 'sha256' as const,
+          uploadedAt: '2026-03-10T08:05:00.000Z',
+          disposition: 'included' as const,
+          reason: 'Nội dung nằm trọn trong tài liệu đầy đủ hơn',
+          fileSize: 338503,
+          totalPages: 3,
+          mergedIntoEventId: 'event-1',
+        },
+      ],
+    };
+    const mergedSource = {
+      driveFileId: 'source-dup',
+      fileName: 'Xet nghiem mau 2025 tuanta.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-03-10T08:02:00.000Z',
+      status: 'processed' as const,
+      rawDeletedAt: '2026-03-10T08:06:00.000Z',
+      mergedIntoFileId: 'source-main',
+      mergedIntoFileName: 'tuanta 2026.pdf',
+      mergedDisposition: 'included' as const,
+      mergedReason: 'Nội dung nằm trọn trong bản đầy đủ hơn',
+    };
+
+    const parsed = parseHealthProfile(
+      {
+        ...createHealthProfile(member),
+        sources: [canonicalSource, mergedSource],
+      },
+      member,
+    );
+
+    expect(parsed.sources[0].sourceContributions?.[0]).toMatchObject({
+      fileName: 'Xet nghiem mau 2026 tuanta.pdf',
+      fileSize: 338503,
+      totalPages: 3,
+      mergedIntoEventId: 'event-1',
+    });
+    expect(parsed.sources[1]).toMatchObject({
+      mergedIntoFileId: 'source-main',
+      mergedIntoFileName: 'tuanta 2026.pdf',
+      mergedDisposition: 'included',
+    });
+
+    const merged = mergeHealthProfiles(
+      { ...parsed, sources: [{ ...canonicalSource, sourceContributions: undefined }] },
+      parsed,
+    );
+    expect(merged.sources.find((s) => s.driveFileId === 'source-main')?.sourceContributions).toHaveLength(1);
+    expect(merged.sources.find((s) => s.driveFileId === 'source-dup')?.mergedIntoFileName).toBe('tuanta 2026.pdf');
+  });
+
+  it('compares timestamps for aiDeepAnalysis and keeps the newer analysis regardless of merge direction', () => {
+    const base = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [event],
+      timelineUpdatedAt: '2026-03-10T09:00:00.000Z',
+    };
+    const olderAnalysis = {
+      analyzedAt: '2026-03-10T10:00:00.000Z',
+      healthScore: 70,
+      overallAssessment: 'Bản phân tích cũ',
+      crossCorrelations: [],
+      velocityTrends: [],
+      chronicSurveillance: [],
+      roadmap: {
+        criticalAlerts: [],
+        specialistReferrals: [],
+        timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] },
+      },
+    };
+    const newerAnalysis = {
+      ...olderAnalysis,
+      analyzedAt: '2026-03-11T12:00:00.000Z',
+      healthScore: 84,
+      overallAssessment: 'Bản phân tích mới hơn',
+    };
+
+    const withNewerCurrent = {
+      ...base,
+      aiDeepAnalysis: newerAnalysis,
+      aiAnalysis: { analyzedAt: newerAnalysis.analyzedAt, overviewSummary: 'Mới hơn' },
+    };
+    const withOlderIncoming = {
+      ...base,
+      aiDeepAnalysis: olderAnalysis,
+      aiAnalysis: { analyzedAt: olderAnalysis.analyzedAt, overviewSummary: 'Cũ hơn' },
+    };
+
+    const merged = mergeHealthProfiles(withNewerCurrent, withOlderIncoming);
+    expect(merged.aiDeepAnalysis?.healthScore).toBe(84);
+    expect(merged.aiAnalysis?.overviewSummary).toBe('Mới hơn');
+    expect(merged.aiAnalysisInvalidatedAt).toBeUndefined();
+  });
+
+  it('invalidates aiDeepAnalysis and sets aiAnalysisInvalidatedAt when timeline updates are newer', () => {
+    const analyzedProfile = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [event],
+      timelineUpdatedAt: '2026-03-10T09:00:00.000Z',
+      aiDeepAnalysis: {
+        analyzedAt: '2026-03-10T10:00:00.000Z',
+        healthScore: 78,
+        overallAssessment: 'Phân tích trước khi thêm khám mới',
+        crossCorrelations: [],
+        velocityTrends: [],
+        chronicSurveillance: [],
+        roadmap: {
+          criticalAlerts: [],
+          specialistReferrals: [],
+          timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] },
+        },
+      },
+      aiAnalysis: {
+        analyzedAt: '2026-03-10T10:00:00.000Z',
+        overviewSummary: 'Cần cập nhật khi có dữ liệu mới',
+      },
+    };
+
+    const newerEvent = {
+      ...event,
+      id: 'event-2',
+      title: 'Khám bổ sung',
+      recordedAt: '2026-03-12T08:00:00.000Z',
+    };
+    const deviceWithNewEvent = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [event, newerEvent],
+      timelineUpdatedAt: '2026-03-12T08:00:00.000Z',
+      aiAnalysisInvalidatedAt: '2026-03-12T08:00:00.000Z',
+    };
+
+    const merged = mergeHealthProfiles(analyzedProfile, deviceWithNewEvent);
+    expect(merged.timeline).toHaveLength(2);
+    expect(merged.aiDeepAnalysis).toBeUndefined();
+    expect(merged.aiAnalysis).toBeUndefined();
+    expect(merged.aiAnalysisInvalidatedAt).toBe('2026-03-12T08:00:00.000Z');
+  });
+
+  it('invalidates aiDeepAnalysis on digitizeHealthSource and clears flag when fresh analysis is saved', () => {
+    const staged = addHealthSource(createHealthProfile(member), {
+      driveFileId: 'source-1',
+      fileName: 'lab.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-03-10T08:00:00.000Z',
+      status: 'pending',
+    });
+    const digitized = digitizeHealthSource(staged, event, '2026-03-10T09:05:00.000Z');
+    expect(digitized.timelineUpdatedAt).toBe('2026-03-10T09:05:00.000Z');
+    expect(digitized.aiAnalysisInvalidatedAt).toBe('2026-03-10T09:05:00.000Z');
+    expect(digitized.aiDeepAnalysis).toBeUndefined();
+  });
+
+  it('compares medicalHistoryUpdatedAt so newer medicalHistory is not overwritten by older remote copy', () => {
+    const newerHistory = {
+      surgeries: [{ procedure: 'Phẫu thuật mới', year: '2026' }],
+      chronicConditions: [{ condition: 'Tăng huyết áp' }],
+    };
+    const olderHistory = {
+      surgeries: [],
+      chronicConditions: [{ condition: 'Bản cũ' }],
+    };
+
+    const current = {
+      ...createHealthProfile(member),
+      medicalHistory: newerHistory,
+      medicalHistoryUpdatedAt: '2026-04-02T10:00:00.000Z',
+    };
+    const incoming = {
+      ...createHealthProfile(member),
+      medicalHistory: olderHistory,
+      medicalHistoryUpdatedAt: '2026-04-01T10:00:00.000Z',
+    };
+
+    const merged = mergeHealthProfiles(current, incoming);
+    expect(merged.medicalHistory).toEqual(newerHistory);
+    expect(merged.medicalHistoryUpdatedAt).toBe('2026-04-02T10:00:00.000Z');
+  });
 });
