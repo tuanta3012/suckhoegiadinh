@@ -162,10 +162,9 @@ describe('OCR subject routing', () => {
       'other',
     );
 
-    // Exact match is undefined because names are reordered ("Minh Truong" vs "Trương Quang Minh")
-    expect(result.matched).toBeUndefined();
-    // But it MUST identify Trương Quang Minh as a probable match so it does not silently duplicate!
-    expect(result.probableMatches.map((m) => m.id)).toEqual(['m-minh']);
+    // Automatically matches because names are reordered ("Minh Truong" vs "Trương Quang Minh") and birth dates match
+    expect(result.matched?.id).toBe('m-minh');
+    expect(result.probableMatches).toHaveLength(0);
   });
 
   it('detects duplicate family member pairs in workspace and prioritizes richer profile as primary', () => {

@@ -1,7 +1,7 @@
 {
   "name": "suc-khoe-gia-dinh",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "buildaab": false,
   "type": "module",
   "scripts": {

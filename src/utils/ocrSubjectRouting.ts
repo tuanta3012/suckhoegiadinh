@@ -277,14 +277,29 @@ export function findMemberByOcrPatientName(
   const birthDate = normalizeBirthDate(patientBirthDate);
   const gender = normalizeGender(patientGender);
 
+  const probableMatches = findProbableDuplicateMembersForInput(
+    { name: patientName, birthDate: patientBirthDate, gender: patientGender },
+    members,
+  );
+
+  // If there is a probable duplicate with the exact same birthdate (e.g. "Minh Truong" vs "Trương Quang Minh"),
+  // automatically route to the existing profile without requiring manual confirmation.
+  if (birthDate) {
+    const exactBirthMatch = probableMatches.find(
+      (m) => normalizeBirthDate(m.birthDate) === birthDate,
+    );
+    if (exactBirthMatch) {
+      return { matched: exactBirthMatch, candidates: [exactBirthMatch], probableMatches: [] };
+    }
+  }
+  if (probableMatches.length === 1 && birthDate) {
+    return { matched: probableMatches[0], candidates: [probableMatches[0]], probableMatches: [] };
+  }
+
   const nameMatches = members.filter(
     (member) => normalizePatientName(member.name) === normalizedName,
   );
   if (nameMatches.length === 0) {
-    const probableMatches = findProbableDuplicateMembersForInput(
-      { name: patientName, birthDate: patientBirthDate, gender: patientGender },
-      members,
-    );
     return { candidates: [], probableMatches };
   }
 
