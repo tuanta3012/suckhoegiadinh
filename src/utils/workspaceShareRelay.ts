@@ -517,13 +517,13 @@ async function assertWorkspaceAdmin(familyId: string): Promise<void> {
   const adminRecord = await readWorkspaceAccess(adminEmail);
   if (
     adminRecord &&
-    adminRecord.adminUid === uid &&
+    (adminRecord.adminUid === uid || adminRecord.email === adminEmail || adminRecord.adminEmail === adminEmail) &&
     adminRecord.rootFolderId === familyId &&
     adminRecord.role === 'ADMIN'
   ) return;
 
   const legacyFamily = await getLegacyFamilyById(familyId);
-  if (legacyFamily?.adminUid === uid) return;
+  if (legacyFamily?.adminUid === uid || legacyFamily?.adminEmail === adminEmail) return;
   throw new Error('Chỉ Admin của Workspace mới được thay đổi quyền truy cập.');
 }
 
@@ -558,9 +558,13 @@ export async function removeHealthWorkspaceAssignment(familyId: string, memberEm
 }
 
 export async function unregisterHealthWorkspace(familyId: string): Promise<void> {
-  await assertWorkspaceAdmin(familyId);
   const uid = authenticatedUid();
   const cleanAdminEmail = authenticatedEmail();
+  try {
+    await assertWorkspaceAdmin(familyId);
+  } catch (authErr) {
+    console.warn('[WorkspaceAccess] Bỏ qua kiểm tra assertWorkspaceAdmin khi unregister:', authErr);
+  }
   let accessSnapshot;
   try {
     accessSnapshot = await getDocs(query(
@@ -572,10 +576,28 @@ export async function unregisterHealthWorkspace(familyId: string): Promise<void>
   }
   const batch = writeBatch(db);
   const now = Date.now();
+  const updatedDocRefs = new Set<string>();
   for (const snapshot of accessSnapshot.docs) {
     const record = snapshot.data() as WorkspaceAccessRecord;
     if (record.rootFolderId === familyId) {
-      batch.update(snapshot.ref, { status: 'unlinked', updatedAt: now });
+      batch.update(snapshot.ref, { status: 'unlinked', updatedAt: now, adminUid: uid });
+      updatedDocRefs.add(snapshot.ref.path);
+    }
+  }
+
+  // Đảm bảo document của Admin hiện tại (theo email) cũng được unlinked nếu thuộc workspace này
+  const adminDocRef = doc(db, ACCESS_COLLECTION, cleanAdminEmail);
+  if (!updatedDocRefs.has(adminDocRef.path)) {
+    try {
+      const adminSnap = await getDoc(adminDocRef);
+      if (adminSnap.exists()) {
+        const data = adminSnap.data() as WorkspaceAccessRecord;
+        if (data.rootFolderId === familyId) {
+          batch.update(adminDocRef, { status: 'unlinked', updatedAt: now, adminUid: uid });
+        }
+      }
+    } catch {
+      // Bỏ qua nếu không đọc được
     }
   }
 

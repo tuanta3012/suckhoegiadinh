@@ -184,5 +184,27 @@ describe('GeminiQuotaScheduler', () => {
     expect(leaseModelA.project.id).toBe('two');
     leaseModelA.release();
   });
+
+  it('prefers idle projects over busy projects when maxConcurrentPerProject > 1', async () => {
+    const scheduler = new GeminiQuotaScheduler(
+      [
+        { id: 'proj-1', apiKey: 'key-1' },
+        { id: 'proj-2', apiKey: 'key-2' },
+      ],
+      3,
+    );
+
+    // Lease 1 on proj-1 (active = 1)
+    const lease1 = await scheduler.acquire('digitization', 'model-a', { rpm: 10 }, new Set(), 100);
+    expect(lease1.project.id).toBe('proj-1');
+
+    // Next acquire should pick idle proj-2 (active = 0) rather than stacking on proj-1 (active = 1)
+    const lease2 = await scheduler.acquire('digitization', 'model-a', { rpm: 10 }, new Set(), 100);
+    expect(lease2.project.id).toBe('proj-2');
+
+    lease1.release();
+    lease2.release();
+  });
 });
+
 

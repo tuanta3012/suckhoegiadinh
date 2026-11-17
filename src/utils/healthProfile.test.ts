@@ -6,6 +6,7 @@ import {
   createHealthProfile,
   digitizeHealthSource,
   excludeDeletedFamilyMembers,
+  mergeDuplicateMemberProfiles,
   mergeFamilyMemberTombstones,
   mergeFamilyMembers,
   mergeHealthProfiles,
@@ -544,5 +545,101 @@ describe('health profile', () => {
     expect(merged.deletedEvents).toBeUndefined();
     expect(merged.deletedSources).toBeUndefined();
   });
+
+  it('merges duplicate member profiles, enriching metadata, consolidating timeline and deduplicating sources', () => {
+    const primaryMember: FamilyMember = {
+      id: 'minh-1',
+      name: 'Trương Quang Minh',
+      email: 'minhtq411@gmail.com',
+      gender: 'male',
+      birthDate: '2007-11-04',
+      driveFolderId: 'folder-1',
+      profileFileId: 'profile-1',
+    };
+    const duplicateMember: FamilyMember = {
+      id: 'minh-2',
+      name: 'Minh Truong',
+      gender: 'other',
+      birthDate: '2007-11-04',
+      driveFolderId: 'folder-2',
+      profileFileId: 'profile-2',
+    };
+
+    const primaryProfile = {
+      ...createHealthProfile(primaryMember, '2026-01-01T00:00:00.000Z'),
+      timeline: [
+        {
+          ...event,
+          id: 'ev-1',
+          date: '2026-03-10',
+          title: 'Khám sức khỏe',
+          metrics: [{ name: 'Glucose', value: 5.2, unit: 'mmol/L' }],
+        },
+      ],
+      sources: [
+        {
+          driveFileId: 'src-1',
+          fileName: 'kham-tong-quat.pdf',
+          mimeType: 'application/pdf',
+          uploadedAt: '2026-03-10T08:00:00.000Z',
+          status: 'processed' as const,
+        },
+      ],
+    };
+
+    const duplicateProfile = {
+      ...createHealthProfile(duplicateMember, '2026-01-02T00:00:00.000Z'),
+      timeline: [
+        {
+          ...event,
+          id: 'ev-2',
+          date: '2026-03-10',
+          title: 'Đơn thuốc',
+          type: 'prescription' as const,
+          medications: [{ name: 'Paracetamol', dosage: '500mg' }],
+        },
+      ],
+      sources: [
+        {
+          driveFileId: 'src-2',
+          fileName: 'don-thuoc.jpg',
+          mimeType: 'image/jpeg',
+          uploadedAt: '2026-03-10T08:30:00.000Z',
+          status: 'processed' as const,
+        },
+      ],
+      medicalHistory: {
+        surgeries: [{ procedure: 'Mổ ruột thừa', year: '2020' }],
+        chronicConditions: [],
+      },
+    };
+
+    const result = mergeDuplicateMemberProfiles(
+      primaryMember,
+      primaryProfile,
+      duplicateMember,
+      duplicateProfile,
+      '2026-03-15T00:00:00.000Z',
+    );
+
+    // Primary ID, folder, and diacritics name preserved
+    expect(result.mergedMember.id).toBe('minh-1');
+    expect(result.mergedMember.name).toBe('Trương Quang Minh');
+    expect(result.mergedMember.gender).toBe('male'); // Enriched from primary over 'other'
+    expect(result.mergedMember.email).toBe('minhtq411@gmail.com');
+
+    // Sources combined
+    expect(result.mergedProfile.sources).toHaveLength(2);
+    expect(result.mergedProfile.sources.map((s) => s.driveFileId)).toEqual(['src-1', 'src-2']);
+
+    // Timeline consolidated (same date medical report + prescription merged or consolidated)
+    expect(result.mergedProfile.timeline.length).toBeGreaterThanOrEqual(1);
+
+    // Medical history preserved from duplicate
+    expect(result.mergedProfile.medicalHistory?.surgeries).toEqual([
+      { procedure: 'Mổ ruột thừa', year: '2020' },
+    ]);
+  });
 });
+
 

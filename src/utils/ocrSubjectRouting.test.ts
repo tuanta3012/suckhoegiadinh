@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { FamilyMember } from '../types';
+import type { FamilyMember, HealthEvent } from '../types';
 import {
   extractPatientNameFallbackFromText,
+  findDuplicateFamilyMemberPairs,
   findMemberByOcrPatientName,
   hasSameNameMemberConflict,
   isOcrSubjectMatchedToMember,
@@ -14,6 +15,19 @@ const member: FamilyMember = {
   name: 'Nguyễn Thị Mai',
   driveFolderId: 'raw-folder',
   profileFileId: 'profile-file',
+};
+
+const event: HealthEvent = {
+  id: 'event-1',
+  sourceFileId: 'source-1',
+  sourceFileName: 'lab.pdf',
+  type: 'test_result',
+  title: 'Xét nghiệm máu',
+  date: '2026-03-10',
+  diagnoses: ['Thiếu máu'],
+  medications: [],
+  metrics: [{ name: 'Hemoglobin', standardKey: 'HGB', value: 12, unit: 'g/dL' }],
+  recordedAt: '2026-03-10T09:00:00.000Z',
 };
 
 describe('OCR subject routing', () => {
@@ -123,5 +137,119 @@ describe('OCR subject routing', () => {
       expect(isRecognizablePatientName(label)).toBe(false);
     },
   );
+
+  it('detects probable duplicate members when names are reordered and birth dates match', () => {
+    const quangMinh: FamilyMember = {
+      ...member,
+      id: 'm-minh',
+      name: 'Trương Quang Minh',
+      email: 'minhtq411@gmail.com',
+      birthDate: '2007-11-04',
+      gender: 'male',
+    };
+    const khanhChi: FamilyMember = {
+      ...member,
+      id: 'm-chi',
+      name: 'Trương Khánh Chi',
+      birthDate: '2012-04-30',
+      gender: 'female',
+    };
+
+    const result = findMemberByOcrPatientName(
+      'Minh Truong',
+      [quangMinh, khanhChi],
+      '2007-11-04',
+      'other',
+    );
+
+    // Exact match is undefined because names are reordered ("Minh Truong" vs "Trương Quang Minh")
+    expect(result.matched).toBeUndefined();
+    // But it MUST identify Trương Quang Minh as a probable match so it does not silently duplicate!
+    expect(result.probableMatches.map((m) => m.id)).toEqual(['m-minh']);
+  });
+
+  it('detects duplicate family member pairs in workspace and prioritizes richer profile as primary', () => {
+    const quangMinh: FamilyMember = {
+      ...member,
+      id: 'minh-1',
+      name: 'Trương Quang Minh',
+      email: 'minhtq411@gmail.com',
+      birthDate: '2007-11-04',
+      gender: 'male',
+    };
+    const minhTruong: FamilyMember = {
+      ...member,
+      id: 'minh-2',
+      name: 'Minh Truong',
+      birthDate: '2007-11-04',
+      gender: 'other',
+    };
+    const khanhChi: FamilyMember = {
+      ...member,
+      id: 'chi-1',
+      name: 'Trương Khánh Chi',
+      birthDate: '2012-04-30',
+      gender: 'female',
+    };
+
+    const mockProfiles = {
+      'minh-1': {
+        schemaVersion: 2,
+        member: quangMinh,
+        timeline: [
+          { ...event, id: 'ev-1' },
+          { ...event, id: 'ev-2' },
+        ],
+        sources: [],
+        summary: { latestDiagnoses: [], latestMetrics: {} },
+        createdAt: '2026-11-01T00:00:00Z',
+        updatedAt: '2026-11-01T00:00:00Z',
+      },
+      'minh-2': {
+        schemaVersion: 2,
+        member: minhTruong,
+        timeline: [],
+        sources: [],
+        summary: { latestDiagnoses: [], latestMetrics: {} },
+        createdAt: '2026-11-02T00:00:00Z',
+        updatedAt: '2026-11-02T00:00:00Z',
+      },
+      'chi-1': {
+        schemaVersion: 2,
+        member: khanhChi,
+        timeline: [{ ...event, id: 'ev-chi' }],
+        sources: [],
+        summary: { latestDiagnoses: [], latestMetrics: {} },
+        createdAt: '2026-11-01T00:00:00Z',
+        updatedAt: '2026-11-01T00:00:00Z',
+      },
+    };
+
+    const pairs = findDuplicateFamilyMemberPairs([quangMinh, khanhChi, minhTruong], mockProfiles as any);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].primary.id).toBe('minh-1'); // Has email, diacritics, more timeline events
+    expect(pairs[0].duplicate.id).toBe('minh-2');
+    expect(pairs[0].reason).toContain('Cùng ngày sinh 04/11/2007');
+  });
+
+  it('does not flag family members with distinct given names sharing the same birthdate or surname', () => {
+    const twinsA: FamilyMember = {
+      ...member,
+      id: 'twin-1',
+      name: 'Trương Minh Anh',
+      birthDate: '2015-05-20',
+      gender: 'female',
+    };
+    const twinsB: FamilyMember = {
+      ...member,
+      id: 'twin-2',
+      name: 'Trương Minh Khang',
+      birthDate: '2015-05-20',
+      gender: 'male',
+    };
+    const pairs = findDuplicateFamilyMemberPairs([twinsA, twinsB], {});
+    expect(pairs).toHaveLength(0);
+  });
 });
+
 

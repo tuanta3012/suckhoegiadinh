@@ -5,6 +5,7 @@ import {
   deleteDriveFamilyMember,
   fetchWorkspaceSyncVersionSnapshot,
   findExistingHealthWorkspace,
+  isMissingWorkspaceError,
   openHealthWorkspace,
   openAssignedHealthWorkspace,
   reconcileOrphanRawFilesForWorkspace,
@@ -341,6 +342,39 @@ describe('resolveSingleFamilyManifestFile', () => {
 
       await expect(openHealthWorkspace('folder-1', 'family-1'))
         .rejects.toThrow('Email đang đăng nhập không còn trong danh sách thành viên Workspace.');
+    });
+
+    it('rejects with informative error when root folder is not found on Google Drive (404)', async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify({
+          error: { message: 'File not found: folder-missing', code: 404 },
+        }), { status: 404 });
+      });
+
+      await expect(openHealthWorkspace('folder-missing'))
+        .rejects.toThrow('Không tìm thấy kho dữ liệu (ID: folder-missing)');
+    });
+
+    it('rejects with informative error when root folder is in Google Drive trash', async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify({
+          id: 'folder-trashed',
+          name: 'Suc khoe gia dinh',
+          mimeType: 'application/vnd.google-apps.folder',
+          trashed: true,
+        }), { status: 200 });
+      });
+
+      await expect(openHealthWorkspace('folder-trashed'))
+        .rejects.toThrow('đã bị chuyển vào Thùng rác trên Google Drive');
+    });
+
+    it('identifies missing workspace errors reliably across Vietnamese and English error messages', () => {
+      expect(isMissingWorkspaceError(new Error('Không tìm thấy kho dữ liệu (ID: 1hUtslHKloCNZCugag_w8rRWZEltWXQMn). Nếu đây là kho được chia sẻ...'))).toBe(true);
+      expect(isMissingWorkspaceError(new Error('File not found: 12345'))).toBe(true);
+      expect(isMissingWorkspaceError(new Error('Google Drive trả về lỗi 404.'))).toBe(true);
+      expect(isMissingWorkspaceError(new Error('Kho dữ liệu (ID: abc) đã bị chuyển vào Thùng rác trên Google Drive.'))).toBe(true);
+      expect(isMissingWorkspaceError(new Error('Không có kết nối mạng'))).toBe(false);
     });
 
     it('does not publish the Firestore assignment when Drive permission verification fails', async () => {

@@ -82,6 +82,10 @@ export async function runUnifiedHealthDocumentOcr(
         batches: [{ firstPage: 1, lastPage: 1, base64Data: options.base64Data }],
       };
 
+  const availableKeyCount =
+    options.requestContext?.projects.length ??
+    (options.clientGeminiKeys ? options.clientGeminiKeys.length : 1);
+
   let preferredProjectId: string | undefined;
   options.onPlanReady?.({
     mode: plan.mode,
@@ -93,6 +97,93 @@ export async function runUnifiedHealthDocumentOcr(
     batches: PdfPageBatch[],
     isWholeDocumentPass: boolean,
   ): Promise<{ extracted: Record<string, unknown>; modelUsed: string }> => {
+    // When multiple independent API keys/projects are configured and a PDF is split into
+    // multiple batches, process chunks concurrently across keys with no artificial sleep.
+    if (batches.length > 1 && availableKeyCount > 1) {
+      const workerCount = Math.min(availableKeyCount, batches.length, 4);
+      const orderedResults: Array<ExtractedPageBatch | undefined> = new Array(batches.length);
+      const modelNameSet = new Set<string>();
+      let nextBatchIndex = 0;
+      let completedCount = 0;
+
+      const runWorker = async () => {
+        while (true) {
+          if (options.signal?.aborted) throw new Error('OCR was cancelled.');
+          const i = nextBatchIndex++;
+          if (i >= batches.length) return;
+          const batch = batches[i];
+          const promptText = buildBatchOcrPrompt(
+            memberName,
+            batch.firstPage,
+            batch.lastPage,
+            plan.totalPages,
+          );
+
+          digitizationLogger.log(
+            'info',
+            'worker',
+            `Bắt đầu OCR song song đoạn ${i + 1}/${batches.length} (trang ${batch.firstPage}-${batch.lastPage}/${plan.totalPages}, ${workerCount} luồng / ${availableKeyCount} key)`,
+            {
+              fileName: fileNameStr,
+              totalPages: plan.totalPages,
+              mode: 'chunked',
+              workerCount,
+              availableKeyCount,
+            },
+          );
+
+          const { text, modelUsed, projectId } = await executeGeminiWithPool({
+            task: 'digitization',
+            contents: [
+              { inlineData: { mimeType: effectiveMime, data: batch.base64Data } },
+              { text: promptText },
+            ],
+            systemInstruction,
+            responseMimeType: 'application/json',
+            timeoutMs: GEMINI_TIMEOUTS.ocrTotalMs,
+            signal: options.signal,
+            onProgress: options.onProgress,
+            clientGeminiKeys: options.clientGeminiKeys,
+            requestContext: options.requestContext,
+            requestId: options.requestId,
+            preferredProjectId: undefined,
+          });
+
+          const parsedJson = cleanExtractedJson(parseRobustJson(text));
+          modelNameSet.add(modelUsed);
+          orderedResults[i] = {
+            firstPage: batch.firstPage,
+            lastPage: batch.lastPage,
+            extracted: parsedJson,
+            modelUsed: `${modelUsed} [${projectId}]`,
+          };
+
+          completedCount++;
+          const readyBatches = orderedResults.filter(
+            (item): item is ExtractedPageBatch => Boolean(item),
+          );
+          const partialMerged = mergeExtractedBatches(readyBatches, preferredYear, fileNameStr);
+          options.onBatchComplete?.({
+            completed: completedCount,
+            totalBatches: batches.length,
+            extracted: partialMerged,
+            modelUsed: Array.from(modelNameSet).join(', '),
+            batch,
+            totalPages: plan.totalPages,
+          });
+        }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+      const finalBatches = orderedResults.filter(
+        (item): item is ExtractedPageBatch => Boolean(item),
+      );
+      return {
+        extracted: mergeExtractedBatches(finalBatches, preferredYear, fileNameStr),
+        modelUsed: Array.from(modelNameSet).join(', '),
+      };
+    }
+
     const batchResults: ExtractedPageBatch[] = [];
     const modelNames: string[] = [];
     const delayMs = options.interBatchDelayMs ?? 1_500;

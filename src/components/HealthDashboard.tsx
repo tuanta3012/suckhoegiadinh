@@ -22,6 +22,7 @@ import {
   FileUp,
   FolderHeart,
   FolderSync,
+  GitMerge,
   Heart,
   HeartPulse,
   History,
@@ -89,6 +90,7 @@ import {
   flushPendingHealthProfileSaves,
   factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
+  isMissingWorkspaceError,
   loadSharedAiResources,
   reconcileOrphanRawFilesForWorkspace,
   syncHealthWorkspaceMemberAssignments,
@@ -139,6 +141,7 @@ import {
   addHealthSource,
   createHealthProfile,
   digitizeHealthSource,
+  mergeDuplicateMemberProfiles,
   mergeHealthProfiles,
   parseHealthProfile,
   summarizeTimeline,
@@ -222,11 +225,14 @@ import { auth } from '../utils/googleDriveService';
 import { formatDateVN, formatDateTimeVN, normalizeVietnameseProperName } from '../utils/formatters';
 import { DatePickerVN } from './DatePickerVN';
 import {
+  findDuplicateFamilyMemberPairs,
   findMemberByOcrPatientName,
+  findProbableDuplicateMembersForInput,
   hasSameNameMemberConflict,
   isOcrSubjectMatchedToMember,
   isRecognizablePatientName,
   sanitizeOcrPatientName,
+  type DuplicateMemberPair,
 } from '../utils/ocrSubjectRouting';
 import {
   updateBatchNotificationProgress,
@@ -378,6 +384,7 @@ interface OcrPrefetchEntry {
   promise: Promise<OcrPrefetchResult>;
   resolve: (result: OcrPrefetchResult) => void;
   reject: (error: Error) => void;
+  processedFile?: File;
 }
 interface OcrPrefetchJob {
   itemToken: string;
@@ -386,8 +393,28 @@ interface OcrPrefetchJob {
   isAutoDetect: boolean;
   entry: OcrPrefetchEntry;
 }
-const MAX_PARALLEL_OCR_FILES = 6;
-const MAX_PARALLEL_OCR_FILE_BYTES = 30 * 1024 * 1024;
+
+function getOcrParallelLimits(): {
+  maxParallelFiles: number;
+  maxParallelBytes: number;
+  keyCount: number;
+} {
+  const keyCount = Math.max(1, getSharedGeminiKeys().length);
+  const isNative = Capacitor.isNativePlatform();
+  return {
+    maxParallelFiles: isNative
+      ? Math.min(10, Math.max(4, keyCount * 2))
+      : Math.min(6, Math.max(3, keyCount * 2)),
+    maxParallelBytes: isNative ? 80 * 1024 * 1024 : 48 * 1024 * 1024,
+    keyCount,
+  };
+}
+
+function estimatePrefetchFileBytes(file: File): number {
+  const isImage =
+    file.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif)$/i.test(file.name);
+  return isImage ? Math.min(file.size, 1.5 * 1024 * 1024) : file.size;
+}
 
 function createOcrPrefetchEntry(): OcrPrefetchEntry {
   let resolve!: (result: OcrPrefetchResult) => void;
@@ -727,6 +754,8 @@ export function HealthDashboard({
   const [identityResolutionDraft, setIdentityResolutionDraft] = useState<DigitizationDraft | null>(null);
   const [isCreatingSubjectMember, setIsCreatingSubjectMember] = useState(false);
   const [pendingSubjectMember, setPendingSubjectMember] = useState<FamilyMember | null>(null);
+  const [dismissedDuplicatePairIds, setDismissedDuplicatePairIds] = useState<string[]>([]);
+  const [mergingDuplicatePairId, setMergingDuplicatePairId] = useState<string | null>(null);
   const [trackerState, setTrackerState] = useState<{
     isOpen: boolean;
     file: File | null;
@@ -1055,8 +1084,7 @@ export function HealthDashboard({
   const isResettingRef = useRef(false);
   const profilesRef = useRef<Record<string, HealthProfile>>({});
   const shouldRefreshCachedWorkspaceRef = useRef(
-    Capacitor.isNativePlatform() &&
-      offlineStartup.workspace.rootFolderId !== 'local_offline_workspace',
+    offlineStartup.workspace.rootFolderId !== 'local_offline_workspace',
   );
   const selectedMemberIdRef = useRef<string>(selectedMemberId);
   const uploadQueueRef = useRef<File[]>([]);
@@ -1123,7 +1151,6 @@ export function HealthDashboard({
     const nextOfflineState = loadNativeOfflineState(userEmail);
     setWorkspace(nextOfflineState.workspace);
     shouldRefreshCachedWorkspaceRef.current =
-      Capacitor.isNativePlatform() &&
       nextOfflineState.workspace.rootFolderId !== 'local_offline_workspace';
     setProfiles(nextOfflineState.profiles);
     profilesRef.current = nextOfflineState.profiles;
@@ -1350,23 +1377,58 @@ export function HealthDashboard({
   function drainQueueOcrPrefetchJobs() {
     const activeQueueStatus = queueStatusRef.current;
     const reservesActiveFileSlot = !activeQueueStatus || activeQueueStatus.current === 1;
-    const maxPrefetches = MAX_PARALLEL_OCR_FILES - (reservesActiveFileSlot ? 1 : 0);
+    const { maxParallelFiles, maxParallelBytes } = getOcrParallelLimits();
+    const maxPrefetches = Math.max(1, maxParallelFiles - (reservesActiveFileSlot ? 1 : 0));
     while (activeQueueOcrPrefetchesRef.current < maxPrefetches) {
       const reservedBytes = reservesActiveFileSlot ? activeQueuePrimaryFileSizeRef.current : 0;
-      const availableJobIndex = queueOcrPrefetchJobsRef.current.findIndex((job) =>
-        activeQueueOcrPrefetchBytesRef.current + reservedBytes + job.file.size <= MAX_PARALLEL_OCR_FILE_BYTES,
+      const availableJobIndex = queueOcrPrefetchJobsRef.current.findIndex(
+        (job) =>
+          activeQueueOcrPrefetchBytesRef.current + reservedBytes + estimatePrefetchFileBytes(job.file) <=
+          maxParallelBytes,
       );
       if (availableJobIndex < 0) break;
       const [job] = queueOcrPrefetchJobsRef.current.splice(availableJobIndex, 1);
       if (job.entry.controller.signal.aborted) continue;
+
+      let trackedBytes = estimatePrefetchFileBytes(job.file);
       activeQueueOcrPrefetchesRef.current++;
-      activeQueueOcrPrefetchBytesRef.current += job.file.size;
-      void extractHealthEventWithProgress(
-        job.file,
-        job.member,
-        undefined,
-        { isAutoDetect: job.isAutoDetect, signal: job.entry.controller.signal },
-      )
+      activeQueueOcrPrefetchBytesRef.current += trackedBytes;
+
+      void (async () => {
+        let preparedFile = job.file;
+        try {
+          if (job.file.type.includes('pdf') || job.file.name.toLowerCase().endsWith('.pdf')) {
+            const compressed = await compressPdfIfNeeded(job.file);
+            preparedFile = compressed.file;
+          } else {
+            preparedFile = await compressImageIfNeeded(job.file);
+          }
+        } catch {
+          preparedFile = job.file;
+        }
+        job.entry.processedFile = preparedFile;
+        const delta = preparedFile.size - trackedBytes;
+        trackedBytes = preparedFile.size;
+        activeQueueOcrPrefetchBytesRef.current = Math.max(
+          0,
+          activeQueueOcrPrefetchBytesRef.current + delta,
+        );
+        // Free up byte headroom right after client compression so later queued jobs can start immediately
+        if (delta < 0) {
+          drainQueueOcrPrefetchJobs();
+        }
+        if (job.entry.controller.signal.aborted) {
+          throw job.entry.controller.signal.reason instanceof Error
+            ? job.entry.controller.signal.reason
+            : new Error('Queued OCR was cancelled.');
+        }
+        return extractHealthEventWithProgress(
+          preparedFile,
+          job.member,
+          undefined,
+          { isAutoDetect: job.isAutoDetect, signal: job.entry.controller.signal },
+        );
+      })()
         .then(job.entry.resolve)
         .catch((error: unknown) => {
           job.entry.reject(error instanceof Error ? error : new Error(String(error)));
@@ -1375,7 +1437,7 @@ export function HealthDashboard({
           activeQueueOcrPrefetchesRef.current = Math.max(0, activeQueueOcrPrefetchesRef.current - 1);
           activeQueueOcrPrefetchBytesRef.current = Math.max(
             0,
-            activeQueueOcrPrefetchBytesRef.current - job.file.size,
+            activeQueueOcrPrefetchBytesRef.current - trackedBytes,
           );
           drainQueueOcrPrefetchJobs();
         });
@@ -2083,6 +2145,44 @@ export function HealthDashboard({
       reportUnifiedSyncToast(calendarOutcome);
       return true;
     } catch (error) {
+      const isMissing = isMissingWorkspaceError(error);
+      if (isMissing) {
+        console.warn('[Sync] Thư mục workspace hiện tại không còn tồn tại trên Drive:', workspace.rootFolderId);
+        purgeDeletedWorkspaceState(userEmail);
+        if (userEmail) {
+          const cleanUser = userEmail.trim().toLowerCase();
+          localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanUser}`);
+          localStorage.removeItem(PROFILE_ROOT_KEY);
+          localStorage.removeItem(`health_ws_cache_${encodeURIComponent(cleanUser)}`);
+          void unregisterHealthWorkspace(workspace.rootFolderId).catch(() => {});
+        }
+        try {
+          const discovered = await findExistingHealthWorkspace();
+          if (discovered) {
+            const synchronized = await applyPendingMemberDeletions(discovered);
+            workspaceRef.current = synchronized;
+            setWorkspace(synchronized);
+            setSelectedMemberId(
+              findMemberForEmail(synchronized.family.members, userEmail)?.id ||
+                synchronized.family.members[0]?.id ||
+                '',
+            );
+            setRootIdInput(synchronized.rootFolderId);
+            const loadedProfiles = await reloadProfiles(synchronized, { skipCalendarSync: true });
+            await runManualOrphanRawReconcile(synchronized, loadedProfiles);
+            showToast('Kho dữ liệu cũ không còn trên Drive. Đã tự động kết nối kho "Suc khoe gia dinh" mới.', 'success');
+            return true;
+          } else if (options.autoCreate) {
+            await handleCreateWorkspace();
+            return true;
+          } else {
+            showToast('Kho dữ liệu trên Drive không còn tồn tại. Hãy bấm "Tạo kho dữ liệu" để khởi tạo lại.', 'info');
+            return false;
+          }
+        } catch (recoveryErr) {
+          console.warn('[Sync] Không thể tự động tìm kho thay thế:', recoveryErr);
+        }
+      }
       showToast(
         error instanceof Error ? error.message : 'Lỗi khi đồng bộ dữ liệu với Drive.',
         'error'
@@ -2370,6 +2470,13 @@ export function HealthDashboard({
     onNotification: showToast,
   });
   const members = prioritizeMemberForEmail(workspace?.family.members || [], userEmail);
+  const duplicateMemberPairs = useMemo<DuplicateMemberPair[]>(
+    () =>
+      findDuplicateFamilyMemberPairs(members, profiles).filter(
+        (pair) => !dismissedDuplicatePairIds.includes(pair.id),
+      ),
+    [members, profiles, dismissedDuplicatePairIds],
+  );
   const openAssistantExternalUrl = useCallback(async (url: string) => {
     try {
       await Browser.open({ url });
@@ -2761,6 +2868,7 @@ export function HealthDashboard({
       localStorage.removeItem(PROFILE_ROOT_KEY);
       if (cleanEmail) {
         localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanEmail}`);
+        localStorage.removeItem(`health_ws_cache_${encodeURIComponent(cleanEmail)}`);
         localStorage.removeItem(offlineCacheKey(LOCAL_WORKSPACE_KEY, cleanEmail));
         localStorage.removeItem(offlineCacheKey(LOCAL_PROFILES_KEY, cleanEmail));
       }
@@ -2820,8 +2928,7 @@ export function HealthDashboard({
         }
         return true;
       } catch (error) {
-        const message = error instanceof Error ? error.message : '';
-        const isNotFound = /file not found|\b404\b|not found|không tìm thấy tệp|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json/i.test(message);
+        const isNotFound = isMissingWorkspaceError(error);
         if (isNotFound) {
           purgeDeletedWorkspaceState(userEmail);
           if (userEmail) {
@@ -2897,6 +3004,47 @@ export function HealthDashboard({
             const message = error instanceof Error
               ? error.message
               : 'Không thể mở Workspace được chia sẻ.';
+            const isMissing = isMissingWorkspaceError(error);
+            const cleanUser = userEmail?.trim().toLowerCase() || '';
+            const cleanAdmin = assignment.adminEmail?.trim().toLowerCase() || '';
+            const isCurrentUserAdmin = cleanAdmin === cleanUser || assignment.role === 'ADMIN';
+
+            if (isMissing) {
+              console.warn('[WorkspaceAccess] Thư mục được chỉ định không còn tồn tại trên Google Drive:', assignment.rootFolderId);
+              if (userEmail) {
+                localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanUser}`);
+                localStorage.removeItem(PROFILE_ROOT_KEY);
+                localStorage.removeItem(`health_ws_cache_${encodeURIComponent(cleanUser)}`);
+                purgeDeletedWorkspaceState(userEmail);
+              }
+
+              if (isCurrentUserAdmin) {
+                // Tự động gỡ liên kết chết trên Firestore để không lặp lại lỗi
+                void unregisterHealthWorkspace(assignment.rootFolderId).catch(() => {});
+                // Tự động tìm kiếm thư mục Drive hợp lệ khác hoặc fallback
+                void findExistingHealthWorkspace().then((discovered) => {
+                  if (discovered && !disposed) {
+                    workspaceRef.current = discovered;
+                    setWorkspace(discovered);
+                    setRootIdInput(discovered.rootFolderId);
+                    void reloadProfiles(discovered);
+                    showToast('Kho dữ liệu cũ không còn. Đã tự động kết nối kho "Suc khoe gia dinh" trên Drive.', 'success');
+                  } else if (!disposed) {
+                    const fallback = createDefaultLocalWorkspace(userEmail);
+                    workspaceRef.current = fallback;
+                    setWorkspace(fallback);
+                    showToast('Kho dữ liệu cũ trên Drive không còn tồn tại. Hãy bấm "Tạo kho dữ liệu" để khởi tạo kho mới.', 'info');
+                  }
+                }).catch(() => {});
+                return;
+              } else {
+                setErrorMessage(
+                  `Chưa thể truy cập kho dữ liệu được chia sẻ (ID: ${assignment.rootFolderId}). Hãy nhờ Admin (${assignment.adminEmail}) bấm "Đồng bộ quyền truy cập" trong mục Gia đình.`,
+                );
+                return;
+              }
+            }
+
             setErrorMessage(message);
             showToast(message, 'error');
           })
@@ -2998,9 +3146,11 @@ export function HealthDashboard({
             }
           } catch (savedError) {
             console.warn('[Auto-Connect] Saved root folder failed, searching Drive...', savedError);
-            const savedMsg = savedError instanceof Error ? savedError.message : '';
-            if (/file not found|\b404\b|not found|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json|không còn trong danh sách/i.test(savedMsg)) {
-              localStorage.removeItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`);
+            if (isMissingWorkspaceError(savedError)) {
+              const cleanUser = userEmail.trim().toLowerCase();
+              localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanUser}`);
+              localStorage.removeItem(PROFILE_ROOT_KEY);
+              localStorage.removeItem(`health_ws_cache_${encodeURIComponent(cleanUser)}`);
             }
           }
         }
@@ -3014,16 +3164,20 @@ export function HealthDashboard({
           const message = assignmentResult.error instanceof Error
             ? assignmentResult.error.message
             : 'Không thể kiểm tra lời mời Workspace.';
-          setErrorMessage(message);
-          showToast(message, 'error');
+          console.warn('[Auto-Connect] Không thể kiểm tra lời mời Workspace:', message);
         }
         if (cancelled) return;
         if (assignment) {
+          const cleanUser = userEmail.trim().toLowerCase();
+          const cleanAdmin = assignment.adminEmail?.trim().toLowerCase() || '';
+          const isCurrentUserAdmin = cleanAdmin === cleanUser || assignment.role === 'ADMIN';
+
           try {
             const loaded = await openAssignedHealthWorkspace(assignment, userEmail);
             const opened = await applyPendingMemberDeletions(loaded);
             if (!cancelled) {
-              localStorage.setItem(`${PROFILE_ROOT_KEY}_${userEmail.trim().toLowerCase()}`, opened.rootFolderId);
+              localStorage.setItem(`${PROFILE_ROOT_KEY}_${cleanUser}`, opened.rootFolderId);
+              localStorage.setItem(PROFILE_ROOT_KEY, opened.rootFolderId);
               setWorkspace(opened);
               setSelectedMemberId(
                 findMemberForEmail(opened.family.members, userEmail)?.id ||
@@ -3033,26 +3187,45 @@ export function HealthDashboard({
               setRootIdInput(opened.rootFolderId);
               setIsSyncing(false);
               await reloadProfiles(opened);
-              showToast('Đã mở không gian gia đình được chia sẻ từ Google Drive.', 'success');
+              showToast(
+                isCurrentUserAdmin
+                  ? 'Đã kết nối kho dữ liệu Google Drive thành công.'
+                  : 'Đã mở không gian gia đình được chia sẻ từ Google Drive.',
+                'success',
+              );
               return;
             }
           } catch (error) {
             const message = error instanceof Error
               ? error.message
               : 'Không thể xác minh hoặc mở thư mục được chia sẻ.';
-            const isNotFound = /file not found|404|not found/i.test(message);
+            const isMissing = isMissingWorkspaceError(error);
             const isForbidden = /forbidden|403|permission/i.test(message);
-            
-            if (isNotFound) {
-              setErrorMessage(`Chưa liên kết được thư mục của Admin (ID: ${assignment.rootFolderId}). Hãy kiểm tra xem bạn đã thấy thư mục này trong mục "Được chia sẻ với tôi" trên Google Drive chưa. Nếu chưa, hãy nhờ Admin bấm "Đồng bộ quyền truy cập" trong mục Gia đình.`);
+
+            if (isMissing) {
+              localStorage.removeItem(`${PROFILE_ROOT_KEY}_${cleanUser}`);
+              localStorage.removeItem(PROFILE_ROOT_KEY);
+              localStorage.removeItem(`health_ws_cache_${encodeURIComponent(cleanUser)}`);
+              purgeDeletedWorkspaceState(userEmail);
+
+              if (isCurrentUserAdmin) {
+                void unregisterHealthWorkspace(assignment.rootFolderId).catch(() => {});
+                console.info('[Auto-Connect] Đã gỡ bỏ đăng ký thư mục Admin bị xóa trên Drive, tiếp tục tìm kiếm...');
+              } else {
+                setErrorMessage(`Chưa liên kết được thư mục của Admin (ID: ${assignment.rootFolderId}). Hãy kiểm tra xem bạn đã thấy thư mục này trong mục "Được chia sẻ với tôi" trên Google Drive chưa. Nếu chưa, hãy nhờ Admin bấm "Đồng bộ quyền truy cập" trong mục Gia đình.`);
+              }
+              // Tiếp tục xuống tìm kiếm thư mục Drive hợp lệ hoặc cho phép dùng kho cá nhân
             } else if (isForbidden) {
               setErrorMessage('Bạn không có quyền truy cập thư mục này. Hãy nhờ Admin cấp lại quyền cho email của bạn.');
+              showToast(message, 'error');
+              setIsSyncing(false);
+              return;
             } else {
               setErrorMessage(`Lỗi liên kết: ${message}`);
+              showToast(message, 'error');
+              setIsSyncing(false);
+              return;
             }
-            showToast(message, 'error');
-            setIsSyncing(false);
-            return;
           }
         }
         if (discoveryAttemptedRef.current && !shouldRefreshCachedWorkspace) {
@@ -3421,10 +3594,36 @@ export function HealthDashboard({
           isoBirthDate = rawDate;
         }
       }
+      const candidateName = newMemberName.trim();
+      const probableDuplicates = findProbableDuplicateMembersForInput(
+        {
+          name: candidateName,
+          birthDate: isoBirthDate,
+          gender: newMemberGender,
+        },
+        workspace.family.members,
+      );
+      if (probableDuplicates.length > 0) {
+        const dupListText = probableDuplicates
+          .map((item) => {
+            const dob = item.birthDate ? ` (Sinh ${formatDateVN(item.birthDate)})` : '';
+            return `"${item.name}"${dob}`;
+          })
+          .join(', ');
+        const proceed = await confirm({
+          title: 'Phát hiện hồ sơ có thể bị trùng',
+          message: `Tên "${candidateName}" rất giống với thành viên đã có: ${dupListText}. Nếu đây là cùng một người, bạn nên dùng lại hồ sơ sẵn có thay vì tạo mới. Bạn vẫn muốn tạo hồ sơ riêng biệt chứ?`,
+          confirmLabel: 'Vẫn tạo hồ sơ mới',
+        });
+        if (!proceed) {
+          setIsAddingMember(false);
+          return;
+        }
+      }
       const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
       const memberInput = {
         id: memberId,
-        name: newMemberName.trim(),
+        name: candidateName,
         birthDate: isoBirthDate,
         gender: newMemberGender,
         role: 'other',
@@ -3494,8 +3693,22 @@ export function HealthDashboard({
       setIsAddingMember(false);
     }
   }
-  async function handleQuickAddMember(name: string): Promise<string> {
+  async function handleQuickAddMember(name: string): Promise<string | undefined> {
     if (!workspace || !name.trim()) throw new Error('Cần nhập tên thành viên.');
+    const candidateName = name.trim();
+    const probableDuplicates = findProbableDuplicateMembersForInput(
+      { name: candidateName },
+      workspace.family.members,
+    );
+    if (probableDuplicates.length > 0) {
+      const dupListText = probableDuplicates.map((item) => `"${item.name}"`).join(', ');
+      const proceed = await confirm({
+        title: 'Phát hiện hồ sơ tương đồng',
+        message: `Tên "${candidateName}" rất giống với ${dupListText} đã có trong gia đình. Bạn vẫn muốn tạo thành viên mới chứ?`,
+        confirmLabel: 'Vẫn tạo mới',
+      });
+      if (!proceed) return undefined;
+    }
     setIsAddingMember(true);
     try {
       const memberId = `member_${crypto.randomUUID().slice(0, 12)}`;
@@ -3780,6 +3993,218 @@ export function HealthDashboard({
       );
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleMergeFamilyMembers(
+    primary: FamilyMember,
+    duplicate: FamilyMember,
+    pairId: string,
+  ) {
+    const activeWorkspace = workspaceRef.current || workspace;
+    if (!activeWorkspace) return;
+    const isLocalWorkspace = activeWorkspace.rootFolderId === 'local_offline_workspace';
+    const isUnsyncedDup =
+      duplicate.driveFolderId.startsWith('local_folder_') &&
+      duplicate.profileFileId.startsWith('local_profile_');
+    const canSyncRemote =
+      driveAuthorized && (typeof navigator === 'undefined' || navigator.onLine);
+
+    if (!isLocalWorkspace && !isUnsyncedDup && !isWorkspaceAdmin) {
+      showToast('Chỉ Quản trị viên mới có quyền gộp và xóa hồ sơ thành viên trùng trên Drive.', 'error');
+      return;
+    }
+    const adminEmailNorm = activeWorkspace.family.adminEmail?.trim().toLowerCase() || '';
+    const dupEmailNorm = duplicate.email?.trim().toLowerCase() || '';
+    if (adminEmailNorm && dupEmailNorm && dupEmailNorm === adminEmailNorm) {
+      showToast('Không thể xóa hồ sơ Admin. Hãy chọn giữ hồ sơ Admin làm hồ sơ chính.', 'error');
+      return;
+    }
+
+    const existingPrimaryProfile = profilesRef.current[primary.id] || profiles[primary.id];
+    const existingDupProfile = profilesRef.current[duplicate.id] || profiles[duplicate.id];
+    const dupEventsCount = existingDupProfile?.timeline?.length || 0;
+    const dupSourcesCount = existingDupProfile?.sources?.length || 0;
+
+    const confirmed = await confirm({
+      title: `Gộp "${duplicate.name}" vào "${primary.name}"?`,
+      message: `Toàn bộ ${dupEventsCount} sự kiện y tế, ${dupSourcesCount} tài liệu gốc, thông tin email/ngày sinh từ "${duplicate.name}" sẽ được hợp nhất sang "${primary.name}" (tự động chống trùng lặp), sau đó hồ sơ thừa "${duplicate.name}" sẽ bị xóa.`,
+      confirmLabel: 'Gộp thành 1 hồ sơ',
+    });
+    if (!confirmed) return;
+
+    setMergingDuplicatePairId(pairId);
+    setErrorMessage('');
+    try {
+      const primaryProfile =
+        existingPrimaryProfile ||
+        (primary.profileFileId.startsWith('local_')
+          ? createHealthProfile(primary)
+          : parseHealthProfile(await loadHealthProfile(primary.profileFileId), primary));
+      const duplicateProfile =
+        existingDupProfile ||
+        (duplicate.profileFileId.startsWith('local_')
+          ? createHealthProfile(duplicate)
+          : parseHealthProfile(await loadHealthProfile(duplicate.profileFileId), duplicate));
+
+      const { mergedMember, mergedProfile } = mergeDuplicateMemberProfiles(
+        primary,
+        primaryProfile,
+        duplicate,
+        duplicateProfile,
+      );
+
+      // Move physical Drive raw files belonging to the duplicate folder into the primary member folder
+      if (!isLocalWorkspace && canSyncRemote && !primary.driveFolderId.startsWith('local_')) {
+        for (const source of duplicateProfile.sources) {
+          if (
+            !source.driveFileId ||
+            source.driveFileId.startsWith('local_file_') ||
+            source.rawDeletedAt ||
+            source.relocatedToMemberId
+          ) {
+            continue;
+          }
+          try {
+            await moveDriveFileToMember(source.driveFileId, primary);
+          } catch (moveErr) {
+            console.warn(
+              `[Merge Members] Không thể chuyển tệp "${source.fileName}" sang thư mục chính:`,
+              moveErr,
+            );
+          }
+        }
+      }
+
+      const savedPrimaryProfile = await saveHealthProfile(primary.profileFileId, mergedProfile);
+
+      const memberFieldsChanged =
+        mergedMember.email !== primary.email ||
+        mergedMember.birthDate !== primary.birthDate ||
+        mergedMember.gender !== primary.gender ||
+        mergedMember.avatarUrl !== primary.avatarUrl;
+
+      let nextWorkspace = activeWorkspace;
+      if (memberFieldsChanged) {
+        if (!isLocalWorkspace && !primary.profileFileId.startsWith('local_') && canSyncRemote) {
+          nextWorkspace = await updateDriveFamilyMember(nextWorkspace, primary.id, {
+            name: mergedMember.name,
+            email: mergedMember.email,
+            birthDate: mergedMember.birthDate,
+            gender: mergedMember.gender,
+            role: mergedMember.role,
+          });
+        } else {
+          if (supportsDurableOfflineQueue() && offlineOwnerKey) {
+            await localSyncOutbox.enqueueMemberSave(
+              offlineOwnerKey,
+              nextWorkspace.rootFolderId,
+              mergedMember,
+              savedPrimaryProfile,
+              false,
+            );
+          }
+          nextWorkspace = {
+            ...nextWorkspace,
+            family: {
+              ...nextWorkspace.family,
+              members: nextWorkspace.family.members.map((item) =>
+                item.id === primary.id ? mergedMember : item,
+              ),
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        }
+      }
+
+      let deletionQueuedForSync = false;
+      if (isLocalWorkspace || isUnsyncedDup) {
+        nextWorkspace = {
+          ...nextWorkspace,
+          family: {
+            ...nextWorkspace.family,
+            members: nextWorkspace.family.members.filter((item) => item.id !== duplicate.id),
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      } else if (canSyncRemote) {
+        try {
+          const result = await deleteDriveFamilyMember(nextWorkspace, duplicate.id);
+          nextWorkspace = result.workspace;
+        } catch (error) {
+          if (!isNetworkUnavailableError(error)) throw error;
+          queueMemberDeletion(nextWorkspace.rootFolderId, {
+            memberId: duplicate.id,
+            email: duplicate.email,
+            queuedAt: Date.now(),
+          });
+          deletionQueuedForSync = true;
+          nextWorkspace = {
+            ...nextWorkspace,
+            family: {
+              ...nextWorkspace.family,
+              members: nextWorkspace.family.members.filter((item) => item.id !== duplicate.id),
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        }
+      } else {
+        queueMemberDeletion(nextWorkspace.rootFolderId, {
+          memberId: duplicate.id,
+          email: duplicate.email,
+          queuedAt: Date.now(),
+        });
+        deletionQueuedForSync = true;
+        nextWorkspace = {
+          ...nextWorkspace,
+          family: {
+            ...nextWorkspace.family,
+            members: nextWorkspace.family.members.filter((item) => item.id !== duplicate.id),
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      }
+
+      if (supportsDurableOfflineQueue() && offlineOwnerKey) {
+        await localSyncOutbox.discardMemberOperations(
+          offlineOwnerKey,
+          duplicate.id,
+          nextWorkspace.rootFolderId,
+          duplicate.profileFileId,
+        );
+      }
+      for (const source of duplicateProfile.sources) {
+        forgetOcrRecoveryJob(source.driveFileId);
+      }
+
+      workspaceRef.current = nextWorkspace;
+      setWorkspace(nextWorkspace);
+      const nextProfiles = { ...profilesRef.current, [primary.id]: savedPrimaryProfile };
+      delete nextProfiles[duplicate.id];
+      profilesRef.current = nextProfiles;
+      setProfiles(nextProfiles);
+
+      if (selectedMemberId === duplicate.id) {
+        setSelectedMemberId(primary.id);
+        selectedMemberIdRef.current = primary.id;
+      }
+      setChatMessages([]);
+      void triggerAutoCalendarSync(nextWorkspace.family.members, nextProfiles);
+      showToast(
+        deletionQueuedForSync
+          ? `Đã gộp dữ liệu sang "${primary.name}". Việc xóa hồ sơ thừa trên Drive sẽ hoàn tất khi có mạng.`
+          : `Đã gộp thành công "${duplicate.name}" vào hồ sơ "${primary.name}".`,
+        'success',
+      );
+    } catch (error) {
+      const recoveryMessage = await recoverCommittedWorkspaceSharingError(error);
+      const message =
+        recoveryMessage ||
+        (error instanceof Error ? error.message : 'Không thể gộp hồ sơ thành viên.');
+      setErrorMessage(message);
+      showToast(message, 'error');
+    } finally {
+      setMergingDuplicatePairId(null);
     }
   }
 
@@ -4245,33 +4670,35 @@ export function HealthDashboard({
       queueContext,
     });
     notifyBatchProgress(file.name, effectiveMember.name, 'Chuẩn bị', 10);
-    // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload
-    let processedFile: File = file;
+    // 1. Tối ưu & Nén tệp (PDF hoặc Ảnh) phía client trước khi upload (tái dùng bản đã nén từ prefetch nếu có)
+    let processedFile: File = prefetchEntry?.processedFile || file;
     try {
-      if (file.type.includes('pdf') || file.name.toLowerCase().endsWith('.pdf')) {
-        const compressTimer = digitizationLogger.startTimer();
-        const compressRes = await compressPdfIfNeeded(file, (msg) => {
-          setTrackerState((prev) => ({ ...prev, progressMessage: msg }));
-        });
-        const compressMs = compressTimer();
-        processedFile = compressRes.file;
-        if (compressRes.reductionPercent > 0) {
-          const origMb = (compressRes.originalSizeBytes / (1024 * 1024)).toFixed(1);
-          const compMb = (compressRes.compressedSizeBytes / (1024 * 1024)).toFixed(1);
-          digitizationLogger.log(
-            'info',
-            'compress',
-            `Đã tối ưu nén tệp PDF "${file.name}": ${origMb} MB ➔ ${compMb} MB (giảm ${compressRes.reductionPercent}%) trong ${compressMs}ms`,
-            { originalBytes: compressRes.originalSizeBytes, compressedBytes: compressRes.compressedSizeBytes, reductionPercent: compressRes.reductionPercent },
-            compressMs
-          );
-          showToast(
-            `Đã tối ưu nén tệp PDF "${file.name}": ${origMb} MB ➔ ${compMb} MB (Tiết kiệm ${compressRes.reductionPercent}%)!`,
-            'success',
-          );
+      if (!prefetchEntry?.processedFile) {
+        if (file.type.includes('pdf') || file.name.toLowerCase().endsWith('.pdf')) {
+          const compressTimer = digitizationLogger.startTimer();
+          const compressRes = await compressPdfIfNeeded(file, (msg) => {
+            setTrackerState((prev) => ({ ...prev, progressMessage: msg }));
+          });
+          const compressMs = compressTimer();
+          processedFile = compressRes.file;
+          if (compressRes.reductionPercent > 0) {
+            const origMb = (compressRes.originalSizeBytes / (1024 * 1024)).toFixed(1);
+            const compMb = (compressRes.compressedSizeBytes / (1024 * 1024)).toFixed(1);
+            digitizationLogger.log(
+              'info',
+              'compress',
+              `Đã tối ưu nén tệp PDF "${file.name}": ${origMb} MB ➔ ${compMb} MB (giảm ${compressRes.reductionPercent}%) trong ${compressMs}ms`,
+              { originalBytes: compressRes.originalSizeBytes, compressedBytes: compressRes.compressedSizeBytes, reductionPercent: compressRes.reductionPercent },
+              compressMs
+            );
+            showToast(
+              `Đã tối ưu nén tệp PDF "${file.name}": ${origMb} MB ➔ ${compMb} MB (Tiết kiệm ${compressRes.reductionPercent}%)!`,
+              'success',
+            );
+          }
+        } else {
+          processedFile = await compressImageIfNeeded(file);
         }
-      } else {
-        processedFile = await compressImageIfNeeded(file);
       }
       setTrackerState((prev) => ({
         ...prev,
@@ -4547,12 +4974,38 @@ export function HealthDashboard({
         };
         setTrackerState((prev) => ({ ...prev, driveFile: reusedUploaded }));
       } else {
+        const shouldParallelizeOcrWithUpload = !preExtractedResult && !prefetchEntry;
+        let parallelOcrPromise: Promise<OcrPrefetchResult> | undefined;
+        if (shouldParallelizeOcrWithUpload) {
+          setTrackerState((prev) => ({
+            ...prev,
+            progressMessage: `Đang tải lên Drive và chạy AI OCR song song cho "${processedFile.name}"...`,
+          }));
+          notifyBatchProgress(file.name, effectiveMember.name, 'Tải Drive & OCR song song', 30);
+          parallelOcrPromise = extractHealthEventWithProgress(
+            processedFile,
+            effectiveMember,
+            (update) => {
+              if (ocrController.signal.aborted) return;
+              applyExtractionProgress(update);
+              notifyBatchProgress(
+                file.name,
+                effectiveMember.name,
+                EXTRACTION_NOTIFICATION_PHASES[update.stage],
+                update.progressPercent,
+              );
+            },
+            { isAutoDetect: isAutoDetectMode, signal: ocrController.signal },
+          );
+          void parallelOcrPromise.catch(() => undefined);
+        }
+
         const uploadTimer = digitizationLogger.startTimer();
         digitizationLogger.log(
           'info',
           'drive_upload_start',
           `Bắt đầu tải tệp "${processedFile.name}" (${(processedFile.size / 1024).toFixed(1)} KB) lên Google Drive của ${effectiveMember.name}...`,
-          { fileName: processedFile.name, size: processedFile.size, memberName: effectiveMember.name }
+          { fileName: processedFile.name, size: processedFile.size, memberName: effectiveMember.name, parallelOcr: shouldParallelizeOcrWithUpload }
         );
         const uploaded = await uploadRawHealthFile(effectiveMember, processedFile);
         const uploadMs = uploadTimer();
@@ -4596,7 +5049,7 @@ export function HealthDashboard({
           uploaded.id,
           preExtractedResult,
           queueContext,
-          prefetchEntry?.promise,
+          parallelOcrPromise || prefetchEntry?.promise,
           ocrController.signal,
         );
       }
@@ -4946,7 +5399,7 @@ export function HealthDashboard({
       return undefined;
     }
 
-    const { matched, candidates } = findMemberByOcrPatientName(
+    const { matched, candidates, probableMatches } = findMemberByOcrPatientName(
       patientName,
       currentMembers,
       extracted.patientBirthDate,
@@ -5002,8 +5455,23 @@ export function HealthDashboard({
       return candidates[0];
     }
 
-    // Tự động tạo hồ sơ mới hoặc cập nhật thành viên rỗng cho tên nhận diện được
+    // Nếu trùng tên hoặc gần trùng (cùng ngày sinh + đảo thứ tự/tên tương đồng) -> hỏi người dùng xác nhận thay vì tự động tạo hồ sơ trùng
     const hasSameNameConflict = hasSameNameMemberConflict(patientName, currentMembers);
+    if (probableMatches.length > 0 || hasSameNameConflict) {
+      digitizationLogger.log(
+        'warn',
+        'subject_ambiguous_match',
+        `Chủ thể OCR "${patientName}" có hồ sơ gần trùng khớp (${probableMatches.map((m) => m.name).join(', ') || 'cùng tên'}); chờ người dùng xác nhận để tránh tạo hồ sơ trùng.`,
+        {
+          patientName,
+          birthDate: extracted.patientBirthDate,
+          probableMatchIds: probableMatches.map((m) => m.id),
+        },
+      );
+      return undefined;
+    }
+
+    // Tự động tạo hồ sơ mới hoặc cập nhật thành viên rỗng cho tên nhận diện được
     const cleanedPatientName = sanitizeOcrPatientName(patientName) || patientName;
     const normalizedName = normalizeVietnameseProperName(cleanedPatientName);
 
@@ -5667,15 +6135,38 @@ export function HealthDashboard({
   async function createMemberForUnresolvedSubject(name: string) {
     const draft = identityResolutionDraft;
     if (!draft || isCreatingSubjectMember) return;
+    const cleanName = name.trim();
+    if (!isRecognizablePatientName(cleanName)) {
+      const msg = 'Vui lòng nhập họ tên hợp lệ cho hồ sơ thành viên mới.';
+      setDigitizationError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+    const currentWorkspaceSnapshot = workspaceRef.current;
+    if (currentWorkspaceSnapshot && !pendingSubjectMember) {
+      const probableDuplicates = findProbableDuplicateMembersForInput(
+        {
+          name: cleanName,
+          birthDate: draft.extracted.patientBirthDate,
+          gender: draft.extracted.patientGender,
+        },
+        currentWorkspaceSnapshot.family.members,
+      );
+      if (probableDuplicates.length > 0) {
+        const dupListText = probableDuplicates.map((item) => `"${item.name}"`).join(', ');
+        const proceed = await confirm({
+          title: 'Xác nhận tạo hồ sơ mới thay vì chọn hồ sơ sẵn có?',
+          message: `Tên "${cleanName}" rất giống với ${dupListText} đã có trong gia đình. Bạn nên chọn hồ sơ sẵn có ở trên để gộp chung. Vẫn tạo hồ sơ mới riêng biệt?`,
+          confirmLabel: 'Vẫn tạo hồ sơ mới',
+        });
+        if (!proceed) return;
+      }
+    }
     setIsCreatingSubjectMember(true);
     setDigitizationError('');
     try {
       const currentWorkspace = workspaceRef.current;
       if (!currentWorkspace) throw new Error('Không tìm thấy Workspace hiện tại.');
-      const cleanName = name.trim();
-      if (!isRecognizablePatientName(cleanName)) {
-        throw new Error('Vui lòng nhập họ tên hợp lệ cho hồ sơ thành viên mới.');
-      }
       let targetMember = pendingSubjectMember &&
         pendingSubjectMember.name === cleanName &&
         currentWorkspace.family.members.some((member) => member.id === pendingSubjectMember.id)
@@ -8572,6 +9063,90 @@ export function HealthDashboard({
                       </button>
                     )}
                   </div>
+                  {duplicateMemberPairs.length > 0 && (
+                    <div className="mb-4 space-y-2.5">
+                      {duplicateMemberPairs.map((pair) => {
+                        const primaryCount = profiles[pair.primary.id]?.timeline?.length || 0;
+                        const duplicateCount = profiles[pair.duplicate.id]?.timeline?.length || 0;
+                        const isMergingThis = mergingDuplicatePairId === pair.id;
+                        return (
+                          <div
+                            key={pair.id}
+                            className="rounded-2xl border-2 border-amber-300 bg-amber-50/90 p-3.5 sm:p-4 space-y-2.5"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-start gap-2.5 min-w-0">
+                                <GitMerge className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                                <div className="min-w-0">
+                                  <p className="text-xs sm:text-sm font-black text-amber-950">
+                                    Phát hiện 2 hồ sơ có thể là cùng một người
+                                  </p>
+                                  <p className="text-[11px] font-semibold text-amber-800 mt-0.5">
+                                    {pair.reason}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                              <div className="rounded-xl border border-emerald-200 bg-white px-3 py-2">
+                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700">
+                                  Giữ làm hồ sơ chính
+                                </span>
+                                <p className="font-bold text-slate-900 truncate mt-0.5">{pair.primary.name}</p>
+                                <p className="text-[11px] text-slate-500 truncate">
+                                  {[pair.primary.email, `${primaryCount} hồ sơ`].filter(Boolean).join(' · ')}
+                                </p>
+                              </div>
+                              <div className="rounded-xl border border-amber-200 bg-white/80 px-3 py-2">
+                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">
+                                  Sẽ gộp & xóa bản thừa
+                                </span>
+                                <p className="font-bold text-slate-900 truncate mt-0.5">{pair.duplicate.name}</p>
+                                <p className="text-[11px] text-slate-500 truncate">
+                                  {[pair.duplicate.email, `${duplicateCount} hồ sơ`].filter(Boolean).join(' · ')}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                disabled={isMergingThis || isLoading}
+                                onClick={() => void handleMergeFamilyMembers(pair.primary, pair.duplicate, pair.id)}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-colors disabled:opacity-50"
+                              >
+                                {isMergingThis ? (
+                                  <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <GitMerge className="w-3.5 h-3.5" />
+                                )}
+                                <span>Gộp thành 1 hồ sơ</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isMergingThis || isLoading}
+                                onClick={() => void handleMergeFamilyMembers(pair.duplicate, pair.primary, pair.id)}
+                                className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 transition-colors disabled:opacity-50"
+                              >
+                                <span>Giữ "{pair.duplicate.name}"</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isMergingThis}
+                                onClick={() =>
+                                  setDismissedDuplicatePairIds((prev) =>
+                                    prev.includes(pair.id) ? prev : [...prev, pair.id],
+                                  )
+                                }
+                                className="ml-auto rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-500 hover:bg-amber-100/70 hover:text-slate-700 transition-colors disabled:opacity-50"
+                              >
+                                Không phải trùng
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div className="divide-y divide-slate-100">
                     {members.map((m) => {
                       const prof = profiles[m.id];
@@ -8840,7 +9415,7 @@ export function HealthDashboard({
             </div>
             <div className="bg-slate-50 px-4 py-1.5 border-t border-slate-100">
               <p className="text-[10px] text-slate-500 text-center font-medium">
-                Tự động lưu vào Dòng thời gian sau khi xong.
+                Tự động lưu vào Dòng thời gian sau khi xong · Tối đa {getOcrParallelLimits().maxParallelFiles} luồng ({getOcrParallelLimits().keyCount} API key).
               </p>
             </div>
           </div>
@@ -9094,10 +9669,22 @@ export function HealthDashboard({
           isSaving={isCreatingSubjectMember}
           error={digitizationError}
           members={members}
+          probableMatches={
+            identityResolutionDraft.extracted.patientName
+              ? findMemberByOcrPatientName(
+                  identityResolutionDraft.extracted.patientName,
+                  members,
+                  identityResolutionDraft.extracted.patientBirthDate,
+                  identityResolutionDraft.extracted.patientGender,
+                ).probableMatches
+              : []
+          }
           adminEmail={workspace?.family.adminEmail}
           batchStatus={queueStatus}
           existingMemberName={pendingSubjectMember?.name}
           suggestedSubjectName={identityResolutionDraft.extracted.patientName}
+          suggestedBirthDate={identityResolutionDraft.extracted.patientBirthDate}
+          suggestedGender={identityResolutionDraft.extracted.patientGender}
           onDefer={deferUnresolvedSubject}
           onSelectExistingMember={(member) => void assignUnresolvedSubjectToMember(member)}
           onCreateMember={(name) => void createMemberForUnresolvedSubject(name)}
@@ -9292,6 +9879,7 @@ export function HealthDashboard({
         onAddNew={async (name) => {
           try {
             const newId = await handleQuickAddMember(name);
+            if (!newId) return;
             setShowUploadMemberPicker(false);
             pickedMemberIdForBatchRef.current = newId;
             setSelectedMemberId(newId);

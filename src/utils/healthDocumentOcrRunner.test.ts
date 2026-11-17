@@ -140,5 +140,45 @@ describe('runUnifiedHealthDocumentOcr', () => {
     expect(mocks.splitPdfIntoBatches).not.toHaveBeenCalled();
     expect(mocks.executeGeminiWithPool).toHaveBeenCalledOnce();
   });
+
+  it('runs batches concurrently across keys without key-pinning when multiple API keys are available', async () => {
+    mocks.planPdfOcrBatches.mockResolvedValue({
+      mode: 'chunked',
+      totalPages: 4,
+      batches: [
+        { firstPage: 1, lastPage: 2, base64Data: 'batch-1' },
+        { firstPage: 3, lastPage: 4, base64Data: 'batch-2' },
+      ],
+    });
+    let active = 0;
+    let maxActive = 0;
+    mocks.executeGeminiWithPool.mockImplementation(async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active--;
+      return {
+        text: JSON.stringify({ title: 'Batch result', contentIndexPages: ['P1'] }),
+        modelUsed: 'gemini-3.5-flash-lite',
+        projectId: 'account-pool',
+      };
+    });
+
+    const result = await runUnifiedHealthDocumentOcr({
+      base64Data: 'document-data',
+      mimeType: 'application/pdf',
+      fileName: 'multipage.pdf',
+      clientGeminiKeys: ['key-1', 'key-2'],
+    });
+
+    expect(maxActive).toBeGreaterThan(1); // Parallel execution occurred
+    expect(mocks.executeGeminiWithPool).toHaveBeenCalledTimes(2);
+    // Neither batch pinned preferredProjectId to account-1
+    expect(mocks.executeGeminiWithPool.mock.calls[0][0].preferredProjectId).toBeUndefined();
+    expect(mocks.executeGeminiWithPool.mock.calls[1][0].preferredProjectId).toBeUndefined();
+    expect(result.mode).toBe('chunked');
+    expect(result.processedPages).toBe(4);
+  });
 });
+
 

@@ -167,12 +167,17 @@ export class GeminiQuotaScheduler {
         throw signal.reason instanceof Error ? signal.reason : new Error('Gemini request was cancelled.');
       }
       const now = Date.now();
-      const candidates = this.getOrderedCandidates(queueKey).filter((project) =>
-        (!preferredProjectId || project.id === preferredProjectId) &&
-        !excludedProjectIds.has(project.id) &&
-        !this.isProjectDisabled(project.id, now) &&
-        !this.isModelDisabled(project.id, model, now),
-      );
+      const candidates = this.getOrderedCandidates(queueKey)
+        .filter((project) =>
+          (!preferredProjectId || project.id === preferredProjectId) &&
+          !excludedProjectIds.has(project.id) &&
+          !this.isProjectDisabled(project.id, now) &&
+          !this.isModelDisabled(project.id, model, now),
+        )
+        .sort(
+          (left, right) =>
+            (this.activeRequests.get(left.id) || 0) - (this.activeRequests.get(right.id) || 0),
+        );
       if (candidates.length === 0) {
         throw new Error(`No available projects remain for ${model}.`);
       }

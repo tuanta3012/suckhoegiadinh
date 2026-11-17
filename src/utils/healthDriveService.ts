@@ -593,9 +593,9 @@ async function openSharedHealthWorkspace(
   return workspace;
 }
 
-function isMissingWorkspaceError(error: unknown): boolean {
+export function isMissingWorkspaceError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || '');
-  return /file not found|\b404\b|not found|không tìm thấy kho dữ liệu|không tìm thấy (?:file )?family\.json|không còn trong danh sách|không có trong danh sách/i.test(message);
+  return /file not found|\b404\b|not found|không tìm thấy kho dữ liệu|không tìm thấy tệp|không tìm thấy (?:file )?family\.json|không còn trong danh sách|không có trong danh sách|thùng rác|đã bị chuyển vào/i.test(message);
 }
 
 function pickBestDiscoveredWorkspace(
@@ -646,19 +646,29 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
   try {
     const assignedFolder = await readHealthAssignedFolder(userEmail);
     if (assignedFolder) {
-      const opened = await openSharedHealthWorkspace(
-        assignedFolder.folderId,
-        assignedFolder.familyFileId,
-        userEmail,
-        assignedFolder.adminEmail,
-      );
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(cacheKey, JSON.stringify({
-          rootFolderId: opened.rootFolderId,
-          familyFileId: opened.familyFileId,
-        }));
+      try {
+        const opened = await openSharedHealthWorkspace(
+          assignedFolder.folderId,
+          assignedFolder.familyFileId,
+          userEmail,
+          assignedFolder.adminEmail,
+        );
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(cacheKey, JSON.stringify({
+            rootFolderId: opened.rootFolderId,
+            familyFileId: opened.familyFileId,
+          }));
+        }
+        return opened;
+      } catch (handshakeErr) {
+        console.warn('[Discovery] Firestore folder handshake không mở được:', assignedFolder.folderId, handshakeErr);
+        if (isMissingWorkspaceError(handshakeErr)) {
+          if (normalizedEmail(assignedFolder.adminEmail) === cleanUserEmail) {
+            void unregisterHealthWorkspace(assignedFolder.folderId).catch(() => {});
+          }
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(cacheKey);
+        }
       }
-      return opened;
     }
   } catch (error) {
     console.warn('[Discovery] Firestore folder handshake chưa hoàn tất; giữ lời mời để thử lại:', error);
@@ -709,6 +719,12 @@ export async function findExistingHealthWorkspace(): Promise<HealthDriveWorkspac
           memberAssignment.rootFolderId,
           e,
         );
+        if (isMissingWorkspaceError(e)) {
+          if (normalizedEmail(memberAssignment.adminEmail) === cleanUserEmail) {
+            void unregisterHealthWorkspace(memberAssignment.rootFolderId).catch(() => {});
+          }
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(cacheKey);
+        }
       }
     }
   } catch (error) {
@@ -1027,6 +1043,10 @@ export async function openHealthWorkspace(
       throw new Error(`Bạn không có quyền truy cập kho dữ liệu này. Hãy nhờ Quản trị viên cấp lại quyền cho email của bạn.`);
     }
     throw error;
+  }
+
+  if (root.trashed) {
+    throw new Error(`Kho dữ liệu (ID: ${rootFolderId}) đã bị chuyển vào Thùng rác trên Google Drive.`);
   }
 
   if (root.mimeType !== FOLDER_MIME) {

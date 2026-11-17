@@ -7,7 +7,11 @@ import type {
   HealthProfile,
   HealthSource,
 } from '../types';
-import { cleanAndDeduplicateEventData, mergeHealthEvents } from './deduplicationService';
+import {
+  cleanAndDeduplicateEventData,
+  consolidateTimelineEvents,
+  mergeHealthEvents,
+} from './deduplicationService';
 import {
   classifyHealthEventType,
   cleanHospitalizationRecord,
@@ -898,3 +902,173 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
 export function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
+
+export function mergeDuplicateMemberProfiles(
+  primary: FamilyMember,
+  primaryProfile: HealthProfile,
+  duplicate: FamilyMember,
+  duplicateProfile: HealthProfile,
+  now = new Date().toISOString(),
+): {
+  mergedMember: FamilyMember;
+  mergedProfile: HealthProfile;
+  absorbedEventIds: string[];
+} {
+  const mergedMember: FamilyMember = {
+    ...primary,
+    email: primary.email?.trim() || duplicate.email?.trim() || undefined,
+    birthDate: primary.birthDate?.trim() || duplicate.birthDate?.trim() || undefined,
+    gender:
+      primary.gender && primary.gender !== 'other'
+        ? primary.gender
+        : duplicate.gender || primary.gender,
+    role:
+      primary.role && primary.role !== 'other'
+        ? primary.role
+        : duplicate.role || primary.role,
+    avatarUrl: primary.avatarUrl || duplicate.avatarUrl,
+  };
+
+  const sourcesById = new Map<string, HealthSource>();
+  for (const source of [...primaryProfile.sources, ...duplicateProfile.sources]) {
+    const sanitizedSource: HealthSource =
+      source.relocatedToMemberId === primary.id || source.relocatedToMemberId === duplicate.id
+        ? { ...source, relocatedToMemberId: undefined }
+        : source;
+    const previous = sourcesById.get(sanitizedSource.driveFileId);
+    if (!previous) {
+      sourcesById.set(sanitizedSource.driveFileId, sanitizedSource);
+      continue;
+    }
+    const rawContributions = [
+      ...(previous.sourceContributions || []),
+      ...(sanitizedSource.sourceContributions || []),
+    ];
+    const uniqueContributions = new Map<string, (typeof rawContributions)[0]>();
+    for (const item of rawContributions) {
+      const key = item.fileName.trim().toLowerCase();
+      const existing = uniqueContributions.get(key);
+      if (!existing || (item.uploadedAt || '') >= (existing.uploadedAt || '')) {
+        uniqueContributions.set(key, item);
+      }
+    }
+    const mergedContributions = [...uniqueContributions.values()];
+    const selected = sanitizedSource.status === 'processed' ? sanitizedSource : previous;
+    sourcesById.set(sanitizedSource.driveFileId, {
+      ...previous,
+      ...selected,
+      subjectStatus:
+        selected.status === 'processed'
+          ? selected.subjectStatus
+          : sanitizedSource.subjectStatus || previous.subjectStatus,
+      ...(mergedContributions.length > 0 ? { sourceContributions: mergedContributions } : {}),
+    });
+  }
+
+  const eventsById = new Map<string, HealthEvent>();
+  for (const event of [...primaryProfile.timeline, ...duplicateProfile.timeline]) {
+    const previous = eventsById.get(event.id);
+    if (!previous) {
+      eventsById.set(event.id, event);
+    } else if (event.recordedAt > previous.recordedAt) {
+      eventsById.set(event.id, event);
+    } else if (previous.recordedAt === event.recordedAt && !sameHealthEventContent(previous, event)) {
+      eventsById.set(event.id, mergeHealthEvents(previous, event, now));
+    }
+  }
+
+  const consolidated = consolidateTimelineEvents([...eventsById.values()]);
+  const consolidatedTimeline = [...consolidated.timeline].sort(
+    (left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt),
+  );
+  const absorbedEventIds = duplicateProfile.timeline.map((event) => event.id);
+
+  const activeEventIds = new Set(consolidatedTimeline.map((event) => event.id));
+  const activeSourceIds = new Set(sourcesById.keys());
+  const mergedDeletedEvents = upsertDeletionTombstones(
+    primaryProfile.deletedEvents,
+    duplicateProfile.deletedEvents,
+  ).filter((item) => !activeEventIds.has(item.id));
+  const mergedDeletedSources = upsertDeletionTombstones(
+    primaryProfile.deletedSources,
+    duplicateProfile.deletedSources,
+  ).filter((item) => !activeSourceIds.has(item.id));
+
+  const primarySurgeries = primaryProfile.medicalHistory?.surgeries || [];
+  const dupSurgeries = duplicateProfile.medicalHistory?.surgeries || [];
+  const surgeryMap = new Map<string, (typeof primarySurgeries)[number]>();
+  for (const item of [...primarySurgeries, ...dupSurgeries]) {
+    const key = `${item.procedure.trim().toLowerCase()}::${(item.year || '').trim()}`;
+    if (!surgeryMap.has(key)) surgeryMap.set(key, item);
+  }
+
+  const primaryConditions = primaryProfile.medicalHistory?.chronicConditions || [];
+  const dupConditions = duplicateProfile.medicalHistory?.chronicConditions || [];
+  const conditionMap = new Map<string, (typeof primaryConditions)[number]>();
+  for (const item of [...primaryConditions, ...dupConditions]) {
+    const key = item.condition.trim().toLowerCase();
+    if (!conditionMap.has(key)) conditionMap.set(key, item);
+  }
+
+  const mergedMedicalHistory =
+    surgeryMap.size > 0 || conditionMap.size > 0
+      ? {
+          surgeries: [...surgeryMap.values()],
+          chronicConditions: [...conditionMap.values()],
+        }
+      : undefined;
+
+  const timelineGrew =
+    duplicateProfile.timeline.length > 0 ||
+    didTimelineEventsChange(primaryProfile.timeline, consolidatedTimeline);
+
+  const mergedProfile: HealthProfile = {
+    schemaVersion: 2,
+    member: mergedMember,
+    timeline: consolidatedTimeline,
+    ...(timelineGrew
+      ? { timelineUpdatedAt: now }
+      : primaryProfile.timelineUpdatedAt
+        ? { timelineUpdatedAt: primaryProfile.timelineUpdatedAt }
+        : {}),
+    sources: [...sourcesById.values()].sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt)),
+    ...(mergedDeletedEvents.length > 0 ? { deletedEvents: mergedDeletedEvents } : {}),
+    ...(mergedDeletedSources.length > 0 ? { deletedSources: mergedDeletedSources } : {}),
+    summary: summarizeTimeline(
+      consolidatedTimeline,
+      primaryProfile.summary.narrative || duplicateProfile.summary.narrative,
+    ),
+    ...(timelineGrew
+      ? {
+          aiAnalysis: undefined,
+          aiDeepAnalysis: undefined,
+          aiAnalysisInvalidatedAt: now,
+        }
+      : {
+          aiAnalysis: primaryProfile.aiAnalysis,
+          aiDeepAnalysis: primaryProfile.aiDeepAnalysis,
+          ...(primaryProfile.aiAnalysisInvalidatedAt
+            ? { aiAnalysisInvalidatedAt: primaryProfile.aiAnalysisInvalidatedAt }
+            : {}),
+        }),
+    medicalHistory: mergedMedicalHistory,
+    ...(mergedMedicalHistory
+      ? {
+          medicalHistoryUpdatedAt: resolveLatestIsoTimestamp(
+            primaryProfile.medicalHistoryUpdatedAt,
+            duplicateProfile.medicalHistoryUpdatedAt,
+            now,
+          ),
+        }
+      : {}),
+    createdAt: primaryProfile.createdAt || duplicateProfile.createdAt || now,
+    updatedAt: now,
+  };
+
+  return {
+    mergedMember,
+    mergedProfile,
+    absorbedEventIds,
+  };
+}
+

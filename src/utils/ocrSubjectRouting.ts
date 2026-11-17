@@ -1,5 +1,5 @@
-import type { FamilyMember } from '../types';
-import { normalizeVietnamese } from './formatters';
+import type { FamilyMember, HealthProfile } from '../types';
+import { formatDateVN, normalizeVietnamese } from './formatters';
 
 const UNKNOWN_SUBJECT_LABELS = new Set([
   'na',
@@ -95,6 +95,13 @@ function normalizePatientName(value: string): string {
   return normalized;
 }
 
+export function normalizeNameTokens(value?: string): string[] {
+  if (!value) return [];
+  const normalized = normalizePatientName(value);
+  if (!normalized) return [];
+  return normalized.split(/\s+/).filter(Boolean);
+}
+
 export function extractPatientNameFallbackFromText(
   extracted: Record<string, unknown>,
   rawPageTexts: string[] = [],
@@ -143,7 +150,7 @@ export function extractPatientNameFallbackFromText(
   return undefined;
 }
 
-function normalizeBirthDate(value?: string): string | undefined {
+export function normalizeBirthDate(value?: string): string | undefined {
   if (!value) return undefined;
   const iso = value.trim().match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/);
   if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
@@ -154,6 +161,12 @@ function normalizeBirthDate(value?: string): string | undefined {
   return undefined;
 }
 
+export function areBirthDatesEquivalent(left?: string, right?: string): boolean {
+  const normLeft = normalizeBirthDate(left);
+  const normRight = normalizeBirthDate(right);
+  return Boolean(normLeft && normRight && normLeft === normRight);
+}
+
 function normalizeGender(value?: string): 'male' | 'female' | undefined {
   const normalized = normalizeVietnamese(value);
   if (['male', 'nam', 'm'].includes(normalized)) return 'male';
@@ -161,23 +174,120 @@ function normalizeGender(value?: string): 'male' | 'female' | undefined {
   return undefined;
 }
 
+export function areGendersCompatible(left?: string, right?: string): boolean {
+  const normLeft = normalizeGender(left);
+  const normRight = normalizeGender(right);
+  if (!normLeft || !normRight) return true;
+  return normLeft === normRight;
+}
+
+function tokensSubsetMatch(
+  shorter: string[],
+  longer: string[],
+  allowInitials: boolean,
+): boolean {
+  if (shorter.length < 2 || longer.length < shorter.length) return false;
+  const used = new Array<boolean>(longer.length).fill(false);
+  let fullTokenMatches = 0;
+
+  // Match exact full tokens first so initials cannot greedily consume a full token
+  for (const token of shorter) {
+    if (token.length < 2) continue;
+    const exactIdx = longer.findIndex((candidate, idx) => !used[idx] && candidate === token);
+    if (exactIdx === -1) return false;
+    used[exactIdx] = true;
+    fullTokenMatches++;
+  }
+
+  for (const token of shorter) {
+    if (token.length >= 2) continue;
+    if (!allowInitials) return false;
+    const initialIdx = longer.findIndex(
+      (candidate, idx) => !used[idx] && candidate.startsWith(token),
+    );
+    if (initialIdx === -1) return false;
+    used[initialIdx] = true;
+  }
+
+  return fullTokenMatches >= 2;
+}
+
+export function areNamesProbablySamePerson(
+  nameA: string,
+  nameB: string,
+  options?: { sameBirthDate?: boolean },
+): boolean {
+  const tokensA = normalizeNameTokens(nameA);
+  const tokensB = normalizeNameTokens(nameB);
+  if (tokensA.length === 0 || tokensB.length === 0) return false;
+  if (tokensA.join(' ') === tokensB.join(' ')) return true;
+
+  // Check exact bag-of-words reorder (e.g. "Minh Truong" vs "Truong Minh")
+  if (tokensA.length === tokensB.length) {
+    const sortedA = [...tokensA].sort().join(' ');
+    const sortedB = [...tokensB].sort().join(' ');
+    if (sortedA === sortedB && tokensA.length >= 2) {
+      return true;
+    }
+  }
+
+  const shorter = tokensA.length <= tokensB.length ? tokensA : tokensB;
+  const longer = tokensA.length <= tokensB.length ? tokensB : tokensA;
+  const allowInitials = Boolean(options?.sameBirthDate);
+
+  return tokensSubsetMatch(shorter, longer, allowInitials);
+}
+
+export function findProbableDuplicateMembersForInput(
+  input: { name: string; birthDate?: string; gender?: string; excludeMemberId?: string },
+  members: FamilyMember[],
+): FamilyMember[] {
+  if (!isRecognizablePatientName(input.name)) return [];
+  const normalizedInputName = normalizePatientName(input.name);
+  const inputBirth = normalizeBirthDate(input.birthDate);
+  const inputGender = normalizeGender(input.gender);
+
+  return members.filter((member) => {
+    if (input.excludeMemberId && member.id === input.excludeMemberId) return false;
+    const memberBirth = normalizeBirthDate(member.birthDate);
+    if (inputBirth && memberBirth && inputBirth !== memberBirth) return false;
+    if (!areGendersCompatible(inputGender, member.gender)) return false;
+
+    const normalizedMemberName = normalizePatientName(member.name);
+    if (normalizedMemberName === normalizedInputName) return true;
+    const sameBirthDate = Boolean(inputBirth && memberBirth && inputBirth === memberBirth);
+    return areNamesProbablySamePerson(input.name, member.name, { sameBirthDate });
+  });
+}
+
 export function findMemberByOcrPatientName(
   patientName: string,
   members: FamilyMember[],
   patientBirthDate?: string,
   patientGender?: string,
-): { matched?: FamilyMember; candidates: FamilyMember[] } {
-  if (!isRecognizablePatientName(patientName)) return { candidates: [] };
+): { matched?: FamilyMember; candidates: FamilyMember[]; probableMatches: FamilyMember[] } {
+  if (!isRecognizablePatientName(patientName)) {
+    return { candidates: [], probableMatches: [] };
+  }
   const normalizedName = normalizePatientName(patientName);
-  if (!normalizedName) return { candidates: [] };
+  if (!normalizedName) {
+    return { candidates: [], probableMatches: [] };
+  }
+
+  const birthDate = normalizeBirthDate(patientBirthDate);
+  const gender = normalizeGender(patientGender);
 
   const nameMatches = members.filter(
     (member) => normalizePatientName(member.name) === normalizedName,
   );
-  if (nameMatches.length === 0) return { candidates: [] };
+  if (nameMatches.length === 0) {
+    const probableMatches = findProbableDuplicateMembersForInput(
+      { name: patientName, birthDate: patientBirthDate, gender: patientGender },
+      members,
+    );
+    return { candidates: [], probableMatches };
+  }
 
-  const birthDate = normalizeBirthDate(patientBirthDate);
-  const gender = normalizeGender(patientGender);
   const candidates = nameMatches.filter((member) => {
     const memberBirthDate = normalizeBirthDate(member.birthDate);
     if (birthDate && memberBirthDate && birthDate !== memberBirthDate) return false;
@@ -186,7 +296,7 @@ export function findMemberByOcrPatientName(
     return true;
   });
   if (candidates.length === 1) {
-    return { matched: candidates[0], candidates };
+    return { matched: candidates[0], candidates, probableMatches: [] };
   }
 
   // When multiple family members share the same name, try same-year + gender disambiguation
@@ -200,7 +310,7 @@ export function findMemberByOcrPatientName(
       return true;
     });
     if (softCandidates.length === 1) {
-      return { matched: softCandidates[0], candidates: softCandidates };
+      return { matched: softCandidates[0], candidates: softCandidates, probableMatches: [] };
     }
   }
 
@@ -212,12 +322,13 @@ export function findMemberByOcrPatientName(
     nameMatches.length === 1 &&
     normalizedName.split(/\s+/).length >= 2
   ) {
-    return { matched: nameMatches[0], candidates: nameMatches };
+    return { matched: nameMatches[0], candidates: nameMatches, probableMatches: [] };
   }
 
   return {
     matched: undefined,
     candidates,
+    probableMatches: candidates.length > 0 ? candidates : nameMatches,
   };
 }
 
@@ -247,3 +358,73 @@ export function isOcrSubjectMatchedToMember(
   );
   return result.matched?.id === member.id;
 }
+
+export interface DuplicateMemberPair {
+  id: string;
+  primary: FamilyMember;
+  duplicate: FamilyMember;
+  reason: string;
+}
+
+function hasVietnameseDiacritics(value: string): boolean {
+  return value.normalize('NFC') !== normalizeVietnamese(value) && /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(value);
+}
+
+function scoreMemberCompleteness(
+  member: FamilyMember,
+  profile: HealthProfile | undefined,
+  index: number,
+): number {
+  let score = 0;
+  if (member.email && member.email.trim()) score += 100_000;
+  score += (profile?.timeline?.length || 0) * 1_000;
+  score += (profile?.sources?.length || 0) * 100;
+  if (hasVietnameseDiacritics(member.name)) score += 40;
+  score += Math.min(20, normalizeNameTokens(member.name).length * 5);
+  if (member.gender === 'male' || member.gender === 'female') score += 10;
+  if (normalizeBirthDate(member.birthDate)) score += 10;
+  if (!member.driveFolderId.startsWith('local_')) score += 5;
+  score -= index * 0.001;
+  return score;
+}
+
+export function findDuplicateFamilyMemberPairs(
+  members: FamilyMember[],
+  profiles: Record<string, HealthProfile>,
+): DuplicateMemberPair[] {
+  const pairs: DuplicateMemberPair[] = [];
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      const a = members[i];
+      const b = members[j];
+      if (!areGendersCompatible(a.gender, b.gender)) continue;
+      const birthA = normalizeBirthDate(a.birthDate);
+      const birthB = normalizeBirthDate(b.birthDate);
+      if (birthA && birthB && birthA !== birthB) continue;
+
+      const sameBirthDate = Boolean(birthA && birthB && birthA === birthB);
+      const exactSameName = normalizePatientName(a.name) === normalizePatientName(b.name);
+      const similarName = areNamesProbablySamePerson(a.name, b.name, { sameBirthDate });
+      if (!exactSameName && !similarName) continue;
+
+      const scoreA = scoreMemberCompleteness(a, profiles[a.id], i);
+      const scoreB = scoreMemberCompleteness(b, profiles[b.id], j);
+      const [primary, duplicate] = scoreA >= scoreB ? [a, b] : [b, a];
+
+      const reasons: string[] = [];
+      if (sameBirthDate && birthA) {
+        reasons.push(`Cùng ngày sinh ${formatDateVN(birthA) || birthA}`);
+      }
+      reasons.push(exactSameName ? 'trùng họ tên' : 'tên tương đồng / đảo thứ tự');
+
+      pairs.push({
+        id: [a.id, b.id].sort().join('::'),
+        primary,
+        duplicate,
+        reason: reasons.join(' · '),
+      });
+    }
+  }
+  return pairs;
+}
+
