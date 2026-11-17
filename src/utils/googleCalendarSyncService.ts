@@ -157,30 +157,36 @@ function buildFollowUpDescription(
   extraNote?: string,
 ): string {
   const lines: string[] = [
-    `Thành viên: ${member.name}`,
-    `Hồ sơ liên quan: ${event.title}`,
+    `🏥 LỊCH TÁI KHÁM & HẸN Y TẾ GIA ĐÌNH`,
+    `--------------------------------`,
+    `• Thành viên: ${member.name}`,
+    `• Hồ sơ khám: ${event.title}`,
+    `• Ngày khám trước: ${event.date || 'Không rõ'}`,
+    `• Cơ sở y tế: ${event.facility || 'Không rõ'}`,
   ];
-  if (event.date) {
-    lines.push(`Ngày khám trước đó: ${event.date}`);
-  }
-  if (event.facility) {
-    lines.push(`Cơ sở y tế: ${event.facility}`);
-  }
   if (event.doctorName) {
-    lines.push(`Bác sĩ: ${event.doctorName}`);
+    lines.push(`• Bác sĩ điều trị: ${event.doctorName}`);
   }
   if (event.diagnoses?.length) {
-    lines.push(`Chẩn đoán: ${event.diagnoses.join(', ')}`);
+    lines.push(`• Chẩn đoán: ${event.diagnoses.join(', ')}`);
+  }
+  if (event.medications?.length) {
+    lines.push(`• Đơn thuốc gần nhất: ${event.medications.map(m => `${m.name} (${m.dosage || 'liều chuẩn'}, ${m.frequency || ''})`).join('; ')}`);
+  }
+  if (event.metrics?.length) {
+    lines.push(`• Chỉ số y tế: ${event.metrics.map(m => `${m.name}: ${m.value} ${m.unit || ''}`).join(' · ')}`);
   }
   if (event.advice) {
-    lines.push(`Lời dặn bác sĩ: ${event.advice}`);
+    lines.push(`• Lời dặn bác sĩ: ${event.advice}`);
   }
   if (extraNote) {
-    lines.push(extraNote);
+    lines.push(`• Lưu ý: ${extraNote}`);
   }
-  lines.push(`Nguồn: Sức khỏe gia đình (${event.sourceFileName})`);
+  lines.push(`--------------------------------`);
+  lines.push(`Nguồn: Tự động đồng bộ từ ứng dụng Sức Khỏe Gia Đình (${event.sourceFileName})`);
   return lines.join('\n');
 }
+
 
 export function collectFutureFollowUpsForMember(
   members: FamilyMember[],
