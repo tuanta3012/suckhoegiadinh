@@ -28,6 +28,7 @@ interface WorkspaceAuditModalProps {
   userEmail: string | null;
   onClose: () => void;
   onFactoryReset: () => Promise<void>;
+  onCleanupComplete?: () => Promise<void> | void;
   showToast: (msg: string, type: 'success' | 'error' | 'info') => void;
 }
 
@@ -38,6 +39,7 @@ export function WorkspaceAuditModal({
   userEmail,
   onClose,
   onFactoryReset,
+  onCleanupComplete,
   showToast,
 }: WorkspaceAuditModalProps) {
   const [isCleaning, setIsCleaning] = useState(false);
@@ -84,6 +86,7 @@ export function WorkspaceAuditModal({
         }
       );
       setCleanResult(result);
+      await onCleanupComplete?.();
       showToast(
         `Đã dọn dẹp sạch sẽ: Xóa ${result.deletedRawFiles} tệp thừa & Hợp nhất ${result.mergedEvents} sự kiện!`,
         'success'

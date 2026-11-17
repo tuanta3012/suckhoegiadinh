@@ -19,6 +19,18 @@ export class CalendarPermissionError extends Error {
   }
 }
 
+export class CalendarApiDisabledError extends Error {
+  readonly isApiDisabled = true;
+
+  constructor(
+    message = 'Google Calendar API chưa được kích hoạt trên dự án Google Cloud.',
+    readonly activationUrl?: string,
+  ) {
+    super(message);
+    this.name = 'CalendarApiDisabledError';
+  }
+}
+
 export interface GoogleCalendarEventResource {
   id: string;
   summary?: string;
@@ -325,6 +337,34 @@ async function performCalendarHttp(
   });
 }
 
+function isCalendarApiDisabledResponse(status: number, text: string): boolean {
+  if (status !== 403) return false;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('calendar-json.googleapis.com') ||
+    lower.includes('service_disabled') ||
+    lower.includes('api has not been used in project') ||
+    (lower.includes('google calendar api') && lower.includes('disabled'))
+  );
+}
+
+function extractCalendarActivationUrl(parsed: unknown, fallbackText: string): string | undefined {
+  if (parsed && typeof parsed === 'object') {
+    const details = (parsed as { error?: { details?: Array<{ metadata?: { activationUrl?: unknown } }> } })
+      ?.error?.details;
+    if (Array.isArray(details)) {
+      for (const detail of details) {
+        const url = detail?.metadata?.activationUrl;
+        if (typeof url === 'string' && url.startsWith('https://')) {
+          return url;
+        }
+      }
+    }
+  }
+  const match = fallbackText.match(/https:\/\/console\.(?:developers|cloud)\.google\.com\/[^\s"'<>]+/);
+  return match?.[0];
+}
+
 function isInsufficientCalendarScopeResponse(status: number, message: string): boolean {
   if (status !== 403) return false;
   const lower = message.toLowerCase();
@@ -375,21 +415,27 @@ async function authenticatedCalendarFetch(
   if (!response.ok) {
     const rawError = await response.text().catch(() => '');
     let message = rawError;
+    let parsedError: unknown = null;
     try {
-      const parsed = JSON.parse(rawError) as { error?: { message?: string } };
-      if (parsed?.error?.message) message = parsed.error.message;
+      parsedError = JSON.parse(rawError);
+      const parsedMessage = (parsedError as { error?: { message?: string } })?.error?.message;
+      if (parsedMessage) message = parsedMessage;
     } catch {
       // keep raw text
+    }
+
+    const combinedText = [message, rawError].filter(Boolean).join('\n');
+    if (isCalendarApiDisabledResponse(response.status, combinedText)) {
+      throw new CalendarApiDisabledError(
+        'Google Calendar API chưa được kích hoạt trên dự án Google Cloud.',
+        extractCalendarActivationUrl(parsedError, combinedText),
+      );
     }
 
     if (isInsufficientCalendarScopeResponse(response.status, message || rawError)) {
       throw new CalendarPermissionError(
         'Tài khoản Google chưa cấp quyền đồng bộ Google Calendar. Nhấn "Cấp quyền Google Calendar" để tiếp tục.',
       );
-    }
-
-    if (response.status === 403 && message.toLowerCase().includes('calendar-json.googleapis.com')) {
-      throw new Error('Google Calendar API chưa được kích hoạt trên dự án Google Cloud.');
     }
 
     const err = new Error(message || `Google Calendar trả về lỗi ${response.status}.`) as Error & { status?: number };
@@ -580,7 +626,7 @@ export async function executePrimaryCalendarSync(
       });
       result.created += 1;
     } catch (error) {
-      if (error instanceof CalendarPermissionError) throw error;
+      if (error instanceof CalendarPermissionError || error instanceof CalendarApiDisabledError) throw error;
       result.failed += 1;
       result.errors.push(`${item.summary}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -597,7 +643,7 @@ export async function executePrimaryCalendarSync(
       );
       result.updated += 1;
     } catch (error) {
-      if (error instanceof CalendarPermissionError) throw error;
+      if (error instanceof CalendarPermissionError || error instanceof CalendarApiDisabledError) throw error;
       const status = (error as { status?: number })?.status;
       if (status === 404 || status === 410) {
         try {
@@ -608,7 +654,9 @@ export async function executePrimaryCalendarSync(
           result.created += 1;
           continue;
         } catch (createErr) {
-          if (createErr instanceof CalendarPermissionError) throw createErr;
+          if (createErr instanceof CalendarPermissionError || createErr instanceof CalendarApiDisabledError) {
+            throw createErr;
+          }
           result.failed += 1;
           result.errors.push(`${update.item.summary}: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
           continue;
@@ -628,7 +676,7 @@ export async function executePrimaryCalendarSync(
         );
         result.deleted += 1;
       } catch (error) {
-        if (error instanceof CalendarPermissionError) throw error;
+        if (error instanceof CalendarPermissionError || error instanceof CalendarApiDisabledError) throw error;
         const status = (error as { status?: number })?.status;
         if (status === 404 || status === 410) continue;
         result.failed += 1;

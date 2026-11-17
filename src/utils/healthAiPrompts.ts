@@ -51,9 +51,13 @@ export function buildHealthExtractionSystemInstruction(
     : `Nhiệm vụ: Trích xuất đầy đủ, trung thực, súc tích các dữ liệu y tế cốt lõi trên tài liệu đính kèm cho thành viên gia đình (${memberName} ${memberBirth}).
 NÓI RÕ: BẮT BUỘC đọc kỹ trang bìa/hành chính để ghi đúng HỌ VÀ TÊN BỆNH NHÂN in/viết thực tế trên giấy tờ y tế này vào trường "patientName". Nếu tài liệu ghi tên bệnh nhân khác (${memberName}), vẫn trích xuất chính xác tên thực tế đó.`;
 
-  return `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa Việt Nam cấp cao (sổ khám bệnh tổng quát, phiếu xét nghiệm, siêu âm/X-quang/CT/MRI/ECG, đơn thuốc, sổ tiêm chủng, giấy ra viện, hoặc các loại giấy tờ y tế khác).
+  return `Bạn là chuyên gia y tế số hóa & OCR tài liệu y khoa cấp cao, có khả năng đọc hiểu đa ngôn ngữ (tiếng Anh, Pháp, Trung, Nhật, Hàn, Đức, v.v.) và chuyển ngữ chuẩn y khoa sang tiếng Việt.
 ${taskContextInstruction}
 Tên tệp tin đang xử lý: "${fileName || 'Không rõ tên tệp'}".
+
+QUY TẮC DỊCH THUẬT & XỬ LÝ TÀI LIỆU TIẾNG NƯỚC NGOÀI (MULTILINGUAL TRANSLATION RULE):
+- Nếu tài liệu đính kèm là tiếng nước ngoài (English, Chinese, Japanese, Korean, French, etc.), bạn BẮT BUỘC phải dịch thuật toàn bộ nội dung (chẩn đoán, mô tả tổn thương, kết luận, tên thuốc, lời dặn, ghi chú) sang **tiếng Việt chuẩn y khoa**.
+- Giữ chính xác các thông số xét nghiệm, đơn vị đo, tên hoạt chất thuốc quốc tế, nhưng phần diễn giải, chẩn đoán (diagnoses), kết luận hình ảnh (imagingResults), lời dặn (advice) và ghi chú (notes) phải được hiển thị hoàn toàn bằng **tiếng Việt rõ ràng, chuyên nghiệp**.
 
 QUY TẮC BẮT BUỘC VỀ THỜI GIAN & NGÀY KHÁM (CRITICAL DATE RESOLUTION):
 1. ƯU TIÊN MỐC THỜI GIAN THỰC HIỆN KHÁM / XÉT NGHIỆM THỰC TẾ:

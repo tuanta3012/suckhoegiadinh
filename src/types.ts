@@ -106,6 +106,7 @@ export interface HealthSource {
   status: 'pending' | 'processed';
   subjectStatus?: 'unresolved';
   digitizedAt?: string;
+  restoredAt?: string;
   rawDeletedAt?: string;
   relocatedToMemberId?: string;
   fileSize?: number;
@@ -130,6 +131,11 @@ export interface HealthSource {
     mergedIntoEventId?: string;
     sourceDriveFileId?: string;
   }>;
+}
+
+export interface HealthDeletionTombstone {
+  id: string;
+  deletedAt: string;
 }
 
 export interface HealthSummary {
@@ -219,6 +225,8 @@ export interface HealthProfile {
   timeline: HealthEvent[];
   timelineUpdatedAt?: string;
   sources: HealthSource[];
+  deletedEvents?: HealthDeletionTombstone[];
+  deletedSources?: HealthDeletionTombstone[];
   summary: HealthSummary;
   aiDeepAnalysis?: AiDeepAnalysisResult;
   aiAnalysis?: AiAnalysisBlock;

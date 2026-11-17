@@ -1810,6 +1810,37 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
   throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi xóa tệp.`);
 }
 
+export async function removeDriveFileFromFolder(fileId: string, folderId: string): Promise<void> {
+  if (!fileId.trim() || !folderId.trim()) return;
+  const params = new URLSearchParams({
+    removeParents: folderId,
+    supportsAllDrives: 'true',
+  });
+  const response = await authenticatedDriveFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?${params.toString()}`,
+    { method: 'PATCH' },
+    false,
+    [404],
+  );
+  if (response.ok || response.status === 404) return;
+  const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+  throw new Error(body?.error?.message || `Google Drive trả về lỗi ${response.status} khi gỡ tệp khỏi thư mục.`);
+}
+
+export async function deleteOrUnlinkDriveFile(fileId: string, parentFolderId?: string): Promise<void> {
+  try {
+    await deleteDriveFile(fileId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '');
+    const isPermissionError = /forbidden|403|insufficient permissions|permission/i.test(message);
+    if (isPermissionError && parentFolderId?.trim()) {
+      await removeDriveFileFromFolder(fileId, parentFolderId);
+      return;
+    }
+    throw error;
+  }
+}
+
 export async function trashDriveFile(fileId: string): Promise<void> {
   const response = await authenticatedDriveFetch(
     `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
@@ -2226,6 +2257,9 @@ function collectTrackedSourceIdsForProfile(profile: HealthProfile): Set<string> 
     for (const contrib of source.sourceContributions || []) {
       if (contrib.sourceDriveFileId) tracked.add(contrib.sourceDriveFileId);
     }
+  }
+  for (const tombstone of profile.deletedSources || []) {
+    if (tombstone.id) tracked.add(tombstone.id);
   }
   for (const event of profile.timeline || []) {
     if (event.sourceFileId) tracked.add(event.sourceFileId);

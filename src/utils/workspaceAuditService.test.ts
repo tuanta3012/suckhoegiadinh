@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FamilyMember, HealthEvent, HealthProfile } from '../types';
 import type { DriveFile, HealthDriveWorkspace } from './healthDriveService';
+import { mergeHealthProfiles } from './healthProfile';
 import { cleanupWorkspaceDuplicates } from './workspaceAuditService';
 
 const member: FamilyMember = {
@@ -233,5 +234,96 @@ describe('cleanupWorkspaceDuplicates', () => {
       expect.arrayContaining(['file-checkup', 'file-lab']),
     );
     expect(savedProfile.sources.find((s) => s.driveFileId === 'file-lab')?.rawDeletedAt).toBeTruthy();
+  });
+
+  it('merges same-day lab and prescription events, records deletedEvents tombstones, and prevents resurrection on Drive profile merge', async () => {
+    const rawFiles: DriveFile[] = [
+      { id: 'file-lab', name: 'lab-0902.jpg', mimeType: 'image/jpeg', createdTime: '2026-02-09T07:30:00Z', md5Checksum: 'e'.repeat(32) },
+      { id: 'file-rx', name: 'rx-0902.jpg', mimeType: 'image/jpeg', createdTime: '2026-02-09T07:37:00Z', md5Checksum: 'f'.repeat(32) },
+    ];
+    const sharedMetrics = [
+      { name: 'Định lượng HbA1c', value: 6.1, unit: '%' },
+      { name: 'Định lượng Glucose', value: 6.33, unit: 'mmol/L' },
+    ];
+    const labEvent: HealthEvent = {
+      id: 'ev-lab-split',
+      sourceFileId: 'file-lab',
+      sourceFileName: 'lab-0902.jpg',
+      type: 'test_result',
+      title: 'Phiếu kết quả xét nghiệm',
+      date: '2026-02-09',
+      facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+      doctorName: 'BS. Đặng Đồng Quốc Chí',
+      diagnoses: ['E11 - Bệnh đái tháo đường không phụ thuộc insulin', 'I10 - Bệnh tăng huyết áp vô căn (nguyên phát)'],
+      medications: [],
+      metrics: sharedMetrics,
+      recordedAt: '2026-02-09T07:35:00.000Z',
+    };
+    const rxEvent: HealthEvent = {
+      id: 'ev-rx-main',
+      sourceFileId: 'file-rx',
+      sourceFileName: 'rx-0902.jpg',
+      type: 'prescription',
+      title: 'Đơn thuốc',
+      date: '2026-02-09',
+      facility: 'Bệnh viện Đại học Y Dược TP.HCM - Phòng khám Bệnh viện Đại học Y Dược 1',
+      doctorName: 'BS. ThS.BS. Đặng Đồng Quốc Chí',
+      diagnoses: ['I10 - Bệnh tăng huyết áp vô căn (nguyên phát)', 'E11 - Bệnh đái tháo đường không phụ thuộc insulin', 'E78.2 - Tăng lipid máu hỗn hợp'],
+      medications: [{ name: 'METFORMIN HCL 850/SITAGLIPTIN 50', dosage: '50mg+850mg' }],
+      metrics: sharedMetrics,
+      nextFollowUp: '2026-05-09',
+      recordedAt: '2026-02-09T07:40:00.000Z',
+    };
+    const remoteStaleProfile: HealthProfile = {
+      schemaVersion: 2,
+      member,
+      timeline: [labEvent, rxEvent],
+      sources: [
+        { ...makeSource('file-lab'), fileName: 'lab-0902.jpg', fileHash: '1'.repeat(64) },
+        {
+          ...makeSource('file-rx'),
+          fileName: 'rx-0902.jpg',
+          fileHash: '2'.repeat(64),
+          sourceContributions: [
+            {
+              fileName: 'lab-0902.jpg',
+              fileHash: '1'.repeat(64),
+              hashAlgorithm: 'sha256',
+              uploadedAt: '2026-02-09T07:35:00.000Z',
+              disposition: 'included',
+              reason: 'Nội dung nằm trọn trong bản đầy đủ hơn',
+              mergedIntoEventId: 'ev-lab-split',
+            },
+          ],
+        },
+      ],
+      summary: { latestDiagnoses: [], latestMetrics: {} },
+      createdAt: labEvent.recordedAt,
+      updatedAt: rxEvent.recordedAt,
+    };
+
+    let currentProfile = remoteStaleProfile;
+    const deleteFile = vi.fn(async () => undefined);
+
+    const result = await cleanupWorkspaceDuplicates(
+      workspace,
+      async () => currentProfile,
+      async (_fileId, incoming) => {
+        // Mô phỏng hành vi saveHealthProfileRemote: luôn merge với bản cũ nhất trên Drive!
+        currentProfile = mergeHealthProfiles(remoteStaleProfile, incoming);
+        return currentProfile;
+      },
+      async () => rawFiles,
+      deleteFile,
+    );
+
+    expect(result.mergedEvents).toBeGreaterThanOrEqual(1);
+    expect(currentProfile.timeline).toHaveLength(1);
+    expect(currentProfile.timeline[0].id).toBe('ev-rx-main');
+    expect(currentProfile.timeline[0].type).toBe('prescription');
+    expect(currentProfile.deletedEvents?.map((t) => t.id)).toContain('ev-lab-split');
+    expect(
+      currentProfile.sources.find((s) => s.driveFileId === 'file-rx')?.sourceContributions?.[0]?.mergedIntoEventId,
+    ).toBe('ev-rx-main');
   });
 });

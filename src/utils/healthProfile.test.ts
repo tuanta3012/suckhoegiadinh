@@ -479,4 +479,70 @@ describe('health profile', () => {
     expect(merged.medicalHistory).toEqual(newerHistory);
     expect(merged.medicalHistoryUpdatedAt).toBe('2026-04-02T10:00:00.000Z');
   });
+
+  it('prevents older remote snapshots from resurrecting deleted timeline events or sources', () => {
+    const source = {
+      driveFileId: 'source-1',
+      fileName: 'lab.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-03-10T08:00:00.000Z',
+      status: 'processed' as const,
+      digitizedAt: '2026-03-10T09:05:00.000Z',
+    };
+    const remoteSnapshot = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [event],
+      sources: [source],
+      timelineUpdatedAt: '2026-03-10T09:05:00.000Z',
+    };
+    const localAfterDeletion = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [],
+      sources: [],
+      deletedEvents: [{ id: 'event-1', deletedAt: '2026-03-11T10:00:00.000Z' }],
+      deletedSources: [{ id: 'source-1', deletedAt: '2026-03-11T10:00:00.000Z' }],
+      timelineUpdatedAt: '2026-03-11T10:00:00.000Z',
+      aiAnalysisInvalidatedAt: '2026-03-11T10:00:00.000Z',
+    };
+
+    const merged = mergeHealthProfiles(remoteSnapshot, localAfterDeletion);
+    expect(merged.timeline).toEqual([]);
+    expect(merged.sources).toEqual([]);
+    expect(merged.deletedEvents).toEqual([{ id: 'event-1', deletedAt: '2026-03-11T10:00:00.000Z' }]);
+    expect(merged.deletedSources).toEqual([{ id: 'source-1', deletedAt: '2026-03-11T10:00:00.000Z' }]);
+
+    const reparsed = parseHealthProfile(merged, member);
+    expect(reparsed.deletedEvents).toEqual([{ id: 'event-1', deletedAt: '2026-03-11T10:00:00.000Z' }]);
+    expect(reparsed.deletedSources).toEqual([{ id: 'source-1', deletedAt: '2026-03-11T10:00:00.000Z' }]);
+  });
+
+  it('allows a previously relocated or deleted source and event to be restored with newer timestamps', () => {
+    const profileWithOlderTombstone = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      deletedEvents: [{ id: 'event-1', deletedAt: '2026-03-11T10:00:00.000Z' }],
+      deletedSources: [{ id: 'source-1', deletedAt: '2026-03-11T10:00:00.000Z' }],
+    };
+    const restoredIncoming = {
+      ...createHealthProfile(member, '2026-01-01T00:00:00.000Z'),
+      timeline: [{ ...event, recordedAt: '2026-03-12T08:00:00.000Z' }],
+      sources: [{
+        driveFileId: 'source-1',
+        fileName: 'lab.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-03-10T08:00:00.000Z',
+        status: 'processed' as const,
+        digitizedAt: '2026-03-10T09:05:00.000Z',
+        restoredAt: '2026-03-12T08:00:00.000Z',
+      }],
+      timelineUpdatedAt: '2026-03-12T08:00:00.000Z',
+    };
+
+    const merged = mergeHealthProfiles(profileWithOlderTombstone, restoredIncoming);
+    expect(merged.timeline).toHaveLength(1);
+    expect(merged.sources).toHaveLength(1);
+    expect(merged.sources[0].restoredAt).toBe('2026-03-12T08:00:00.000Z');
+    expect(merged.deletedEvents).toBeUndefined();
+    expect(merged.deletedSources).toBeUndefined();
+  });
 });
+

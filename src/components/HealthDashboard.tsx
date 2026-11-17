@@ -102,6 +102,7 @@ import {
   revokeDriveFolderAccess,
   saveHealthProfile,
   trashDriveFile,
+  deleteOrUnlinkDriveFile,
   restoreTrashedDriveFile,
   updateDriveFamilyMember,
   uploadRawHealthFile,
@@ -141,6 +142,7 @@ import {
   mergeHealthProfiles,
   parseHealthProfile,
   summarizeTimeline,
+  upsertDeletionTombstones,
 } from '../utils/healthProfile';
 import {
   buildHealthMetricChartData,
@@ -235,6 +237,7 @@ import {
 } from '../utils/backgroundNotificationService';
 import { getFollowUpRemindersForSignedInMember } from '../utils/followUpReminders';
 import {
+  CalendarApiDisabledError,
   CalendarPermissionError,
   collectFutureFollowUpsForMember,
   executePrimaryCalendarSync,
@@ -251,7 +254,70 @@ import {
   useBackHandler,
 } from '../utils/backNavigation';
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
+export type AutoCalendarSyncOutcome =
+  | {
+      status: 'synced';
+      created: number;
+      updated: number;
+      deleted: number;
+      unchanged: number;
+      failed: number;
+    }
+  | { status: 'skipped' }
+  | { status: 'no_member' }
+  | { status: 'permission_required'; message: string }
+  | { status: 'api_disabled'; message: string }
+  | { status: 'error'; message: string };
 const DASHBOARD_TAB_ORDER: DashboardTab[] = ['overview', 'timeline', 'assistant', 'family'];
+
+function consolidateProfileWithTombstones(
+  profile: HealthProfile,
+  now = new Date().toISOString(),
+): {
+  profile: HealthProfile;
+  mergedCount: number;
+  absorbedEventIds: string[];
+  mergedEventIdMap: Record<string, string>;
+} {
+  const { timeline, mergedCount, absorbedEventIds, mergedEventIdMap } =
+    consolidateTimelineEvents(profile.timeline);
+  if (mergedCount === 0 && absorbedEventIds.length === 0) {
+    return { profile, mergedCount: 0, absorbedEventIds: [], mergedEventIdMap: {} };
+  }
+  const tombstones = absorbedEventIds.map((id) => ({ id, deletedAt: now }));
+  const updatedSources = profile.sources.map((source) => {
+    if (!source.sourceContributions?.length) return source;
+    let changed = false;
+    const nextContributions = source.sourceContributions.map((contribution) => {
+      const remappedId = contribution.mergedIntoEventId
+        ? mergedEventIdMap[contribution.mergedIntoEventId]
+        : undefined;
+      if (remappedId && remappedId !== contribution.mergedIntoEventId) {
+        changed = true;
+        return { ...contribution, mergedIntoEventId: remappedId };
+      }
+      return contribution;
+    });
+    return changed ? { ...source, sourceContributions: nextContributions } : source;
+  });
+  return {
+    mergedCount,
+    absorbedEventIds,
+    mergedEventIdMap,
+    profile: {
+      ...profile,
+      timeline,
+      sources: updatedSources,
+      deletedEvents: upsertDeletionTombstones(profile.deletedEvents, tombstones),
+      timelineUpdatedAt: now,
+      summary: summarizeTimeline(timeline, profile.summary.narrative),
+      aiDeepAnalysis: undefined,
+      aiAnalysis: undefined,
+      aiAnalysisInvalidatedAt: now,
+      updatedAt: now,
+    },
+  };
+}
 
 const MEDICAL_EXTRACTED_FIELD_LABELS: Record<string, { label: string; icon?: string }> = {
   clinicalDiagnosis: { label: 'Chẩn đoán lâm sàng', icon: '📋' },
@@ -1007,11 +1073,18 @@ export function HealthDashboard({
   const periodicSyncPollInFlightRef = useRef(false);
   const lastSyncedVersionDigestRef = useRef('');
   const autoCalendarSyncInFlightRef = useRef(false);
+  const autoCalendarSyncPromiseRef = useRef<Promise<AutoCalendarSyncOutcome> | null>(null);
   const lastAutoCalendarSyncKeyRef = useRef('');
+  const autoCalendarApiDisabledRef = useRef(false);
   const pickedMemberIdForBatchRef = useRef<string | undefined>(undefined);
   const batchStagingMemberIdRef = useRef<string | undefined>(undefined);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
   authIdentityRef.current = { userEmail, driveAuthorized };
+  useEffect(() => {
+    if (!driveAuthorized) {
+      autoCalendarApiDisabledRef.current = false;
+    }
+  }, [driveAuthorized, userEmail]);
   const previousSelectedMemberIdRef = useRef(selectedMemberId);
   const previousWorkspaceRootRef = useRef(workspace?.rootFolderId);
   useEffect(() => {
@@ -1173,14 +1246,12 @@ export function HealthDashboard({
             throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc; chưa ghi đè dữ liệu.');
           }
 
-          const { timeline } = consolidateTimelineEvents(organizedTimeline);
           const pipelineNow = new Date().toISOString();
-          const refinedProfile: HealthProfile = {
-            ...currentProfile,
-            timeline,
-            timelineUpdatedAt: pipelineNow,
-            summary: summarizeTimeline(timeline, currentProfile.summary.narrative),
-          };
+          const consolidatedAfterAi = consolidateProfileWithTombstones(
+            { ...currentProfile, timeline: organizedTimeline },
+            pipelineNow,
+          );
+          const refinedProfile = consolidatedAfterAi.profile;
           const narrative = await summarizeHealthProfile(targetMember, refinedProfile);
           let aiDeepAnalysis: HealthProfile['aiDeepAnalysis'] = undefined;
           let aiAnalysis: HealthProfile['aiAnalysis'] = undefined;
@@ -1223,6 +1294,19 @@ export function HealthDashboard({
             totalPipelineMs,
           );
         } catch (error) {
+          // Dù AI chuẩn hóa/tóm tắt gặp lỗi hoặc quá tải, vẫn chạy hợp nhất nội bộ có tombstones
+          // để đảm bảo các tài liệu cùng ngày/bác sĩ/cơ sở không bị tách rời trên dòng thời gian.
+          try {
+            const latestProfile = profilesRef.current[memberId] || currentProfile;
+            const localConsolidated = consolidateProfileWithTombstones(latestProfile);
+            if (localConsolidated.mergedCount > 0 || localConsolidated.absorbedEventIds.length > 0) {
+              const savedLocal = await saveHealthProfile(targetMember.profileFileId, localConsolidated.profile);
+              profilesRef.current = { ...profilesRef.current, [memberId]: savedLocal };
+              setProfiles((previous) => ({ ...previous, [memberId]: savedLocal }));
+            }
+          } catch (localErr) {
+            console.warn('[Auto Summary] Deterministic fallback consolidation failed:', localErr);
+          }
           const message = error instanceof Error ? error.message : 'Không thể tổng hợp hồ sơ.';
           failedMembers.push(targetMember.name);
           digitizationLogger.log(
@@ -1645,15 +1729,23 @@ export function HealthDashboard({
     nextMembers: FamilyMember[],
     nextProfiles: Record<string, HealthProfile>,
     options: { force?: boolean } = {},
-  ) => {
+  ): Promise<AutoCalendarSyncOutcome> => {
+    if (autoCalendarSyncPromiseRef.current) {
+      if (!options.force) {
+        return autoCalendarSyncPromiseRef.current;
+      }
+      await autoCalendarSyncPromiseRef.current.catch(() => undefined);
+    }
+
     const authIdentity = authIdentityRef.current;
     if (
       !authIdentity.driveAuthorized ||
       !authIdentity.userEmail ||
       (typeof navigator !== 'undefined' && !navigator.onLine) ||
-      autoCalendarSyncInFlightRef.current
+      autoCalendarSyncInFlightRef.current ||
+      (!options.force && autoCalendarApiDisabledRef.current)
     ) {
-      return;
+      return { status: 'skipped' };
     }
 
     const followUps = collectFutureFollowUpsForMember(
@@ -1661,7 +1753,9 @@ export function HealthDashboard({
       nextProfiles,
       authIdentity.userEmail,
     );
-    if (!followUps.member) return;
+    if (!followUps.member) {
+      return { status: 'no_member' };
+    }
 
     const syncKey = JSON.stringify({
       email: authIdentity.userEmail.trim().toLowerCase(),
@@ -1676,52 +1770,90 @@ export function HealthDashboard({
     });
 
     if (!options.force && lastAutoCalendarSyncKeyRef.current === syncKey) {
-      return;
+      return { status: 'skipped' };
     }
 
-    autoCalendarSyncInFlightRef.current = true;
-    try {
-      const plan = await previewPrimaryCalendarSync(
-        nextMembers,
-        nextProfiles,
-        authIdentity.userEmail,
-      );
-      const hasChanges =
-        plan.toCreate.length > 0 ||
-        plan.toUpdate.length > 0 ||
-        plan.staleEvents.length > 0;
+    const run = (async (): Promise<AutoCalendarSyncOutcome> => {
+      autoCalendarSyncInFlightRef.current = true;
+      try {
+        const plan = await previewPrimaryCalendarSync(
+          nextMembers,
+          nextProfiles,
+          authIdentity.userEmail,
+        );
+        autoCalendarApiDisabledRef.current = false;
+        const hasChanges =
+          plan.toCreate.length > 0 ||
+          plan.toUpdate.length > 0 ||
+          plan.staleEvents.length > 0;
 
-      if (hasChanges) {
-        const result = await executePrimaryCalendarSync(plan, {
-          removeStaleEvents: true,
-        });
-        digitizationLogger.log(
-          result.failed > 0 ? 'warn' : 'info',
-          'auto_calendar_sync',
-          `Tự động đồng bộ Google Calendar cho ${followUps.member.name}: thêm ${result.created}, cập nhật ${result.updated}, gỡ ${result.deleted}, lỗi ${result.failed}`,
-          result,
-        );
-      }
-      lastAutoCalendarSyncKeyRef.current = syncKey;
-    } catch (error) {
-      if (error instanceof CalendarPermissionError) {
-        digitizationLogger.log(
-          'warn',
-          'auto_calendar_sync_permission',
-          `Chưa có quyền Google Calendar khi tự động đồng bộ: ${error.message}`,
-        );
-      } else {
+        let outcome: AutoCalendarSyncOutcome = {
+          status: 'synced',
+          created: 0,
+          updated: 0,
+          deleted: 0,
+          unchanged: plan.unchanged.length,
+          failed: 0,
+        };
+
+        if (hasChanges) {
+          const result = await executePrimaryCalendarSync(plan, {
+            removeStaleEvents: true,
+          });
+          outcome = {
+            status: 'synced',
+            created: result.created,
+            updated: result.updated,
+            deleted: result.deleted,
+            unchanged: result.unchanged,
+            failed: result.failed,
+          };
+          digitizationLogger.log(
+            result.failed > 0 ? 'warn' : 'info',
+            'auto_calendar_sync',
+            `Tự động đồng bộ Google Calendar cho ${followUps.member.name}: thêm ${result.created}, cập nhật ${result.updated}, gỡ ${result.deleted}, lỗi ${result.failed}`,
+            result,
+          );
+        }
+        lastAutoCalendarSyncKeyRef.current = syncKey;
+        return outcome;
+      } catch (error) {
+        if (error instanceof CalendarApiDisabledError) {
+          autoCalendarApiDisabledRef.current = true;
+          lastAutoCalendarSyncKeyRef.current = syncKey;
+          digitizationLogger.log(
+            'warn',
+            'auto_calendar_sync_api_disabled',
+            `Tạm bỏ qua tự động đồng bộ Google Calendar: ${error.message}`,
+          );
+          return { status: 'api_disabled', message: error.message };
+        }
+        if (error instanceof CalendarPermissionError) {
+          digitizationLogger.log(
+            'warn',
+            'auto_calendar_sync_permission',
+            `Chưa có quyền Google Calendar khi tự động đồng bộ: ${error.message}`,
+          );
+          return { status: 'permission_required', message: error.message };
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Lỗi tự động đồng bộ Google Calendar.';
         digitizationLogger.log(
           'error',
           'auto_calendar_sync_error',
-          error instanceof Error
-            ? `Lỗi tự động đồng bộ Google Calendar: ${error.message}`
-            : 'Lỗi tự động đồng bộ Google Calendar.',
+          `Lỗi tự động đồng bộ Google Calendar: ${message}`,
         );
+        return { status: 'error', message };
+      } finally {
+        autoCalendarSyncInFlightRef.current = false;
+        autoCalendarSyncPromiseRef.current = null;
       }
-    } finally {
-      autoCalendarSyncInFlightRef.current = false;
-    }
+    })();
+
+    autoCalendarSyncPromiseRef.current = run;
+    return run;
   }, []);
 
   const refreshSyncVersionDigest = useCallback(async (targetWorkspace: HealthDriveWorkspace) => {
@@ -1781,23 +1913,93 @@ export function HealthDashboard({
     }
   }, []);
 
-  async function handleManualSync(options: { autoCreate?: boolean } = {}): Promise<boolean> {
+  async function handleManualSync(
+    options: { autoCreate?: boolean; interactive?: boolean } = {},
+  ): Promise<boolean> {
     if (!driveAuthorized) {
       showToast('Đang mở trang đăng nhập Google Drive để kích hoạt đồng bộ 2 chiều...', 'info');
       onConnectDrive();
       return false;
     }
+
+    const reportUnifiedSyncToast = (calendarOutcome: AutoCalendarSyncOutcome) => {
+      if (!options.interactive) return;
+      if (calendarOutcome.status === 'synced') {
+        const parts: string[] = [];
+        if (calendarOutcome.created > 0) parts.push(`thêm ${calendarOutcome.created}`);
+        if (calendarOutcome.updated > 0) parts.push(`cập nhật ${calendarOutcome.updated}`);
+        if (calendarOutcome.deleted > 0) parts.push(`gỡ ${calendarOutcome.deleted} lịch cũ`);
+        if (calendarOutcome.failed > 0 && parts.length === 0) {
+          showToast(
+            `Đã đồng bộ Drive, nhưng đồng bộ Google Calendar lỗi ${calendarOutcome.failed} lịch hẹn.`,
+            'error',
+          );
+        } else if (parts.length > 0) {
+          showToast(
+            `Đã đồng bộ Drive & Google Calendar (${parts.join(', ')} lịch hẹn)${calendarOutcome.failed > 0 ? `, lỗi ${calendarOutcome.failed}` : ''}!`,
+            calendarOutcome.failed > 0 ? 'error' : 'success',
+          );
+        } else if (calendarOutcome.unchanged > 0) {
+          showToast(
+            `Đã đồng bộ Drive & Google Calendar (${calendarOutcome.unchanged} lịch hẹn đã khớp)!`,
+            'success',
+          );
+        } else {
+          showToast('Đã đồng bộ Drive & Google Calendar thành công!', 'success');
+        }
+        return;
+      }
+      if (calendarOutcome.status === 'permission_required') {
+        showToast(
+          'Đã đồng bộ Drive! Hãy cấp quyền Google Calendar để đồng bộ luôn lịch tái khám.',
+          'info',
+        );
+        setShowGoogleCalendarSyncModal(true);
+        return;
+      }
+      if (calendarOutcome.status === 'api_disabled') {
+        showToast(
+          'Đã đồng bộ Drive thành công! (Google Calendar API chưa bật trên Google Cloud.)',
+          'info',
+        );
+        return;
+      }
+      if (calendarOutcome.status === 'no_member') {
+        showToast(
+          'Đã đồng bộ Drive thành công! (Email tài khoản hiện tại chưa gắn vào thành viên nào để đồng bộ Calendar.)',
+          'info',
+        );
+        return;
+      }
+      if (calendarOutcome.status === 'error') {
+        showToast(
+          `Đã đồng bộ Drive, nhưng đồng bộ Google Calendar gặp lỗi: ${calendarOutcome.message}`,
+          'error',
+        );
+        return;
+      }
+      showToast('Đã đồng bộ dữ liệu Google Drive thành công!', 'success');
+    };
+
     const cleanEmail = userEmail ? userEmail.trim().toLowerCase() : null;
     const savedRootId = cleanEmail
       ? localStorage.getItem(`${PROFILE_ROOT_KEY}_${cleanEmail}`)
       : null;
-    if (savedRootId) {
-      const opened = await openWorkspace(savedRootId);
+    if (savedRootId && workspace?.rootFolderId !== savedRootId) {
+      const opened = await openWorkspace(savedRootId, {
+        silentSuccessToast: Boolean(options.interactive),
+        skipCalendarSync: true,
+      });
       if (opened) {
         const activeWorkspace = workspaceRef.current;
         if (activeWorkspace && activeWorkspace.rootFolderId !== 'local_offline_workspace') {
           await runManualOrphanRawReconcile(activeWorkspace, profilesRef.current);
-          void triggerAutoCalendarSync(activeWorkspace.family.members, profilesRef.current, { force: true });
+          const calendarOutcome = await triggerAutoCalendarSync(
+            activeWorkspace.family.members,
+            profilesRef.current,
+            { force: true },
+          );
+          reportUnifiedSyncToast(calendarOutcome);
         }
         return true;
       }
@@ -1805,7 +2007,9 @@ export function HealthDashboard({
     }
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') {
       setIsSyncing(true);
-      showToast('Đang tự động quét và kết nối Thư mục Sức Khỏe trên Google Drive...', 'info');
+      if (options.interactive) {
+        showToast('Đang quét và đồng bộ Google Drive & Google Calendar...', 'info');
+      }
       try {
         const discovered = await findExistingHealthWorkspace();
         if (discovered) {
@@ -1824,11 +2028,15 @@ export function HealthDashboard({
               synchronized.family.members[0]?.id ||
               '',
           );
-          const loadedProfiles = await reloadProfiles(synchronized);
+          const loadedProfiles = await reloadProfiles(synchronized, { skipCalendarSync: true });
           await runManualOrphanRawReconcile(synchronized, loadedProfiles);
-          void triggerAutoCalendarSync(synchronized.family.members, profilesRef.current, { force: true });
+          const calendarOutcome = await triggerAutoCalendarSync(
+            synchronized.family.members,
+            profilesRef.current,
+            { force: true },
+          );
           setErrorMessage('');
-          showToast('Đã kết nối và đồng bộ 2 chiều thành công!', 'success');
+          reportUnifiedSyncToast(calendarOutcome);
           return true;
         } else if (options.autoCreate) {
           showToast('Đang khởi tạo thư mục Sức khỏe Gia đình mới trên Google Drive...', 'info');
@@ -1848,31 +2056,38 @@ export function HealthDashboard({
       } finally {
         setIsSyncing(false);
       }
-      return false;
     }
     setIsLoading(true);
-    showToast('Đang đồng bộ dữ liệu 2 chiều với Google Drive...', 'info');
+    if (options.interactive) {
+      showToast('Đang đồng bộ dữ liệu Google Drive & Google Calendar...', 'info');
+    }
     try {
       const loaded = await openHealthWorkspace(workspace.rootFolderId);
       const synchronized = await applyPendingMemberDeletions(loaded);
       workspaceRef.current = synchronized;
       setWorkspace(synchronized);
-      const loadedProfiles = await reloadProfiles(synchronized);
+      const loadedProfiles = await reloadProfiles(synchronized, { skipCalendarSync: true });
       await runManualOrphanRawReconcile(synchronized, loadedProfiles);
-      void triggerAutoCalendarSync(synchronized.family.members, profilesRef.current, { force: true });
-      
+      const calendarOutcome = await triggerAutoCalendarSync(
+        synchronized.family.members,
+        profilesRef.current,
+        { force: true },
+      );
+
       // Tự động đồng bộ quyền truy cập cho thành viên nếu là Admin
       if (isWorkspaceAdmin) {
         void syncHealthWorkspaceMemberAssignments(synchronized).catch(err => {
           console.warn('[Sync] Tự động đồng bộ quyền Drive thất bại:', err);
         });
       }
-      showToast('Đã đồng bộ dữ liệu 2 chiều thành công!', 'success');
+      reportUnifiedSyncToast(calendarOutcome);
+      return true;
     } catch (error) {
       showToast(
         error instanceof Error ? error.message : 'Lỗi khi đồng bộ dữ liệu với Drive.',
         'error'
       );
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -2315,7 +2530,10 @@ export function HealthDashboard({
       setErrorMessage(error instanceof Error ? error.message : 'Không thể khôi phục trạng thái OCR trên thiết bị.');
     }
   }, [workspace?.rootFolderId]);
-  const reloadProfiles = useCallback(async (nextWorkspace: HealthDriveWorkspace) => {
+  const reloadProfiles = useCallback(async (
+    nextWorkspace: HealthDriveWorkspace,
+    options: { skipCalendarSync?: boolean } = {},
+  ) => {
     const authIdentity = authIdentityRef.current;
     if (nextWorkspace.rootFolderId === 'local_offline_workspace') {
       const localProfiles = Object.fromEntries(
@@ -2417,6 +2635,12 @@ export function HealthDashboard({
           for (const queued of memberPendingSaves) {
             profile = mergeHealthProfiles(profile, { ...queued.profile, member });
           }
+          const healed = consolidateProfileWithTombstones(profile);
+          let needsAutoHealSave = false;
+          if (healed.mergedCount > 0 || healed.absorbedEventIds.length > 0) {
+            profile = healed.profile;
+            needsAutoHealSave = true;
+          }
           if (pendingSyncError && memberPendingSaves.length > 0) {
             profile.syncPending = true;
           }
@@ -2424,6 +2648,7 @@ export function HealthDashboard({
             member.id,
             profile,
             pendingSyncError && profile.syncPending ? pendingSyncError : null,
+            needsAutoHealSave,
           ] as const;
         } catch (error) {
           const cachedProfile = profilesRef.current[member.id];
@@ -2441,6 +2666,7 @@ export function HealthDashboard({
               error instanceof Error ? error.message : 'Không tải được hồ sơ.',
               ...(localProfile ? [pendingSyncError || 'Đang hiển thị bản cục bộ; thay đổi chưa được xác nhận trên Drive.'] : []),
             ].filter(Boolean).join(' '),
+            false,
           ] as const;
         }
       })
@@ -2453,8 +2679,17 @@ export function HealthDashboard({
     }
     const nextProfiles: Record<string, HealthProfile> = {};
     const nextErrors: Record<string, string> = {};
-    for (const [memberId, profile, error] of entries) {
-      if (profile) nextProfiles[memberId] = profile;
+    const profilesToAutoHealPersist: Array<{ member: FamilyMember; profile: HealthProfile }> = [];
+    for (const [memberId, profile, error, needsAutoHealSave] of entries) {
+      if (profile) {
+        nextProfiles[memberId] = profile;
+        if (needsAutoHealSave) {
+          const targetMember = activeWorkspace.family.members.find((m) => m.id === memberId);
+          if (targetMember) {
+            profilesToAutoHealPersist.push({ member: targetMember, profile });
+          }
+        }
+      }
       if (error) nextErrors[memberId] = error;
     }
     const unmatchedPendingSave = pendingSaves.find((queued) =>
@@ -2479,6 +2714,24 @@ export function HealthDashboard({
     profilesRef.current = nextProfiles;
     setProfiles(nextProfiles);
     setProfileErrors(nextErrors);
+    for (const { member, profile } of profilesToAutoHealPersist) {
+      const expectedEmail = authIdentity.userEmail;
+      const expectedWorkspaceId = activeWorkspace.rootFolderId;
+      void saveHealthProfile(member.profileFileId, profile)
+        .then((saved) => {
+          if (
+            authIdentityRef.current.userEmail !== expectedEmail ||
+            workspaceRef.current?.rootFolderId !== expectedWorkspaceId
+          ) {
+            return;
+          }
+          profilesRef.current = { ...profilesRef.current, [member.id]: saved };
+          setProfiles((previous) => ({ ...previous, [member.id]: saved }));
+        })
+        .catch((err) => {
+          console.warn('[Auto-heal consolidation] Không thể lưu hồ sơ đã hợp nhất:', member.id, err);
+        });
+    }
     const preferredMemberId =
       findMemberForEmail(activeWorkspace.family.members, authIdentityRef.current.userEmail)?.id ||
       activeWorkspace.family.members[0]?.id ||
@@ -2489,7 +2742,9 @@ export function HealthDashboard({
         : preferredMemberId
     );
     void refreshSyncVersionDigest(activeWorkspace);
-    void triggerAutoCalendarSync(activeWorkspace.family.members, nextProfiles);
+    if (!options.skipCalendarSync) {
+      void triggerAutoCalendarSync(activeWorkspace.family.members, nextProfiles);
+    }
     return nextProfiles;
   }, [refreshSyncVersionDigest, triggerAutoCalendarSync]);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -2526,7 +2781,10 @@ export function HealthDashboard({
   }, [showToast]);
 
   const openWorkspace = useCallback(
-    async (id: string): Promise<boolean> => {
+    async (
+      id: string,
+      options: { silentSuccessToast?: boolean; skipCalendarSync?: boolean } = {},
+    ): Promise<boolean> => {
       const authIdentity = authIdentityRef.current;
       if (!authIdentity.driveAuthorized || !authIdentity.userEmail) return false;
       setIsLoading(true);
@@ -2555,9 +2813,11 @@ export function HealthDashboard({
             '',
         );
         setRootIdInput(opened.rootFolderId);
-        await reloadProfiles(opened);
+        await reloadProfiles(opened, { skipCalendarSync: options.skipCalendarSync });
         setErrorMessage('');
-        showToast('Đã kết nối thư mục Google Drive thành công.', 'success');
+        if (!options.silentSuccessToast) {
+          showToast('Đã kết nối thư mục Google Drive thành công.', 'success');
+        }
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
@@ -2668,6 +2928,23 @@ export function HealthDashboard({
       unsubscribe();
     };
   }, [confirm, driveAuthorized, reloadProfiles, showToast, userEmail]);
+  useEffect(() => {
+    if (
+      !driveAuthorized ||
+      !userEmail ||
+      !hasRemoteWorkspace ||
+      isLoading ||
+      isSyncing ||
+      (typeof navigator !== 'undefined' && !navigator.onLine)
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void triggerAutoCalendarSync(members, profiles);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [driveAuthorized, userEmail, hasRemoteWorkspace, isLoading, isSyncing, members, profiles, triggerAutoCalendarSync]);
+
   const syncStatus = useMemo(() => {
     if (!isOnline) return 'offline';
     if (isSyncing) return 'syncing';
@@ -3505,6 +3782,251 @@ export function HealthDashboard({
       setIsLoading(false);
     }
   }
+
+  async function handleDeleteTimelineEvent(memberId: string, eventId: string) {
+    const member = members.find((m) => m.id === memberId) || selectedMember;
+    const profile = profilesRef.current[memberId] || profiles[memberId] || selectedProfile;
+    if (!member || !profile) return;
+    const targetEvent = profile.timeline.find((ev) => ev.id === eventId);
+
+    const confirmed = await confirm({
+      title: 'Xóa sự kiện y tế này?',
+      message: targetEvent?.title
+        ? `Sự kiện "${targetEvent.title}" sẽ bị xóa khỏi dòng thời gian của ${member.name}.`
+        : `Sự kiện sẽ bị xóa khỏi dòng thời gian của ${member.name}. Bạn có chắc chắn muốn xóa?`,
+      confirmLabel: 'Xóa sự kiện',
+    });
+    if (!confirmed) return;
+
+    try {
+      const nextTimeline = profile.timeline.filter((ev) => ev.id !== eventId);
+      const now = new Date().toISOString();
+      const deletedEvents = upsertDeletionTombstones(profile.deletedEvents, [{ id: eventId, deletedAt: now }]);
+      const updatedProfile: HealthProfile = {
+        ...profile,
+        timeline: nextTimeline,
+        timelineUpdatedAt: now,
+        deletedEvents,
+        aiDeepAnalysis: undefined,
+        aiAnalysis: undefined,
+        aiAnalysisInvalidatedAt: now,
+        summary: summarizeTimeline(nextTimeline, profile.summary.narrative),
+        updatedAt: now,
+      };
+      const saved = await saveHealthProfile(member.profileFileId, updatedProfile);
+      profilesRef.current = { ...profilesRef.current, [member.id]: saved };
+      setProfiles((prev) => ({ ...prev, [member.id]: saved }));
+      void triggerAutoCalendarSync(members, profilesRef.current);
+      showToast('Đã xóa sự kiện y tế thành công.', 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể xóa sự kiện.', 'error');
+    }
+  }
+
+  async function handleDeleteSource(memberId: string, source: HealthSource) {
+    const member = members.find((m) => m.id === memberId);
+    const profile = profilesRef.current[memberId] || profiles[memberId];
+    if (!member) return;
+
+    const confirmed = await confirm({
+      title: `Xóa tệp "${source.fileName}"?`,
+      message: `Tệp gốc và các sự kiện y tế gắn trực tiếp với tệp này trên dòng thời gian của ${member.name} sẽ bị xóa.`,
+      confirmLabel: 'Xóa tệp',
+    });
+    if (!confirmed) return;
+
+    try {
+      const isRemoteWorkspace = Boolean(workspace && workspace.rootFolderId !== 'local_offline_workspace');
+      if (source.driveFileId.startsWith('local_file_')) {
+        await deleteLocalSource(source.driveFileId, offlineOwnerKey || 'apk-local-device');
+      } else if (!source.rawDeletedAt && isRemoteWorkspace) {
+        await deleteOrUnlinkDriveFile(source.driveFileId, member.driveFolderId);
+      }
+
+      forgetOcrRecoveryJob(source.driveFileId);
+
+      if (!profile) {
+        showToast(`Đã xóa tệp "${source.fileName}" thành công.`, 'success');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const removedEventIds: Array<{ id: string; deletedAt: string }> = [];
+      const nextTimeline = (profile.timeline || []).flatMap((ev) => {
+        if (ev.sourceFileId === source.driveFileId) {
+          removedEventIds.push({ id: ev.id, deletedAt: now });
+          return [];
+        }
+        if (ev.additionalSources?.some((as) => as.driveFileId === source.driveFileId)) {
+          const remainingAdditional = ev.additionalSources.filter((as) => as.driveFileId !== source.driveFileId);
+          return [{
+            ...ev,
+            ...(remainingAdditional.length > 0 ? { additionalSources: remainingAdditional } : { additionalSources: undefined }),
+            recordedAt: now,
+          }];
+        }
+        return [ev];
+      });
+      const nextSources = (profile.sources || []).filter((s) => s.driveFileId !== source.driveFileId);
+      const deletedSources = upsertDeletionTombstones(profile.deletedSources, [{ id: source.driveFileId, deletedAt: now }]);
+      const deletedEvents = upsertDeletionTombstones(profile.deletedEvents, removedEventIds);
+
+      const updatedProfile: HealthProfile = {
+        ...profile,
+        sources: nextSources,
+        timeline: nextTimeline,
+        timelineUpdatedAt: now,
+        ...(deletedSources.length > 0 ? { deletedSources } : {}),
+        ...(deletedEvents.length > 0 ? { deletedEvents } : {}),
+        aiDeepAnalysis: undefined,
+        aiAnalysis: undefined,
+        aiAnalysisInvalidatedAt: now,
+        summary: summarizeTimeline(nextTimeline, profile.summary.narrative),
+        updatedAt: now,
+      };
+      const saved = await saveHealthProfile(member.profileFileId, updatedProfile);
+      profilesRef.current = { ...profilesRef.current, [member.id]: saved };
+      setProfiles((prev) => ({ ...prev, [member.id]: saved }));
+      void triggerAutoCalendarSync(members, profilesRef.current);
+      showToast(`Đã xóa tệp "${source.fileName}" thành công.`, 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể xóa tệp.', 'error');
+    }
+  }
+
+  async function handleRelocateSource(source: HealthSource, fromMemberId: string, toMemberId: string) {
+    if (fromMemberId === toMemberId) return;
+    const fromMember = members.find((m) => m.id === fromMemberId);
+    const toMember = members.find((m) => m.id === toMemberId);
+    const fromProfile = profilesRef.current[fromMemberId] || profiles[fromMemberId];
+    const toProfile = profilesRef.current[toMemberId] || profiles[toMemberId];
+    if (!fromMember || !toMember || !fromProfile || !toProfile) {
+      throw new Error('Không tìm thấy hồ sơ nguồn hoặc đích để chuyển tệp.');
+    }
+
+    const isRemoteDriveTransfer =
+      Boolean(workspace && workspace.rootFolderId !== 'local_offline_workspace') &&
+      !source.driveFileId.startsWith('local_file_') &&
+      !source.rawDeletedAt &&
+      !fromMember.driveFolderId.startsWith('local_') &&
+      !toMember.driveFolderId.startsWith('local_');
+
+    let driveFileMoved = false;
+    try {
+      if (isRemoteDriveTransfer) {
+        await moveDriveFileToMember(source.driveFileId, toMember);
+        driveFileMoved = true;
+      }
+
+      const now = new Date().toISOString();
+      const movedEvents: HealthEvent[] = [];
+      const removedFromEventIds: Array<{ id: string; deletedAt: string }> = [];
+
+      const nextFromTimeline = (fromProfile.timeline || []).flatMap((ev) => {
+        if (ev.sourceFileId === source.driveFileId) {
+          movedEvents.push({ ...ev, recordedAt: now });
+          removedFromEventIds.push({ id: ev.id, deletedAt: now });
+          return [];
+        }
+        if (ev.additionalSources?.some((as) => as.driveFileId === source.driveFileId)) {
+          const remainingAdditional = ev.additionalSources.filter((as) => as.driveFileId !== source.driveFileId);
+          return [{
+            ...ev,
+            ...(remainingAdditional.length > 0 ? { additionalSources: remainingAdditional } : { additionalSources: undefined }),
+            recordedAt: now,
+          }];
+        }
+        return [ev];
+      });
+
+      const nextFromSources = (fromProfile.sources || []).filter((s) => s.driveFileId !== source.driveFileId);
+      const fromDeletedSources = upsertDeletionTombstones(
+        fromProfile.deletedSources,
+        [{ id: source.driveFileId, deletedAt: now }],
+      );
+      const fromDeletedEvents = upsertDeletionTombstones(
+        fromProfile.deletedEvents,
+        removedFromEventIds,
+      );
+
+      const updatedFromProfile: HealthProfile = {
+        ...fromProfile,
+        sources: nextFromSources,
+        timeline: nextFromTimeline,
+        timelineUpdatedAt: now,
+        ...(fromDeletedSources.length > 0 ? { deletedSources: fromDeletedSources } : {}),
+        ...(fromDeletedEvents.length > 0 ? { deletedEvents: fromDeletedEvents } : {}),
+        aiDeepAnalysis: undefined,
+        aiAnalysis: undefined,
+        aiAnalysisInvalidatedAt: now,
+        summary: summarizeTimeline(nextFromTimeline, fromProfile.summary.narrative),
+        updatedAt: now,
+      };
+
+      const relocatedSource: HealthSource = {
+        ...source,
+        relocatedToMemberId: undefined,
+        restoredAt: now,
+      };
+      const hasSourceInTarget = (toProfile.sources || []).some((s) => s.driveFileId === source.driveFileId);
+      const nextToSources = hasSourceInTarget
+        ? (toProfile.sources || []).map((s) => (s.driveFileId === source.driveFileId ? relocatedSource : s))
+        : [...(toProfile.sources || []), relocatedSource];
+
+      const movedEventById = new Map(movedEvents.map((ev) => [ev.id, ev]));
+      const mergedToTimeline = [
+        ...(toProfile.timeline || []).filter((ev) => !movedEventById.has(ev.id)),
+        ...movedEvents,
+      ].sort((left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt));
+
+      const toDeletedSources = (toProfile.deletedSources || []).filter((t) => t.id !== source.driveFileId);
+      const toDeletedEvents = (toProfile.deletedEvents || []).filter((t) => !movedEventById.has(t.id));
+
+      const updatedToProfile: HealthProfile = {
+        ...toProfile,
+        sources: nextToSources,
+        timeline: mergedToTimeline,
+        timelineUpdatedAt: now,
+        deletedSources: toDeletedSources.length > 0 ? toDeletedSources : undefined,
+        deletedEvents: toDeletedEvents.length > 0 ? toDeletedEvents : undefined,
+        aiDeepAnalysis: undefined,
+        aiAnalysis: undefined,
+        aiAnalysisInvalidatedAt: now,
+        summary: summarizeTimeline(mergedToTimeline, toProfile.summary.narrative),
+        updatedAt: now,
+      };
+
+      const savedTo = await saveHealthProfile(toMember.profileFileId, updatedToProfile);
+      const savedFrom = await saveHealthProfile(fromMember.profileFileId, updatedFromProfile);
+
+      profilesRef.current = {
+        ...profilesRef.current,
+        [fromMember.id]: savedFrom,
+        [toMember.id]: savedTo,
+      };
+      setProfiles((prev) => ({
+        ...prev,
+        [fromMember.id]: savedFrom,
+        [toMember.id]: savedTo,
+      }));
+      void triggerAutoCalendarSync(members, profilesRef.current);
+      showToast(`Đã chuyển tệp "${source.fileName}" sang hồ sơ của ${toMember.name}.`, 'success');
+    } catch (error) {
+      if (driveFileMoved) {
+        try {
+          await moveDriveFileToMember(source.driveFileId, fromMember);
+        } catch (rollbackError) {
+          const originalMsg = error instanceof Error ? error.message : 'Lỗi chưa xác định.';
+          const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : 'Lỗi chưa xác định.';
+          throw new Error(
+            `Không thể hoàn tất chuyển tệp (${originalMsg}). Cũng không thể chuyển tệp về thư mục của ${fromMember.name} (${rollbackMsg}).`,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
   async function handleRecreateMemberProfile(memberId: string) {
     if (!workspace || workspace.rootFolderId === 'local_offline_workspace') return;
     setIsLoading(true);
@@ -4850,7 +5372,8 @@ export function HealthDashboard({
       );
       if (!linkedSourceIds.has(canonical.driveFileId)) continue;
 
-      const updatedProfile: HealthProfile = {
+      const cleanupNow = new Date().toISOString();
+      const remappedProfile: HealthProfile = {
         ...profile,
         timeline: remappedTimeline,
         sources: profile.sources.map((source) =>
@@ -4858,8 +5381,9 @@ export function HealthDashboard({
             ? { ...source, sourceContributions: canonicalContributions }
             : source,
         ),
-        updatedAt: new Date().toISOString(),
+        updatedAt: cleanupNow,
       };
+      const updatedProfile = consolidateProfileWithTombstones(remappedProfile, cleanupNow).profile;
       let savedBeforeTrash: HealthProfile;
       try {
         savedBeforeTrash = await saveHealthProfile(member.profileFileId, updatedProfile);
@@ -5113,10 +5637,7 @@ export function HealthDashboard({
         : undefined,
       recordedAt: new Date().toISOString(),
     });
-    const duplicate = detectDuplicateEvent(profile.timeline, {
-      ...extracted,
-      sourceFileId: draft.source.id,
-    });
+    const duplicate = detectDuplicateEvent(profile.timeline, event);
     digitizationLogger.log(
       'info',
       'dedup_check',
@@ -5745,7 +6266,7 @@ export function HealthDashboard({
             : item
         );
         const mergedEventNow = new Date().toISOString();
-        const nextProfile: HealthProfile = {
+        const rawNextProfile: HealthProfile = {
           ...effectiveProfile,
           timeline: updatedTimeline,
           timelineUpdatedAt: mergedEventNow,
@@ -5756,6 +6277,7 @@ export function HealthDashboard({
           aiAnalysisInvalidatedAt: mergedEventNow,
           updatedAt: mergedEventNow,
         };
+        const nextProfile = consolidateProfileWithTombstones(rawNextProfile, mergedEventNow).profile;
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         const saveMs = saveProfileTimer();
         currentProfiles[effectiveMember.id] = saved;
@@ -5810,7 +6332,7 @@ export function HealthDashboard({
             : item
         );
         const replacedEventNow = new Date().toISOString();
-        const nextProfile: HealthProfile = {
+        const rawNextProfile: HealthProfile = {
           ...effectiveProfile,
           timeline: updatedTimeline,
           timelineUpdatedAt: replacedEventNow,
@@ -5821,6 +6343,7 @@ export function HealthDashboard({
           aiAnalysisInvalidatedAt: replacedEventNow,
           updatedAt: replacedEventNow,
         };
+        const nextProfile = consolidateProfileWithTombstones(rawNextProfile, replacedEventNow).profile;
         const saved = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         const saveMs = saveProfileTimer();
         currentProfiles[effectiveMember.id] = saved;
@@ -5851,9 +6374,10 @@ export function HealthDashboard({
         processNextInQueue(draft.queueContext);
         return true;
       } else {
-        // 3. Tạo sự kiện mới độc lập
+        // 3. Tạo sự kiện mới độc lập (hoặc tự hợp nhất nếu trùng/bổ trợ trong hồ sơ hiện có)
         const digitized = digitizeHealthSource(effectiveProfile, nextEvent);
-        const nextProfile: HealthProfile = {
+        const createNow = new Date().toISOString();
+        const rawNextProfile: HealthProfile = {
           ...digitized,
           aiDeepAnalysis: undefined,
           aiAnalysis: undefined,
@@ -5869,6 +6393,7 @@ export function HealthDashboard({
               : item,
           ),
         };
+        const nextProfile = consolidateProfileWithTombstones(rawNextProfile, createNow).profile;
         const merged = await saveHealthProfile(effectiveMember.profileFileId, nextProfile);
         const saveMs = saveProfileTimer();
         currentProfiles[effectiveMember.id] = merged;
@@ -6125,18 +6650,11 @@ export function HealthDashboard({
       ) {
         throw new Error('AI trả về danh sách sự kiện không khớp hồ sơ gốc. Không có dữ liệu nào được thay đổi.');
       }
-      const { timeline: finalTimeline, mergedCount } = consolidateTimelineEvents(organizedTimeline);
       const refineNow = new Date().toISOString();
-      const updatedProfile: HealthProfile = {
-        ...selectedProfile,
-        timeline: finalTimeline,
-        timelineUpdatedAt: refineNow,
-        summary: summarizeTimeline(finalTimeline, selectedProfile.summary.narrative),
-        aiDeepAnalysis: undefined,
-        aiAnalysis: undefined,
-        aiAnalysisInvalidatedAt: refineNow,
-        updatedAt: refineNow,
-      };
+      const { profile: updatedProfile, mergedCount } = consolidateProfileWithTombstones(
+        { ...selectedProfile, timeline: organizedTimeline },
+        refineNow,
+      );
       const saved = await saveHealthProfile(selectedMember.profileFileId, updatedProfile);
       profilesRef.current = { ...profilesRef.current, [selectedMember.id]: saved };
       setProfiles((prev) => ({ ...prev, [selectedMember.id]: saved }));
@@ -6437,7 +6955,7 @@ export function HealthDashboard({
                       if (!userEmail || needsDriveAuthorization) {
                         onConnectDrive();
                       } else if (hasRemoteWorkspace) {
-                        void handleManualSync();
+                        void handleManualSync({ interactive: true });
                       } else {
                         void handleCreateWorkspace();
                       }
@@ -6919,7 +7437,7 @@ export function HealthDashboard({
                             if (needsDriveAuthorization) {
                               onConnectDrive();
                             } else if (hasRemoteWorkspace) {
-                              void handleManualSync();
+                              void handleManualSync({ interactive: true });
                             } else {
                               void handleCreateWorkspace();
                             }
@@ -7261,142 +7779,172 @@ export function HealthDashboard({
                           className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:border-emerald-300 transition-all space-y-3"
                         >
                           {/* Event Header Top Bar */}
-                          <div className="flex flex-wrap items-center justify-between gap-2.5 w-full border-b border-slate-100 pb-2.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs border border-emerald-100/60">
+                          <div className="flex items-center justify-between gap-2.5 w-full border-b border-slate-100 pb-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs border border-emerald-100/60">
                                 <IconComp className="w-4 h-4" />
                               </div>
-                              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 min-w-0">
-                                <span className="font-bold text-emerald-800">{opt.label}</span>
-                                {event.customCategory && (
-                                  <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[11px] border border-slate-200">
-                                    {event.customCategory}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                                  <span className="text-xs font-extrabold text-emerald-800 leading-tight">
+                                    {opt.label}
                                   </span>
-                                )}
-                                <span aria-hidden="true" className="text-slate-300">·</span>
-                                <span className="font-mono tabular-nums text-slate-500">{formatDateVN(event.date) || 'Chưa rõ ngày'}</span>
+                                  {event.customCategory && (
+                                    <span className="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[10px] border border-slate-200 truncate max-w-[140px]">
+                                      {event.customCategory}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5 leading-tight">
+                                  {formatDateVN(event.date) || 'Chưa rõ ngày'}
+                                </div>
                               </div>
                             </div>
-                            {/* View original file(s) on Drive & merged contribution notes */}
-                            {(() => {
-                              const sourcesById = new Map(
-                                (selectedProfile?.sources || []).map((srcItem) => [srcItem.driveFileId, srcItem]),
-                              );
-                              const rawEventSources =
-                                event.additionalSources && event.additionalSources.length > 0
-                                  ? event.additionalSources
-                                  : event.sourceFileId
-                                    ? [{ driveFileId: event.sourceFileId, fileName: event.sourceFileName }]
-                                    : [];
+                            <div className="flex items-center justify-end gap-1.5 shrink-0">
+                              {/* View original file(s) on Drive & merged contribution notes */}
+                              {(() => {
+                                const sourcesById = new Map(
+                                  (selectedProfile?.sources || []).map((srcItem) => [srcItem.driveFileId, srcItem]),
+                                );
+                                const rawEventSources =
+                                  event.additionalSources && event.additionalSources.length > 0
+                                    ? event.additionalSources
+                                    : event.sourceFileId
+                                      ? [{ driveFileId: event.sourceFileId, fileName: event.sourceFileName }]
+                                      : [];
 
-                              const seenLiveIds = new Set<string>();
-                              const liveDriveSources: Array<{ driveFileId: string; fileName: string }> = [];
-                              const mergedSources: Array<{ fileName: string; detail: string }> = [];
-                              const seenMergedNames = new Set<string>();
+                                const seenLiveIds = new Set<string>();
+                                const liveDriveSources: Array<{ driveFileId: string; fileName: string }> = [];
+                                const mergedSources: Array<{ fileName: string; detail: string }> = [];
+                                const seenMergedNames = new Set<string>();
 
-                              for (const src of rawEventSources) {
-                                if (!src.driveFileId) continue;
-                                const meta = sourcesById.get(src.driveFileId);
-                                if (meta?.rawDeletedAt) {
-                                  const cleanName = src.fileName || meta.fileName;
-                                  if (cleanName && !seenMergedNames.has(cleanName)) {
-                                    seenMergedNames.add(cleanName);
-                                    const canonicalName = meta.mergedIntoFileName || event.sourceFileName || 'tệp chính';
-                                    mergedSources.push({
-                                      fileName: cleanName,
-                                      detail: `Tệp "${cleanName}" đã được gộp vào "${canonicalName}"; bản thừa đã chuyển vào Thùng rác Drive.`,
+                                for (const src of rawEventSources) {
+                                  if (!src.driveFileId) continue;
+                                  const meta = sourcesById.get(src.driveFileId);
+                                  if (meta?.rawDeletedAt) {
+                                    const cleanName = src.fileName || meta.fileName;
+                                    if (cleanName && !seenMergedNames.has(cleanName)) {
+                                      seenMergedNames.add(cleanName);
+                                      const canonicalName = meta.mergedIntoFileName || event.sourceFileName || 'tệp chính';
+                                      mergedSources.push({
+                                        fileName: cleanName,
+                                        detail: `Tệp "${cleanName}" đã được gộp vào "${canonicalName}"; bản thừa đã chuyển vào Thùng rác Drive.`,
+                                      });
+                                    }
+                                  } else if (!src.driveFileId.startsWith('local_file_') && !seenLiveIds.has(src.driveFileId)) {
+                                    seenLiveIds.add(src.driveFileId);
+                                    liveDriveSources.push(src);
+                                  }
+                                }
+
+                                if (event.sourceFileId && !seenLiveIds.has(event.sourceFileId) && !event.sourceFileId.startsWith('local_file_')) {
+                                  const primaryMeta = sourcesById.get(event.sourceFileId);
+                                  if (!primaryMeta?.rawDeletedAt) {
+                                    seenLiveIds.add(event.sourceFileId);
+                                    liveDriveSources.unshift({
+                                      driveFileId: event.sourceFileId,
+                                      fileName: primaryMeta?.fileName || event.sourceFileName,
                                     });
                                   }
-                                } else if (!src.driveFileId.startsWith('local_file_') && !seenLiveIds.has(src.driveFileId)) {
-                                  seenLiveIds.add(src.driveFileId);
-                                  liveDriveSources.push(src);
                                 }
-                              }
 
-                              if (event.sourceFileId && !seenLiveIds.has(event.sourceFileId) && !event.sourceFileId.startsWith('local_file_')) {
-                                const primaryMeta = sourcesById.get(event.sourceFileId);
-                                if (!primaryMeta?.rawDeletedAt) {
-                                  seenLiveIds.add(event.sourceFileId);
-                                  liveDriveSources.unshift({
-                                    driveFileId: event.sourceFileId,
-                                    fileName: primaryMeta?.fileName || event.sourceFileName,
-                                  });
+                                const referencedSourceIds = Array.from(
+                                  new Set([
+                                    ...(event.sourceFileId ? [event.sourceFileId] : []),
+                                    ...(event.additionalSources || []).map((s) => s.driveFileId).filter(Boolean),
+                                  ]),
+                                );
+                                for (const sourceId of referencedSourceIds) {
+                                  const sourceMeta = sourcesById.get(sourceId);
+                                  if (!sourceMeta?.sourceContributions?.length) continue;
+                                  const siblingEventsForSource = (selectedProfile?.timeline || []).filter(
+                                    (item) =>
+                                      item.sourceFileId === sourceId ||
+                                      item.additionalSources?.some((s) => s.driveFileId === sourceId),
+                                  ).length;
+                                  for (const contribution of sourceMeta.sourceContributions) {
+                                    const matchesThisEvent =
+                                      contribution.mergedIntoEventId === event.id ||
+                                      (!contribution.mergedIntoEventId && siblingEventsForSource <= 1);
+                                    if (!matchesThisEvent) continue;
+                                    if (!seenMergedNames.has(contribution.fileName)) {
+                                      seenMergedNames.add(contribution.fileName);
+                                      mergedSources.push({
+                                        fileName: contribution.fileName,
+                                        detail:
+                                          contribution.reason ||
+                                          `Tệp "${contribution.fileName}" đã được gộp vào "${sourceMeta.fileName || event.sourceFileName}".`,
+                                      });
+                                    }
+                                  }
                                 }
-                              }
 
-                              const canonicalMeta = event.sourceFileId ? sourcesById.get(event.sourceFileId) : undefined;
-                              const siblingEventsForCanonical = event.sourceFileId
-                                ? (selectedProfile?.timeline || []).filter((item) => item.sourceFileId === event.sourceFileId).length
-                                : 0;
-                              for (const contribution of canonicalMeta?.sourceContributions || []) {
-                                const matchesThisEvent =
-                                  contribution.mergedIntoEventId === event.id ||
-                                  (!contribution.mergedIntoEventId && siblingEventsForCanonical <= 1);
-                                if (!matchesThisEvent) continue;
-                                if (!seenMergedNames.has(contribution.fileName)) {
-                                  seenMergedNames.add(contribution.fileName);
-                                  mergedSources.push({
-                                    fileName: contribution.fileName,
-                                    detail:
-                                      contribution.reason ||
-                                      `Tệp "${contribution.fileName}" đã được gộp vào "${canonicalMeta?.fileName || event.sourceFileName}".`,
-                                  });
-                                }
-                              }
+                                if (liveDriveSources.length === 0 && mergedSources.length === 0) return null;
 
-                              if (liveDriveSources.length === 0 && mergedSources.length === 0) return null;
-
-                              return (
-                                <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
-                                  {liveDriveSources.length > 1 ? (
-                                    liveDriveSources.map((src, idx) => (
+                                return (
+                                  <>
+                                    {liveDriveSources.length > 1 ? (
+                                      liveDriveSources.map((src, idx) => (
+                                        <a
+                                          key={src.driveFileId || idx}
+                                          href={`https://drive.google.com/file/d/${encodeURIComponent(
+                                            src.driveFileId
+                                          )}/view`}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="h-8 w-8 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-700 inline-flex items-center justify-center shrink-0 transition-colors"
+                                          title={`Xem tệp gốc: ${src.fileName}`}
+                                          aria-label={`Xem tệp gốc: ${src.fileName || `Tệp ${idx + 1}`}`}
+                                        >
+                                          <ExternalLink className="w-3.5 h-3.5" />
+                                        </a>
+                                      ))
+                                    ) : liveDriveSources.length === 1 ? (
                                       <a
-                                        key={src.driveFileId || idx}
                                         href={`https://drive.google.com/file/d/${encodeURIComponent(
-                                          src.driveFileId
+                                          liveDriveSources[0].driveFileId
                                         )}/view`}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100/70 text-[11px] font-medium text-emerald-800 max-w-[160px] sm:max-w-[240px] truncate"
-                                        title={`Xem tệp gốc: ${src.fileName}`}
+                                        className="h-8 w-8 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 inline-flex items-center justify-center shrink-0 transition-colors"
+                                        title={`Xem tài liệu gốc trên Google Drive: ${liveDriveSources[0].fileName}`}
+                                        aria-label={`Xem tài liệu gốc: ${liveDriveSources[0].fileName || 'Tài liệu gốc'}`}
                                       >
-                                        <ExternalLink className="w-3 h-3 text-emerald-600 shrink-0" />
-                                        <span className="truncate">{src.fileName || `Tệp ${idx + 1}`}</span>
+                                        <FileText className="w-4 h-4" strokeWidth={2.25} />
                                       </a>
-                                    ))
-                                  ) : liveDriveSources.length === 1 ? (
-                                    <a
-                                      href={`https://drive.google.com/file/d/${encodeURIComponent(
-                                        liveDriveSources[0].driveFileId
-                                      )}/view`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-800 shrink-0 max-w-[220px]"
-                                      title={`Xem tệp gốc trên Google Drive: ${liveDriveSources[0].fileName}`}
-                                    >
-                                      <FileText className="w-4 h-4 shrink-0" strokeWidth={2.5} />
-                                      <span className="truncate hidden sm:inline">
-                                        {liveDriveSources[0].fileName || 'Tài liệu gốc'}
-                                      </span>
-                                      <span className="truncate sm:hidden">Tài liệu gốc</span>
-                                    </a>
-                                  ) : null}
+                                    ) : null}
 
-                                  {mergedSources.map((item, idx) => (
-                                    <button
-                                      key={`${item.fileName}-${idx}`}
-                                      type="button"
-                                      onClick={() => showToast(item.detail, 'info')}
-                                      className="flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 bg-slate-100 hover:bg-slate-200/70 text-[11px] font-medium text-slate-700 max-w-[180px] sm:max-w-[240px] truncate"
-                                      title={item.detail}
-                                    >
-                                      <FileStack className="w-3 h-3 text-slate-500 shrink-0" />
-                                      <span className="truncate">Đã gộp: {item.fileName}</span>
-                                    </button>
-                                  ))}
-                                </div>
-                              );
-                            })()}
+                                    {mergedSources.length > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          showToast(
+                                            mergedSources.map((item) => item.detail).join(' '),
+                                            'info',
+                                          )
+                                        }
+                                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-100 hover:bg-slate-200/70 text-slate-600 inline-flex items-center justify-center shrink-0 transition-colors"
+                                        title={mergedSources.map((item) => item.detail).join('\n')}
+                                        aria-label={`Thông tin gộp từ ${mergedSources.length} tài liệu`}
+                                      >
+                                        <FileStack className="w-4 h-4" />
+                                      </button>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                              {selectedMember && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteTimelineEvent(selectedMember.id, event.id)}
+                                  className="h-8 w-8 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 inline-flex items-center justify-center transition-colors shrink-0"
+                                  title="Xóa sự kiện y tế này"
+                                  aria-label="Xóa sự kiện y tế này"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                           {/* Event Title & Metadata Block (Full Width Edge-to-Edge) */}
                           <div className="w-full space-y-2">
@@ -8664,6 +9212,8 @@ export function HealthDashboard({
             endUploadOp(opToken);
           }
         }}
+        onDeleteSource={handleDeleteSource}
+        onRelocateSource={handleRelocateSource}
         showToast={showToast}
       />
       <WorkspaceAuditModal
@@ -8673,6 +9223,11 @@ export function HealthDashboard({
         userEmail={userEmail}
         onClose={() => setShowWorkspaceAuditModal(false)}
         onFactoryReset={handleFactoryReset}
+        onCleanupComplete={async () => {
+          if (workspaceRef.current) {
+            await reloadProfiles(workspaceRef.current, { skipCalendarSync: true });
+          }
+        }}
         showToast={showToast}
       />
       <GoogleCalendarSyncModal
@@ -8682,6 +9237,9 @@ export function HealthDashboard({
         profiles={profiles}
         onClose={() => setShowGoogleCalendarSyncModal(false)}
         showToast={showToast}
+        onApiAvailabilityChange={(available) => {
+          autoCalendarApiDisabledRef.current = !available;
+        }}
       />
       <AiResourcesModal
         isOpen={showAiResourcesModal && canManageAiResources}
@@ -8826,10 +9384,12 @@ function DigitizationReviewModal({
   // Kiểm tra trùng lặp sự kiện trong timeline của thành viên mục tiêu
   const targetTimeline = profiles[targetMemberId]?.timeline || [];
   const duplicateMatch = useMemo(() => {
-    return detectDuplicateEvent(targetTimeline, {
+    const normalizedIncoming = cleanAndDeduplicateEventData({
       ...extracted,
+      date: validDateOrEmpty(extracted.date),
       sourceFileId: draft.source.id,
     });
+    return detectDuplicateEvent(targetTimeline, normalizedIncoming);
   }, [targetTimeline, extracted, draft.source.id]);
   const targetMember = members.find((member) => member.id === targetMemberId);
   const subjectMatched = Boolean(targetMember && isOcrSubjectMatchedToMember(

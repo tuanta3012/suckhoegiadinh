@@ -15,6 +15,7 @@ import type { FamilyMember, HealthProfile } from '../types';
 import { BackPriority, useBackHandler } from '../utils/backNavigation';
 import { formatDateVN } from '../utils/formatters';
 import {
+  CalendarApiDisabledError,
   CalendarPermissionError,
   executePrimaryCalendarSync,
   previewPrimaryCalendarSync,
@@ -31,6 +32,7 @@ interface GoogleCalendarSyncModalProps {
   onClose: () => void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onAuthRefreshed?: (email: string | null) => void;
+  onApiAvailabilityChange?: (available: boolean) => void;
 }
 
 export function GoogleCalendarSyncModal({
@@ -41,12 +43,15 @@ export function GoogleCalendarSyncModal({
   onClose,
   showToast,
   onAuthRefreshed,
+  onApiAvailabilityChange,
 }: GoogleCalendarSyncModalProps) {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [plan, setPlan] = useState<CalendarSyncPreviewPlan | null>(null);
   const [needsCalendarPermission, setNeedsCalendarPermission] = useState(false);
+  const [isApiDisabled, setIsApiDisabled] = useState(false);
+  const [apiActivationUrl, setApiActivationUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [removeStaleEvents, setRemoveStaleEvents] = useState(false);
 
@@ -62,13 +67,21 @@ export function GoogleCalendarSyncModal({
     setIsLoadingPreview(true);
     setErrorMessage(null);
     setNeedsCalendarPermission(false);
+    setIsApiDisabled(false);
+    setApiActivationUrl(null);
     setRemoveStaleEvents(false);
     try {
       const nextPlan = await previewPrimaryCalendarSync(members, profiles, activeEmail);
+      onApiAvailabilityChange?.(true);
       setPlan(nextPlan);
     } catch (error) {
       setPlan(null);
-      if (error instanceof CalendarPermissionError) {
+      if (error instanceof CalendarApiDisabledError) {
+        setIsApiDisabled(true);
+        setApiActivationUrl(error.activationUrl || null);
+        setErrorMessage(error.message);
+        onApiAvailabilityChange?.(false);
+      } else if (error instanceof CalendarPermissionError) {
         setNeedsCalendarPermission(true);
         setErrorMessage(error.message);
       } else {
@@ -77,13 +90,15 @@ export function GoogleCalendarSyncModal({
     } finally {
       setIsLoadingPreview(false);
     }
-  }, [members, profiles, userEmail]);
+  }, [members, onApiAvailabilityChange, profiles, userEmail]);
 
   useEffect(() => {
     if (!isOpen) {
       setPlan(null);
       setErrorMessage(null);
       setNeedsCalendarPermission(false);
+      setIsApiDisabled(false);
+      setApiActivationUrl(null);
       setRemoveStaleEvents(false);
       return;
     }
@@ -92,14 +107,16 @@ export function GoogleCalendarSyncModal({
 
   useEffect(() => {
     if (!errorMessage) return;
+    if (isApiDisabled) {
+      digitizationLogger.log('warn', 'calendar_api_disabled', errorMessage);
+      return;
+    }
     if (needsCalendarPermission) {
       digitizationLogger.log('warn', 'calendar_permission_required', errorMessage);
       return;
     }
     digitizationLogger.log('error', 'calendar_sync_error', errorMessage);
-    const timer = window.setTimeout(() => setErrorMessage(null), 1000);
-    return () => window.clearTimeout(timer);
-  }, [errorMessage, needsCalendarPermission]);
+  }, [errorMessage, isApiDisabled, needsCalendarPermission]);
 
   if (!isOpen) return null;
 
@@ -152,7 +169,12 @@ export function GoogleCalendarSyncModal({
       }
       onClose();
     } catch (error) {
-      if (error instanceof CalendarPermissionError) {
+      if (error instanceof CalendarApiDisabledError) {
+        setIsApiDisabled(true);
+        setApiActivationUrl(error.activationUrl || null);
+        setErrorMessage(error.message);
+        onApiAvailabilityChange?.(false);
+      } else if (error instanceof CalendarPermissionError) {
         setNeedsCalendarPermission(true);
         setErrorMessage(error.message);
       } else {
@@ -216,6 +238,45 @@ export function GoogleCalendarSyncModal({
               <p className="text-xs font-semibold text-slate-600">
                 Đang kiểm tra lịch tái khám & Google Calendar chính...
               </p>
+            </div>
+          ) : isApiDisabled ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 space-y-3">
+              <div className="flex items-start gap-2.5 text-xs">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1.5">
+                  <p className="font-bold text-amber-950">Google Calendar API chưa được kích hoạt</p>
+                  <p className="text-amber-900 leading-relaxed">
+                    Dịch vụ <strong>Google Calendar API</strong> chưa được bật trên dự án Google Cloud của ứng dụng. Thông báo nhắc lịch tái khám trên thiết bị vẫn hoạt động bình thường.
+                  </p>
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    Quản trị viên cần mở Google Cloud Console → APIs &amp; Services → Library và bật{' '}
+                    <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10px]">
+                      Google Calendar API
+                    </code>
+                    .
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void loadPreview()}
+                  className="min-h-[36px] px-3 rounded-xl bg-white hover:bg-amber-50 border border-amber-300 text-amber-950 font-bold text-xs inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Thử kiểm tra lại</span>
+                </button>
+                {apiActivationUrl && (
+                  <a
+                    href={apiActivationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[36px] px-3 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs inline-flex items-center gap-1.5"
+                  >
+                    <span>Mở Google Cloud Console</span>
+                  </a>
+                )}
+              </div>
             </div>
           ) : needsCalendarPermission ? (
             <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 space-y-3">
@@ -419,7 +480,7 @@ export function GoogleCalendarSyncModal({
             {pendingChangeCount === 0 ? 'Đóng' : 'Hủy'}
           </button>
 
-          {plan?.member && !needsCalendarPermission && !isLoadingPreview && (
+          {plan?.member && !needsCalendarPermission && !isApiDisabled && !isLoadingPreview && (
             <button
               type="button"
               disabled={isSyncing || pendingChangeCount === 0}

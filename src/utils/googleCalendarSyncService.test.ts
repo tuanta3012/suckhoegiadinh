@@ -1,12 +1,30 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FamilyMember, HealthEvent, HealthProfile } from '../types';
+
+vi.mock('./googleDriveService', () => ({
+  getValidGoogleAccessToken: vi.fn(async () => 'mock-google-token'),
+  trySilentRefresh: vi.fn(async () => null),
+}));
+
+vi.mock('@capacitor/core', () => ({
+  Capacitor: {
+    isNativePlatform: () => false,
+  },
+  CapacitorHttp: {
+    request: vi.fn(),
+  },
+}));
+
 import {
   addDaysToIsoDate,
   buildCalendarSyncPreviewPlan,
   buildGoogleCalendarEventPayload,
+  CalendarApiDisabledError,
+  CalendarPermissionError,
   collectFutureFollowUpsForMember,
   FAMILY_HEALTH_CALENDAR_APP_TAG,
   normalizeFollowUpDateISO,
+  previewPrimaryCalendarSync,
 } from './googleCalendarSyncService';
 
 function makeMember(id: string, name: string, email?: string): FamilyMember {
@@ -201,5 +219,100 @@ describe('googleCalendarSyncService', () => {
     expect(plan.toUpdate.map((u) => u.item.event.id)).toEqual(['ev-changed']);
     expect(plan.toCreate.map((c) => c.event.id)).toEqual(['ev-new']);
     expect(plan.staleEvents.map((s) => s.calendarEventId)).toEqual(['gcal-stale']);
+  });
+
+  describe('API error classification', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.clearAllMocks();
+    });
+
+    it('throws CalendarApiDisabledError with activationUrl when Google Calendar API is disabled on GCP project', async () => {
+      const member = makeMember('m-1', 'Tuấn', 'tuan@example.com');
+      const profiles = {
+        [member.id]: makeProfile(member, [
+          makeEvent({ id: 'ev-1', nextFollowUp: '2026-12-20' }),
+        ]),
+      };
+
+      const gcpErrorBody = JSON.stringify({
+        error: {
+          code: 403,
+          message:
+            'Google Calendar API has not been used in project 123456 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview?project=123456 then retry.',
+          status: 'PERMISSION_DENIED',
+          details: [
+            {
+              '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+              reason: 'SERVICE_DISABLED',
+              metadata: {
+                service: 'calendar-json.googleapis.com',
+                activationUrl:
+                  'https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview?project=123456',
+              },
+            },
+          ],
+        },
+      });
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(gcpErrorBody, { status: 403 })),
+      );
+
+      let caught: unknown;
+      try {
+        await previewPrimaryCalendarSync(
+          [member],
+          profiles,
+          'tuan@example.com',
+          new Date('2026-11-16T08:00:00.000Z'),
+        );
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(CalendarApiDisabledError);
+      expect(caught).not.toBeInstanceOf(CalendarPermissionError);
+      expect((caught as CalendarApiDisabledError).activationUrl).toBe(
+        'https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview?project=123456',
+      );
+    });
+
+    it('throws CalendarPermissionError when Google token lacks Calendar OAuth scope', async () => {
+      const member = makeMember('m-1', 'Tuấn', 'tuan@example.com');
+      const profiles = {
+        [member.id]: makeProfile(member, [
+          makeEvent({ id: 'ev-1', nextFollowUp: '2026-12-20' }),
+        ]),
+      };
+
+      const scopeErrorBody = JSON.stringify({
+        error: {
+          code: 403,
+          message: 'Request had insufficient authentication scopes.',
+          status: 'PERMISSION_DENIED',
+          details: [
+            {
+              reason: 'ACCESS_TOKEN_SCOPE_INSUFFICIENT',
+            },
+          ],
+        },
+      });
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(scopeErrorBody, { status: 403 })),
+      );
+
+      await expect(
+        previewPrimaryCalendarSync(
+          [member],
+          profiles,
+          'tuan@example.com',
+          new Date('2026-11-16T08:00:00.000Z'),
+        ),
+      ).rejects.toBeInstanceOf(CalendarPermissionError);
+    });
   });
 });

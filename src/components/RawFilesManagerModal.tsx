@@ -5,6 +5,7 @@ import { FileOpener } from '@capacitor-community/file-opener';
 import { Share } from '@capacitor/share';
 import {
   AlertTriangle,
+  ArrowRightLeft,
   CheckCircle2,
   Clock,
   Eye,
@@ -14,6 +15,7 @@ import {
   PlayCircle,
   RefreshCw,
   StopCircle,
+  Trash2,
   X,
 } from 'lucide-react';
 import type { FamilyMember, HealthProfile, HealthSource } from '../types';
@@ -23,6 +25,7 @@ import { formatDateVN } from '../utils/formatters';
 import type { OcrRecoveryJob } from '../utils/ocrRecoveryStorage';
 import { BackPriority, useBackHandler } from '../utils/backNavigation';
 import { isOcrCancelledError } from '../utils/geminiService';
+import { CustomSelect, type SelectOption } from './CustomSelect';
 
 export type RawOcrRunOutcome = 'completed' | 'needs_review' | 'cancelled' | 'error';
 
@@ -39,6 +42,8 @@ interface RawFilesManagerModalProps {
   onRunOcrForSource: (member: FamilyMember, source: HealthSource) => Promise<RawOcrRunOutcome | void>;
   onCancelOcr?: () => void;
   onRefreshWorkspace: () => Promise<void>;
+  onDeleteSource?: (memberId: string, source: HealthSource) => Promise<void>;
+  onRelocateSource?: (source: HealthSource, fromMemberId: string, toMemberId: string) => Promise<void>;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -95,18 +100,28 @@ export function RawFilesManagerModal({
   onRunOcrForSource,
   onCancelOcr,
   onRefreshWorkspace,
+  onDeleteSource,
+  onRelocateSource,
   showToast,
 }: RawFilesManagerModalProps) {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [viewingId, setViewingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isMoving, setIsMoving] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [memberFilter, setMemberFilter] = useState<string>(selectedMemberId || 'all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [relocatingSourceInfo, setRelocatingSourceInfo] = useState<{ member: FamilyMember; source: HealthSource } | null>(null);
+  const [targetMemberIdForMove, setTargetMemberIdForMove] = useState<string>('');
 
   useEffect(() => {
     if (isOpen) {
       setMemberFilter(selectedMemberId || 'all');
       setStatusFilter('all');
+    } else {
+      setRelocatingSourceInfo(null);
+      setIsMoving(false);
+      setDeletingId(null);
     }
   }, [isOpen, selectedMemberId]);
 
@@ -374,7 +389,12 @@ export function RawFilesManagerModal({
   useBackHandler(
     isOpen && Boolean(workspace),
     () => {
-      if (!viewingId) onClose();
+      if (viewingId || deletingId || isMoving) return true;
+      if (relocatingSourceInfo) {
+        setRelocatingSourceInfo(null);
+        return true;
+      }
+      onClose();
       return true;
     },
     BackPriority.MODAL,
@@ -607,6 +627,7 @@ export function RawFilesManagerModal({
             }) => {
               const viewTarget = isMergedAway ? canonicalSource : source;
               const isProcessing = processingId === source.driveFileId;
+              const isDeleting = deletingId === source.driveFileId;
               const isViewing = viewTarget ? viewingId === viewTarget.driveFileId : false;
               const indexedPageCount = source.contentIndexPages?.length || 0;
               const hasExplicitPages = typeof source.totalPages === 'number' && source.totalPages > 0;
@@ -725,34 +746,79 @@ export function RawFilesManagerModal({
                         type="button"
                         disabled={isViewing || !viewTarget}
                         onClick={() => viewTarget && void handleViewSource(viewTarget)}
-                        className={`min-h-[30px] px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 ${
+                        className={`h-8 w-8 rounded-lg border inline-flex items-center justify-center shrink-0 transition-colors disabled:opacity-45 ${
                           isMergedAway
                             ? 'border-slate-300 bg-white hover:bg-slate-100 text-slate-700'
-                            : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold'
+                            : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                         }`}
+                        title={isMergedAway && viewTarget ? `Xem tệp chính: ${viewTarget.fileName}` : `Xem tệp: ${source.fileName}`}
+                        aria-label={isMergedAway && viewTarget ? 'Xem tệp chính' : 'Xem tệp'}
                       >
                         {isViewing ? (
-                          <LoaderCircle className="w-3 h-3 animate-spin" />
+                          <LoaderCircle className="w-4 h-4 animate-spin" />
                         ) : (
-                          <Eye className="w-3 h-3" />
+                          <Eye className="w-4 h-4" />
                         )}
-                        <span>{isMergedAway && viewTarget ? 'Xem file chính' : 'Xem'}</span>
                       </button>
+
+                      {/* Move / Reassign Button */}
+                      {onRelocateSource && members.length > 1 && !isMergedAway && (
+                        <button
+                          type="button"
+                          disabled={isProcessing || isBatchBusy || isDeleting || isMoving}
+                          onClick={() => {
+                            setRelocatingSourceInfo({ member, source });
+                            const other = members.find((m) => m.id !== member.id);
+                            setTargetMemberIdForMove(other?.id || members[0]?.id || '');
+                          }}
+                          className="h-8 w-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 inline-flex items-center justify-center shrink-0 transition-colors disabled:opacity-45"
+                          title="Chuyển tệp sang thành viên khác"
+                          aria-label="Chuyển tệp sang thành viên khác"
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-600" />
+                        </button>
+                      )}
+
+                      {/* Delete Button */}
+                      {onDeleteSource && !isMergedAway && (
+                        <button
+                          type="button"
+                          disabled={isProcessing || isBatchBusy || isDeleting || isMoving}
+                          onClick={async () => {
+                            setDeletingId(source.driveFileId);
+                            try {
+                              await onDeleteSource(member.id, source);
+                            } finally {
+                              setDeletingId(null);
+                            }
+                          }}
+                          className="h-8 w-8 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 inline-flex items-center justify-center shrink-0 transition-colors disabled:opacity-45"
+                          title={isDeleting ? 'Đang xóa tệp...' : 'Xóa tệp gốc này'}
+                          aria-label={isDeleting ? 'Đang xóa tệp' : 'Xóa tệp gốc'}
+                        >
+                          {isDeleting ? (
+                            <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      )}
 
                       {!isMergedAway && (
                         isProcessing && onCancelOcr ? (
                           <button
                             type="button"
                             onClick={() => onCancelOcr()}
-                            className="min-h-[34px] px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap active:scale-95"
+                            className="h-8 w-8 rounded-lg bg-rose-600 hover:bg-rose-700 text-white inline-flex items-center justify-center shrink-0 transition-colors active:scale-95"
+                            title="Dừng OCR"
+                            aria-label="Dừng OCR"
                           >
-                            <StopCircle className="w-3 h-3" />
-                            <span>Dừng OCR</span>
+                            <StopCircle className="w-4 h-4" />
                           </button>
                         ) : (
                           <button
                             type="button"
-                            disabled={isProcessing || isBatchBusy}
+                            disabled={isProcessing || isBatchBusy || isDeleting || isMoving}
                             onClick={async () => {
                               setProcessingId(source.driveFileId);
                               try {
@@ -768,14 +834,15 @@ export function RawFilesManagerModal({
                                 setProcessingId(null);
                               }
                             }}
-                            className="min-h-[34px] px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-45 active:scale-95"
+                            className="h-8 w-8 rounded-lg bg-slate-900 hover:bg-slate-800 text-white inline-flex items-center justify-center shrink-0 transition-colors disabled:opacity-45 active:scale-95"
+                            title={isProcessing ? 'Đang chạy lại OCR...' : 'Chạy lại OCR'}
+                            aria-label={isProcessing ? 'Đang chạy lại OCR' : 'Chạy lại OCR'}
                           >
                             {isProcessing ? (
-                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                             ) : (
-                              <PlayCircle className="w-3 h-3 text-emerald-400" />
+                              <PlayCircle className="w-4 h-4 text-emerald-400" />
                             )}
-                            <span>{isProcessing ? 'Đang OCR' : 'OCR lại'}</span>
                           </button>
                         )
                       )}
@@ -798,6 +865,77 @@ export function RawFilesManagerModal({
           </button>
         </div>
       </section>
+
+      {/* Relocate File Modal */}
+      {relocatingSourceInfo && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-950/60 backdrop-blur-2xs p-3">
+          <div className="bg-white rounded-2xl p-4 sm:p-5 max-w-md w-full shadow-2xl border border-slate-100 space-y-4 animate-in fade-in duration-150">
+            <h4 className="text-base font-bold text-slate-900">
+              Chuyển tệp sang thành viên khác
+            </h4>
+            <p className="text-xs text-slate-600">
+              Chuyển tệp <b>{relocatingSourceInfo.source.fileName}</b> từ hồ sơ của <b>{relocatingSourceInfo.member.name}</b> sang:
+            </p>
+            <CustomSelect
+              value={targetMemberIdForMove}
+              disabled={isMoving}
+              onChange={(val) => setTargetMemberIdForMove(String(val))}
+              size="lg"
+              placeholder="Chọn thành viên nhận tệp..."
+              buttonClassName="bg-slate-50/70 border-slate-200 rounded-xl"
+              options={members
+                .filter((m) => m.id !== relocatingSourceInfo.member.id)
+                .map((m): SelectOption<string> => {
+                  const counts = memberCounts.get(m.id) || { total: 0, errorPending: 0 };
+                  return {
+                    value: m.id,
+                    label: m.name,
+                    subLabel: [`${counts.total} tài liệu`, m.email].filter(Boolean).join(' · '),
+                    icon: (
+                      <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-[11px] shrink-0">
+                        {m.name.charAt(0)}
+                      </span>
+                    ),
+                  };
+                })}
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isMoving}
+                onClick={() => setRelocatingSourceInfo(null)}
+                className="px-3 py-2 rounded-xl bg-slate-200 text-slate-800 text-xs font-bold hover:bg-slate-300 disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={isMoving || !targetMemberIdForMove}
+                onClick={async () => {
+                  if (!targetMemberIdForMove || isMoving) return;
+                  setIsMoving(true);
+                  try {
+                    await onRelocateSource?.(
+                      relocatingSourceInfo.source,
+                      relocatingSourceInfo.member.id,
+                      targetMemberIdForMove,
+                    );
+                    setRelocatingSourceInfo(null);
+                  } catch (err) {
+                    showToast(err instanceof Error ? err.message : 'Không thể chuyển tệp.', 'error');
+                  } finally {
+                    setIsMoving(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs inline-flex items-center gap-1.5 disabled:opacity-55"
+              >
+                {isMoving && <LoaderCircle className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isMoving ? 'Đang chuyển...' : 'Xác nhận chuyển'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

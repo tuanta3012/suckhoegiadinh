@@ -1,5 +1,6 @@
 import type {
   FamilyMember,
+  HealthDeletionTombstone,
   HealthEvent,
   HealthFamily,
   HealthMetric,
@@ -81,6 +82,7 @@ function isHealthSource(value: unknown): value is HealthSource {
       (value.status === 'pending' || value.status === 'processed') &&
       (value.subjectStatus === undefined || value.subjectStatus === 'unresolved') &&
       (value.digitizedAt === undefined || typeof value.digitizedAt === 'string') &&
+      (value.restoredAt === undefined || typeof value.restoredAt === 'string') &&
       (value.rawDeletedAt === undefined || typeof value.rawDeletedAt === 'string') &&
       (value.relocatedToMemberId === undefined || typeof value.relocatedToMemberId === 'string') &&
       (value.fileSize === undefined ||
@@ -190,11 +192,37 @@ export function excludeDeletedFamilyMembers(
   return members.filter((member) => !deletedIds.has(member.id));
 }
 
+export function upsertDeletionTombstones(
+  ...collections: Array<HealthDeletionTombstone[] | undefined>
+): HealthDeletionTombstone[] {
+  const tombstones = new Map<string, HealthDeletionTombstone>();
+  for (const item of collections.flatMap((collection) => collection || [])) {
+    if (!item || typeof item.id !== 'string' || typeof item.deletedAt !== 'string') continue;
+    const id = item.id.trim();
+    const deletedAt = item.deletedAt.trim();
+    if (!id || !deletedAt) continue;
+    const previous = tombstones.get(id);
+    if (!previous || isTimestampStrictlyAfter(deletedAt, previous.deletedAt)) {
+      tombstones.set(id, { id, deletedAt });
+    }
+  }
+  return [...tombstones.values()].sort(
+    (left, right) => left.deletedAt.localeCompare(right.deletedAt) || left.id.localeCompare(right.id),
+  );
+}
+
 export function mergeHealthProfiles(
   current: HealthProfile,
   incoming: HealthProfile,
   now = new Date().toISOString(),
 ): HealthProfile {
+  const deletedEventMap = new Map(
+    upsertDeletionTombstones(current.deletedEvents, incoming.deletedEvents).map((item) => [item.id, item]),
+  );
+  const deletedSourceMap = new Map(
+    upsertDeletionTombstones(current.deletedSources, incoming.deletedSources).map((item) => [item.id, item]),
+  );
+
   const events = new Map<string, HealthEvent>();
   for (const event of [...current.timeline, ...incoming.timeline]) {
     const previous = events.get(event.id);
@@ -222,6 +250,16 @@ export function mergeHealthProfiles(
     }
   }
 
+  for (const [eventId, event] of [...events.entries()]) {
+    const tombstone = deletedEventMap.get(eventId);
+    if (!tombstone) continue;
+    if (isTimestampStrictlyAfter(event.recordedAt, tombstone.deletedAt)) {
+      deletedEventMap.delete(eventId);
+    } else {
+      events.delete(eventId);
+    }
+  }
+
   const sources = new Map<string, HealthSource>();
   for (const source of [...current.sources, ...incoming.sources]) {
     const previous = sources.get(source.driveFileId);
@@ -245,9 +283,11 @@ export function mergeHealthProfiles(
     const mergedContributions = [...uniqueContributions.values()];
 
     const selected = source.status === 'processed' ? source : previous;
+    const latestRestoredAt = resolveLatestIsoTimestamp(previous.restoredAt, source.restoredAt);
     sources.set(source.driveFileId, {
       ...previous,
       ...selected,
+      ...(latestRestoredAt ? { restoredAt: latestRestoredAt } : {}),
       subjectStatus: selected.status === 'processed'
         ? selected.subjectStatus
         : source.subjectStatus || previous.subjectStatus,
@@ -261,10 +301,23 @@ export function mergeHealthProfiles(
     });
   }
 
+  for (const [sourceId, source] of [...sources.entries()]) {
+    const tombstone = deletedSourceMap.get(sourceId);
+    if (!tombstone) continue;
+    const sourceLatestAt = resolveLatestIsoTimestamp(source.restoredAt, source.digitizedAt, source.uploadedAt);
+    if (isTimestampStrictlyAfter(sourceLatestAt, tombstone.deletedAt)) {
+      deletedSourceMap.delete(sourceId);
+    } else {
+      sources.delete(sourceId);
+    }
+  }
+
   const timeline = [...events.values()].sort(
     (left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt),
   );
   const mergedSources = [...sources.values()].sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt));
+  const mergedDeletedEvents = upsertDeletionTombstones([...deletedEventMap.values()]);
+  const mergedDeletedSources = upsertDeletionTombstones([...deletedSourceMap.values()]);
 
   const changedFromCurrent = didTimelineEventsChange(current.timeline, timeline);
   const changedFromIncoming = didTimelineEventsChange(incoming.timeline, timeline);
@@ -388,6 +441,8 @@ export function mergeHealthProfiles(
     timeline,
     ...(timelineUpdatedAt ? { timelineUpdatedAt } : {}),
     sources: mergedSources,
+    ...(mergedDeletedEvents.length > 0 ? { deletedEvents: mergedDeletedEvents } : {}),
+    ...(mergedDeletedSources.length > 0 ? { deletedSources: mergedDeletedSources } : {}),
     summary: summarizeTimeline(timeline, incoming.summary.narrative || current.summary.narrative),
     aiAnalysis: nextAiAnalysis,
     aiDeepAnalysis: nextAiDeepAnalysis,
@@ -492,7 +547,19 @@ function sameHealthEventContent(left: HealthEvent, right: HealthEvent): boolean 
 
 export function addHealthSource(profile: HealthProfile, source: HealthSource): HealthProfile {
   if (profile.sources.some((item) => item.driveFileId === source.driveFileId)) return profile;
-  return { ...profile, sources: [...profile.sources, source], updatedAt: source.uploadedAt };
+  const hadTombstone = profile.deletedSources?.some((item) => item.id === source.driveFileId);
+  const nextDeletedSources = profile.deletedSources?.filter((item) => item.id !== source.driveFileId);
+  const nextSource: HealthSource = hadTombstone && !source.restoredAt
+    ? { ...source, restoredAt: new Date().toISOString() }
+    : source;
+  return {
+    ...profile,
+    sources: [...profile.sources, nextSource],
+    ...(nextDeletedSources && nextDeletedSources.length > 0
+      ? { deletedSources: nextDeletedSources }
+      : { deletedSources: undefined }),
+    updatedAt: source.uploadedAt,
+  };
 }
 
 export function digitizeHealthSource(
@@ -515,11 +582,15 @@ export function digitizeHealthSource(
       ? { ...item, status: 'processed' as const, subjectStatus: undefined, digitizedAt: now }
       : item,
   );
+  const nextDeletedEvents = profile.deletedEvents?.filter((item) => item.id !== event.id);
+  const nextDeletedSources = profile.deletedSources?.filter((item) => item.id !== event.sourceFileId);
   return {
     ...profile,
     timeline,
     timelineUpdatedAt: now,
     sources,
+    ...(nextDeletedEvents?.length ? { deletedEvents: nextDeletedEvents } : { deletedEvents: undefined }),
+    ...(nextDeletedSources?.length ? { deletedSources: nextDeletedSources } : { deletedSources: undefined }),
     summary: summarizeTimeline(timeline, profile.summary.narrative),
     aiDeepAnalysis: undefined,
     aiAnalysis: undefined,
@@ -688,6 +759,7 @@ function sanitizeHealthSource(raw: any): HealthSource | null {
     status: raw.status === 'processed' ? 'processed' : 'pending',
     subjectStatus: raw.subjectStatus === 'unresolved' ? 'unresolved' : undefined,
     digitizedAt: raw.digitizedAt ? String(raw.digitizedAt) : undefined,
+    restoredAt: raw.restoredAt ? String(raw.restoredAt) : undefined,
     rawDeletedAt: raw.rawDeletedAt ? String(raw.rawDeletedAt) : undefined,
     relocatedToMemberId: raw.relocatedToMemberId ? String(raw.relocatedToMemberId) : undefined,
     fileSize: typeof raw.fileSize === 'number' ? raw.fileSize : undefined,
@@ -789,12 +861,21 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
     return source;
   });
 
+  const deletedEvents = upsertDeletionTombstones(
+    Array.isArray(data.deletedEvents) ? data.deletedEvents : undefined,
+  );
+  const deletedSources = upsertDeletionTombstones(
+    Array.isArray(data.deletedSources) ? data.deletedSources : undefined,
+  );
+
   const normalized: HealthProfile = {
     schemaVersion: 2,
     member: { ...(data.member || member), ...member },
     timeline,
     ...(typeof data.timelineUpdatedAt === 'string' ? { timelineUpdatedAt: data.timelineUpdatedAt } : {}),
     sources,
+    ...(deletedEvents.length > 0 ? { deletedEvents } : {}),
+    ...(deletedSources.length > 0 ? { deletedSources } : {}),
     summary: data.summary || { latestDiagnoses: [], latestMetrics: {} },
     aiAnalysis: data.aiAnalysis,
     aiDeepAnalysis: data.aiDeepAnalysis,

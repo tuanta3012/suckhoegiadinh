@@ -1,6 +1,6 @@
 import type { DriveFile, HealthDriveWorkspace } from './healthDriveService';
 import type { FamilyMember, HealthEvent, HealthProfile, HealthSource } from '../types';
-import { parseHealthProfile, summarizeTimeline } from './healthProfile';
+import { parseHealthProfile, summarizeTimeline, upsertDeletionTombstones } from './healthProfile';
 import {
   compareStructuredEventContainment,
   consolidateTimelineEvents,
@@ -8,6 +8,57 @@ import {
   normalizeMedicalText,
 } from './deduplicationService';
 import { compareDocumentContainment } from './documentContainment';
+
+function applyTimelineConsolidationWithTombstones(
+  profile: HealthProfile,
+  now = new Date().toISOString(),
+): {
+  profile: HealthProfile;
+  mergedCount: number;
+  absorbedEventIds: string[];
+  mergedEventIdMap: Record<string, string>;
+} {
+  const { timeline: nextTimeline, mergedCount, absorbedEventIds, mergedEventIdMap } =
+    consolidateTimelineEvents(profile.timeline);
+  if (mergedCount === 0 && absorbedEventIds.length === 0) {
+    return { profile, mergedCount: 0, absorbedEventIds: [], mergedEventIdMap: {} };
+  }
+
+  const tombstones = absorbedEventIds.map((id) => ({ id, deletedAt: now }));
+  const updatedSources = profile.sources.map((source) => {
+    if (!source.sourceContributions?.length) return source;
+    let changed = false;
+    const nextContributions = source.sourceContributions.map((contribution) => {
+      const remappedId = contribution.mergedIntoEventId
+        ? mergedEventIdMap[contribution.mergedIntoEventId]
+        : undefined;
+      if (remappedId && remappedId !== contribution.mergedIntoEventId) {
+        changed = true;
+        return { ...contribution, mergedIntoEventId: remappedId };
+      }
+      return contribution;
+    });
+    return changed ? { ...source, sourceContributions: nextContributions } : source;
+  });
+
+  return {
+    mergedCount,
+    absorbedEventIds,
+    mergedEventIdMap,
+    profile: {
+      ...profile,
+      timeline: nextTimeline,
+      sources: updatedSources,
+      deletedEvents: upsertDeletionTombstones(profile.deletedEvents, tombstones),
+      summary: summarizeTimeline(nextTimeline, profile.summary.narrative),
+      timelineUpdatedAt: now,
+      aiDeepAnalysis: undefined,
+      aiAnalysis: undefined,
+      aiAnalysisInvalidatedAt: now,
+      updatedAt: now,
+    },
+  };
+}
 
 export interface WorkspaceAuditReport {
   scannedMembers: number;
@@ -112,7 +163,8 @@ export async function auditWorkspaceFolder(
             if (matchedInMember.has(candidate.id)) continue;
             if (
               compareStructuredEventContainment(event, candidate) !== 'none' ||
-              Boolean(detectDuplicateEvent([event], candidate))
+              Boolean(detectDuplicateEvent([event], candidate)) ||
+              Boolean(detectDuplicateEvent([candidate], event))
             ) {
               cluster.push(candidate);
               matchedInMember.add(candidate.id);
@@ -273,7 +325,7 @@ export async function cleanupWorkspaceDuplicates(
             additionalSources: Array.from(additionalSources.values()),
           };
         });
-        const preparedProfile: HealthProfile = {
+        const remappedProfile: HealthProfile = {
           ...profile,
           timeline: remappedTimeline,
           sources: profile.sources.map((source) =>
@@ -283,6 +335,9 @@ export async function cleanupWorkspaceDuplicates(
           ),
           updatedAt: now,
         };
+        const consolidated = applyTimelineConsolidationWithTombstones(remappedProfile, now);
+        mergedEvents += consolidated.mergedCount;
+        const preparedProfile = consolidated.profile;
         let prepared = await saveProfileFn(member.profileFileId, preparedProfile);
         if (prepared.syncPending) continue;
         profile = prepared;
@@ -450,7 +505,7 @@ export async function cleanupWorkspaceDuplicates(
             };
           });
 
-          const preparedProfile: HealthProfile = {
+          const remappedProfile: HealthProfile = {
             ...profile,
             timeline: remappedTimeline,
             sources: profile.sources.map((source) =>
@@ -460,6 +515,9 @@ export async function cleanupWorkspaceDuplicates(
             ),
             updatedAt: now,
           };
+          const consolidated = applyTimelineConsolidationWithTombstones(remappedProfile, now);
+          mergedEvents += consolidated.mergedCount;
+          const preparedProfile = consolidated.profile;
           let prepared = await saveProfileFn(member.profileFileId, preparedProfile);
           if (prepared.syncPending) continue;
           profile = prepared;
@@ -518,17 +576,12 @@ export async function cleanupWorkspaceDuplicates(
 
       if (!timeline || timeline.length <= 1) continue;
 
-      const { timeline: nextTimeline, mergedCount: memberMergedCount } = consolidateTimelineEvents(timeline);
+      const consolidationNow = new Date().toISOString();
+      const consolidated = applyTimelineConsolidationWithTombstones(profile, consolidationNow);
 
-      if (memberMergedCount > 0) {
-        mergedEvents += memberMergedCount;
-        const nextProfile: HealthProfile = {
-          ...profile,
-          timeline: nextTimeline,
-          summary: summarizeTimeline(nextTimeline, profile.summary.narrative),
-          updatedAt: new Date().toISOString(),
-        };
-        await saveProfileFn(member.profileFileId, nextProfile);
+      if (consolidated.mergedCount > 0 || consolidated.absorbedEventIds.length > 0) {
+        mergedEvents += consolidated.mergedCount;
+        await saveProfileFn(member.profileFileId, consolidated.profile);
       }
     } catch (err) {
       console.warn(`[Cleanup Timeline] Lỗi dọn hồ sơ của ${member.name}:`, err);

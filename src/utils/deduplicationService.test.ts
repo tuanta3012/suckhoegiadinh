@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  areDoctorsCompatible,
   cleanAndDeduplicateEventData,
   compareStructuredEventContainment,
   consolidateTimelineEvents,
   detectDuplicateEvent,
   detectDuplicateFile,
   mergeHealthEvents,
+  normalizeDoctorName,
   normalizeMedicalText,
   normalizeMedicationName,
   normalizeMetricName,
@@ -504,6 +506,183 @@ describe('Deduplication Service', () => {
       expect(consolidated.timeline).toHaveLength(1);
       expect(consolidated.timeline[0].type).toBe('comprehensive_exam');
       expect(consolidated.timeline[0].title).toBe('Hồ sơ sức khỏe định kỳ năm 2026');
+      expect(consolidated.absorbedEventIds).toEqual(['ev_lab_0806']);
+      expect(consolidated.mergedEventIdMap).toEqual({ ev_lab_0806: 'ev_checkup_1106' });
+    });
+
+    it('normalizes doctor titles cleanly and matches equivalent doctors across academic ranks', () => {
+      expect(normalizeDoctorName('BS. Đặng Đồng Quốc Chí')).toBe('dang dong quoc chi');
+      expect(normalizeDoctorName('BS. ThS.BS. Đặng Đồng Quốc Chí')).toBe('dang dong quoc chi');
+      expect(areDoctorsCompatible('BS. Đặng Đồng Quốc Chí', 'BS. ThS.BS. Đặng Đồng Quốc Chí')).toBe(true);
+      expect(areDoctorsCompatible('PGS.TS.BS Nguyễn Văn An', 'Bác sĩ Nguyễn Văn An')).toBe(true);
+      expect(areDoctorsCompatible('BS. Đặng Đồng Quốc Chí', 'BS. Trần Thị Bình')).toBe(false);
+    });
+
+    it('merges same-day lab result and outpatient prescription with same doctor and clinic even when metrics/diagnoses are split cleanly', () => {
+      const labOnlyEvent: HealthEvent = {
+        id: 'ev_lab_0902',
+        sourceFileId: 'file_lab_0902',
+        sourceFileName: 'IMG_lab.jpg',
+        type: 'test_result',
+        title: 'Phiếu kết quả xét nghiệm',
+        date: '2026-02-09',
+        facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+        doctorName: 'BS. Đặng Đồng Quốc Chí',
+        diagnoses: [],
+        medications: [],
+        metrics: [
+          { name: 'Định lượng HbA1c', value: 6.1, unit: '%', refRange: '4.0 - 6.0' },
+          { name: 'Định lượng Glucose', value: 6.33, unit: 'mmol/L', refRange: '3.9 - 6.4' },
+        ],
+        recordedAt: '2026-02-09T07:35:00Z',
+      };
+
+      const rxOnlyEvent: HealthEvent = {
+        id: 'ev_rx_0902',
+        sourceFileId: 'file_rx_0902',
+        sourceFileName: 'IMG_rx.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc',
+        date: '2026-02-09',
+        facility: 'Bệnh viện Đại học Y Dược TP.HCM - Phòng khám Bệnh viện Đại học Y Dược 1',
+        doctorName: 'BS. ThS.BS. Đặng Đồng Quốc Chí',
+        diagnoses: [
+          'I10 - Bệnh tăng huyết áp vô căn (nguyên phát)',
+          'E11 - Bệnh đái tháo đường không phụ thuộc insulin',
+          'E78.2 - Tăng lipid máu hỗn hợp',
+        ],
+        medications: [
+          { name: 'Sitagliptin + Metformin (METFORMIN HCL 850/SITAGLIPTIN 50)', dosage: '50mg+850mg', frequency: '1 lần/ngày', duration: '90 ngày' },
+          { name: 'Ezetimib + Simvastatin (VASITIMB 10/20MG)', dosage: '10mg+20mg', frequency: '1 lần/ngày', duration: '90 ngày' },
+        ],
+        metrics: [],
+        advice: 'Hẹn tái khám sáng 09/05 tại phòng PK Nội 1',
+        nextFollowUp: '2026-05-09',
+        recordedAt: '2026-02-09T07:37:36Z',
+      };
+
+      const match = detectDuplicateEvent([labOnlyEvent], rxOnlyEvent);
+      expect(match).not.toBeNull();
+      expect(match?.confidence).toBe('high');
+      expect(match?.matchedEvent.id).toBe('ev_lab_0902');
+
+      const consolidated = consolidateTimelineEvents([labOnlyEvent, rxOnlyEvent]);
+      expect(consolidated.mergedCount).toBe(1);
+      expect(consolidated.timeline).toHaveLength(1);
+      expect(consolidated.absorbedEventIds).toEqual(['ev_lab_0902']);
+      expect(consolidated.mergedEventIdMap).toEqual({ ev_lab_0902: 'ev_rx_0902' });
+
+      const merged = consolidated.timeline[0];
+      expect(merged.type).toBe('prescription');
+      expect(merged.facility).toBe('Bệnh viện Đại học Y Dược TP.HCM - Phòng khám Bệnh viện Đại học Y Dược 1');
+      expect(merged.doctorName).toBe('BS. ThS.BS. Đặng Đồng Quốc Chí');
+      expect(merged.diagnoses).toHaveLength(3);
+      expect(merged.medications).toHaveLength(2);
+      expect(merged.metrics).toHaveLength(2);
+      expect(merged.nextFollowUp).toBe('2026-05-09');
+      expect(merged.additionalSources?.map((s) => s.driveFileId)).toEqual(
+        expect.arrayContaining(['file_rx_0902', 'file_lab_0902']),
+      );
+    });
+
+    it('merges same-day lab result and prescription with identical metrics and ICD-10 variant diagnoses', () => {
+      const labEvent: HealthEvent = {
+        id: 'ev_lab_1509',
+        sourceFileId: 'file_lab_1509',
+        sourceFileName: 'IMG_lab_1509.jpg',
+        type: 'test_result',
+        title: 'Phiếu kết quả xét nghiệm',
+        date: '2026-09-15',
+        facility: 'Bệnh viện Đại học Y Dược TP.HCM - Phòng khám Bệnh viện Đại học Y Dược 1',
+        doctorName: 'BS. Đặng Đồng Quốc Chí',
+        diagnoses: [
+          'E11 - Đái tháo đường không phụ thuộc insulin',
+          'E78.2 - Tăng lipid máu hỗn hợp',
+          'I10 - Bệnh tăng huyết áp vô căn (nguyên phát)',
+        ],
+        medications: [],
+        metrics: [
+          { name: 'HbA1c', value: 6.2, unit: '%' },
+          { name: 'Glucose', value: 6.5, unit: 'mmol/L' },
+          { name: 'Triglycerid', value: 2.1, unit: 'mmol/L' },
+          { name: 'Creatinin', value: 88, unit: 'µmol/L' },
+        ],
+        recordedAt: '2026-09-15T08:00:00Z',
+      };
+
+      const rxEvent: HealthEvent = {
+        id: 'ev_rx_1509',
+        sourceFileId: 'file_rx_1509',
+        sourceFileName: 'IMG_rx_1509.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc ngoại trú',
+        date: '2026-09-15',
+        facility: 'Phòng khám Bệnh viện Đại học Y Dược 1',
+        doctorName: 'BS. ThS.BS. Đặng Đồng Quốc Chí',
+        diagnoses: [
+          'I10 - Bệnh tăng huyết áp vô căn (nguyên phát)',
+          'E11.9 - Bệnh đái tháo đường không phụ thuộc insulin',
+          'E78.2 - Tăng lipid máu hỗn hợp',
+          'R74.0 - Tăng transaminase',
+        ],
+        medications: [
+          { name: 'STRADIRAS 50/850MG', dosage: '50mg+850mg', frequency: '1 lần/ngày' },
+        ],
+        metrics: [
+          { name: 'HbA1c', value: 6.2, unit: '%' },
+          { name: 'Glucose', value: 6.5, unit: 'mmol/L' },
+          { name: 'Triglycerid', value: 2.1, unit: 'mmol/L' },
+          { name: 'Creatinin', value: 88, unit: 'µmol/L' },
+        ],
+        advice: 'Uống thuốc đúng giờ',
+        nextFollowUp: '2026-12-14',
+        recordedAt: '2026-09-15T08:15:00Z',
+      };
+
+      expect(compareStructuredEventContainment(labEvent, rxEvent)).toBe('right_contains_left');
+      const consolidated = consolidateTimelineEvents([labEvent, rxEvent]);
+      expect(consolidated.timeline).toHaveLength(1);
+      expect(consolidated.mergedCount).toBe(1);
+      expect(consolidated.timeline[0].diagnoses).toHaveLength(4);
+      expect(consolidated.timeline[0].metrics).toHaveLength(4);
+      expect(consolidated.timeline[0].medications).toHaveLength(1);
+    });
+
+    it('does not falsely merge same-day visits at the same hospital when doctors and diagnoses explicitly differ', () => {
+      const cardioRx: HealthEvent = {
+        id: 'ev_cardio',
+        sourceFileId: 'file_cardio',
+        sourceFileName: 'cardio.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc Tim mạch',
+        date: '2026-09-15',
+        facility: 'Bệnh viện Đại học Y Dược TP.HCM',
+        doctorName: 'BS. Nguyễn Văn An',
+        diagnoses: ['I10 - Tăng huyết áp vô căn'],
+        medications: [{ name: 'Amlodipin 5mg' }],
+        metrics: [],
+        recordedAt: '2026-09-15T08:00:00Z',
+      };
+
+      const dermRx: HealthEvent = {
+        id: 'ev_derm',
+        sourceFileId: 'file_derm',
+        sourceFileName: 'derm.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc Da liễu',
+        date: '2026-09-15',
+        facility: 'Bệnh viện Đại học Y Dược TP.HCM',
+        doctorName: 'BS. Trần Thị Bình',
+        diagnoses: ['L20 - Viêm da cơ địa'],
+        medications: [{ name: 'Desloratadin 5mg' }],
+        metrics: [],
+        recordedAt: '2026-09-15T09:30:00Z',
+      };
+
+      expect(detectDuplicateEvent([cardioRx], dermRx)).toBeNull();
+      const consolidated = consolidateTimelineEvents([cardioRx, dermRx]);
+      expect(consolidated.mergedCount).toBe(0);
+      expect(consolidated.timeline).toHaveLength(2);
     });
   });
 });
