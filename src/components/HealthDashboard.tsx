@@ -7945,30 +7945,27 @@ export function HealthDashboard({
                 {/* Upcoming Follow-ups Alert Strip */}
                 {upcomingFollowUps.length > 0 && (
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-3.5 shadow-2xs space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-slate-900 font-extrabold text-xs">
-                        <Calendar className="w-4 h-4 text-emerald-600" />
-                        <span>Lịch tái khám &amp; Nhắc nhở</span>
-                      </div>
-                      <span className="text-[11px] font-bold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-full">
-                        {upcomingFollowUps.length} nhắc hẹn
-                      </span>
+                    <div className="flex items-center gap-2 text-slate-900 font-extrabold text-xs">
+                      <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Lịch tái khám</span>
                     </div>
                     <div className="grid gap-2 sm:grid-cols-2">
                       {upcomingFollowUps.slice(0, 2).map((item, idx) => (
                         <div
                           key={idx}
-                          className="bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 flex items-center justify-between gap-3 text-xs"
+                          className="bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 flex items-start justify-between gap-3 text-xs"
                         >
-                          <div className="min-w-0 space-y-0.5">
-                            <div className="font-extrabold text-slate-900 truncate">
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="font-extrabold text-slate-900 text-xs sm:text-sm tracking-tight truncate">
                               <span className="text-emerald-700">{item.event.diagnoses?.[0] || item.event.title}</span>
                             </div>
-                            <div className="text-[11px] text-slate-600 truncate">
-                              📍 {item.event.facility || 'Cơ sở y tế'}
+                            <div className="text-[11px] text-slate-600 truncate flex items-center gap-1">
+                              <span className="shrink-0">📍</span>
+                              <span className="truncate">{item.event.facility || 'Cơ sở y tế'}</span>
                             </div>
-                            <div className="text-[11px] font-semibold text-slate-800">
-                              ⏰ Hẹn ngày: {formatDateVN(item.followUpDate)}
+                            <div className="text-[11px] font-semibold text-slate-800 flex items-center gap-1">
+                              <span className="shrink-0">⏰</span>
+                              <span>Hẹn ngày: {formatDateVN(item.followUpDate)}</span>
                             </div>
                           </div>
                           <span
