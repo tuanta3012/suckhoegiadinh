@@ -8003,36 +8003,19 @@ export function HealthDashboard({
                       {upcomingFollowUps.slice(0, 2).map((item, idx) => (
                         <div
                           key={idx}
-                          className="min-w-0 w-full overflow-hidden bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 flex items-start justify-between gap-2.5 text-xs"
+                          className="min-w-0 w-full overflow-hidden bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 space-y-1.5 text-xs"
                         >
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="min-w-0 font-extrabold text-emerald-700 text-xs sm:text-sm leading-snug tracking-tight break-words line-clamp-2">
-                              {formatFollowUpConditions(item.event.diagnoses, item.event.title)}
-                            </div>
-                            <div className="min-w-0 text-[11px] text-slate-600 flex items-center gap-1">
-                              <span className="shrink-0">📍</span>
-                              <span className="min-w-0 flex-1 truncate">{item.event.facility || 'Cơ sở y tế'}</span>
-                            </div>
-                            <div className="min-w-0 text-[11px] font-semibold text-slate-800 flex items-center gap-1">
-                              <span className="shrink-0">⏰</span>
-                              <span className="min-w-0 truncate">Hẹn ngày: {formatDateVN(item.followUpDate)}</span>
-                            </div>
+                          <div className="min-w-0 font-extrabold text-emerald-700 text-xs sm:text-sm leading-snug tracking-tight break-words">
+                            {formatFollowUpConditions(item.event.diagnoses, item.event.title)}
                           </div>
-                          <span
-                            className={`px-2.5 py-1 rounded-xl font-bold text-[10px] shrink-0 whitespace-nowrap ${
-                              item.daysRemaining < 0
-                                ? 'bg-rose-100 text-rose-800'
-                                : item.daysRemaining <= 3
-                                ? 'bg-amber-100 text-amber-900 animate-pulse'
-                                : 'bg-emerald-100 text-emerald-800'
-                            }`}
-                          >
-                            {item.daysRemaining < 0
-                              ? `Quá hạn ${Math.abs(item.daysRemaining)} ngày`
-                              : item.daysRemaining === 0
-                              ? 'Hôm nay!'
-                              : `Còn ${item.daysRemaining} ngày`}
-                          </span>
+                          <div className="min-w-0 text-[11px] text-slate-600 flex items-start gap-1.5 leading-snug">
+                            <span className="shrink-0">📍</span>
+                            <span className="min-w-0 flex-1 break-words">{item.event.facility || 'Cơ sở y tế'}</span>
+                          </div>
+                          <div className="min-w-0 text-[11px] font-semibold text-slate-800 flex items-center gap-1.5">
+                            <span className="shrink-0">⏰</span>
+                            <span className="min-w-0 break-words">Hẹn ngày: {formatDateVN(item.followUpDate)}</span>
+                          </div>
                         </div>
                       ))}
                     </div>
