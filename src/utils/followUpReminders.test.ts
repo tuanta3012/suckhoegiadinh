@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { FamilyMember, HealthEvent, HealthProfile } from '../types';
-import { getFollowUpRemindersForSignedInMember } from './followUpReminders';
+import {
+  formatConciseDiagnosis,
+  formatFollowUpConditions,
+  getFollowUpRemindersForSignedInMember,
+} from './followUpReminders';
 
 function makeMember(id: string, email: string): FamilyMember {
   return {
@@ -85,3 +89,33 @@ describe('getFollowUpRemindersForSignedInMember', () => {
     )).toEqual([]);
   });
 });
+
+describe('formatFollowUpConditions', () => {
+  it('strips ICD codes and verbose qualifiers while keeping all main conditions', () => {
+    const text = formatFollowUpConditions(
+      [
+        'Đái tháo đường không phụ thuộc insuline (E11)',
+        'Bệnh tăng huyết áp vô căn (nguyên phát) (I10)',
+      ],
+      'Khám ngoại trú',
+    );
+    expect(text).toBe('Đái tháo đường, Tăng huyết áp');
+  });
+
+  it('caps overly long lists concisely and avoids duplicates', () => {
+    const text = formatFollowUpConditions([
+      'Đái tháo đường không phụ thuộc insulin (E11)',
+      'Đái tháo đường',
+      'Bệnh tăng huyết áp vô căn (I10)',
+      'Rối loạn chuyển hóa lipoprotein và tình trạng tăng lipid máu khác (E78)',
+      'Viêm dạ dày (K29)',
+    ]);
+    expect(text).toBe('Đái tháo đường, Tăng huyết áp, Rối loạn lipid máu (+1 khác)');
+  });
+
+  it('falls back cleanly to cleaned title when diagnoses are empty', () => {
+    expect(formatConciseDiagnosis('Khám đái tháo đường (E11)')).toBe('Khám đái tháo đường');
+    expect(formatFollowUpConditions([], 'Khám định kỳ')).toBe('Khám định kỳ');
+  });
+});
+

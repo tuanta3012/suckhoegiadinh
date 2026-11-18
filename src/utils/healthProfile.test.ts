@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { FamilyMember, HealthEvent } from '../types';
+import type { FamilyMember, HealthEvent, HealthProfile } from '../types';
 import {
   addHealthSource,
   canDeleteRawSource,
@@ -640,6 +640,74 @@ describe('health profile', () => {
       { procedure: 'Mổ ruột thừa', year: '2020' },
     ]);
   });
+
+  it('updates a timeline event, bumps recordedAt for LWW sync, invalidates AI analysis, and updates summary', async () => {
+    const { updateTimelineEventInProfile } = await import('./healthProfile');
+    const member: FamilyMember = {
+      id: 'm1',
+      name: 'Minh',
+      driveFolderId: 'f1',
+      profileFileId: 'p1',
+    };
+    const event: HealthEvent = {
+      id: 'ev1',
+      sourceFileId: 'src1',
+      sourceFileName: 'don-thuoc.jpg',
+      type: 'prescription',
+      title: 'Khám cũ (OCR sai)',
+      date: '2026-05-01',
+      facility: 'Bệnh viện A',
+      diagnoses: ['Tăng huyết áp'],
+      medications: [{ name: 'Amlodipine', dosage: '5mg' }],
+      metrics: [{ name: 'Glucose', value: 6.2, unit: 'mmol/L' }],
+      advice: 'Uống thuốc đúng giờ',
+      nextFollowUp: '2026-06-01',
+      recordedAt: '2026-05-01T08:00:00.000Z',
+    };
+    const profile: HealthProfile = {
+      ...createHealthProfile(member, '2026-05-01T08:00:00.000Z'),
+      timeline: [event],
+      aiAnalysis: { overviewSummary: 'Cũ' },
+      aiDeepAnalysis: {
+        analyzedAt: '2026-05-02T00:00:00.000Z',
+        healthScore: 80,
+        overallAssessment: 'Tốt',
+        crossCorrelations: [],
+        velocityTrends: [],
+        chronicSurveillance: [],
+        roadmap: {
+          criticalAlerts: [],
+          specialistReferrals: [],
+          timeBoundPlan: { next3Months: [], next6Months: [], next12Months: [] },
+        },
+      },
+    };
+
+    const edited = updateTimelineEventInProfile(
+      profile,
+      {
+        ...event,
+        title: 'Khám Đái tháo đường - Huyết áp',
+        diagnoses: ['Đái tháo đường', 'Tăng huyết áp'],
+        medications: [{ name: 'Metformin', dosage: '500mg', frequency: '2 lần/ngày' }],
+        metrics: [{ name: 'Glucose', value: 7.4, unit: 'mmol/L' }],
+        nextFollowUp: '2026-06-15',
+      },
+      '2026-05-10T10:00:00.000Z',
+    );
+
+    expect(edited.timeline).toHaveLength(1);
+    expect(edited.timeline[0].title).toBe('Khám Đái tháo đường - Huyết áp');
+    expect(edited.timeline[0].recordedAt).toBe('2026-05-10T10:00:00.000Z');
+    expect(edited.timeline[0].diagnoses).toEqual(['Đái tháo đường', 'Tăng huyết áp']);
+    expect(edited.timeline[0].medications[0].name).toBe('Metformin');
+    expect(edited.summary.nextFollowUp).toBe('2026-06-15');
+    expect(edited.summary.latestDiagnoses).toEqual(['Đái tháo đường', 'Tăng huyết áp']);
+    expect(edited.aiDeepAnalysis).toBeUndefined();
+    expect(edited.aiAnalysis).toBeUndefined();
+    expect(edited.aiAnalysisInvalidatedAt).toBe('2026-05-10T10:00:00.000Z');
+  });
 });
+
 
 

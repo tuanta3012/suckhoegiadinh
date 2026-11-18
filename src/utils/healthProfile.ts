@@ -603,6 +603,55 @@ export function digitizeHealthSource(
   };
 }
 
+export function updateTimelineEventInProfile(
+  profile: HealthProfile,
+  editedEvent: HealthEvent,
+  now = new Date().toISOString(),
+): HealthProfile {
+  const index = profile.timeline.findIndex((item) => item.id === editedEvent.id);
+  if (index === -1) {
+    throw new Error('Không tìm thấy sự kiện y tế cần chỉnh sửa.');
+  }
+
+  const existing = profile.timeline[index];
+  const trimmedTitle = editedEvent.title.trim();
+  if (!trimmedTitle) {
+    throw new Error('Cần nhập tiêu đề sự kiện y tế.');
+  }
+
+  const normalized = cleanAndDeduplicateEventData({
+    ...existing,
+    ...editedEvent,
+    id: existing.id,
+    sourceFileId: existing.sourceFileId,
+    sourceFileName: existing.sourceFileName,
+    ...(existing.additionalSources ? { additionalSources: existing.additionalSources } : {}),
+    title: trimmedTitle,
+    date: editedEvent.date.trim(),
+    facility: editedEvent.facility?.trim() || undefined,
+    doctorName: editedEvent.doctorName?.trim() || undefined,
+    advice: editedEvent.advice?.trim() || undefined,
+    nextFollowUp: editedEvent.nextFollowUp?.trim() || undefined,
+    notes: editedEvent.notes?.trim() || undefined,
+    recordedAt: now,
+  });
+
+  const nextTimeline = profile.timeline
+    .map((item) => (item.id === existing.id ? normalized : item))
+    .sort((left, right) => left.date.localeCompare(right.date) || left.recordedAt.localeCompare(right.recordedAt));
+
+  return {
+    ...profile,
+    timeline: nextTimeline,
+    timelineUpdatedAt: now,
+    summary: summarizeTimeline(nextTimeline, profile.summary.narrative),
+    aiDeepAnalysis: undefined,
+    aiAnalysis: undefined,
+    aiAnalysisInvalidatedAt: now,
+    updatedAt: now,
+  };
+}
+
 export function canDeleteRawSource(profile: HealthProfile, sourceFileId: string): boolean {
   const source = profile.sources.find((item) => item.driveFileId === sourceFileId);
   return Boolean(

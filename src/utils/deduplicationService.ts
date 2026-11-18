@@ -797,7 +797,15 @@ export function normalizeDoctorName(name?: string): string {
   return text;
 }
 
-export function areDoctorsCompatible(leftDoctor?: string, rightDoctor?: string): boolean {
+function splitDoctorNames(name?: string): string[] {
+  if (!name || typeof name !== 'string') return [];
+  return name
+    .split(/[;|\n]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function areSingleDoctorsCompatible(leftDoctor?: string, rightDoctor?: string): boolean {
   const left = normalizeDoctorName(leftDoctor);
   const right = normalizeDoctorName(rightDoctor);
   if (!left || !right) return false;
@@ -821,11 +829,20 @@ export function areDoctorsCompatible(leftDoctor?: string, rightDoctor?: string):
   );
 }
 
+export function areDoctorsCompatible(leftDoctor?: string, rightDoctor?: string): boolean {
+  const leftDoctors = splitDoctorNames(leftDoctor);
+  const rightDoctors = splitDoctorNames(rightDoctor);
+  if (leftDoctors.length === 0 || rightDoctors.length === 0) return false;
+  return leftDoctors.some((left) =>
+    rightDoctors.some((right) => areSingleDoctorsCompatible(left, right)),
+  );
+}
+
 export function areDoctorsExplicitlyDifferent(leftDoctor?: string, rightDoctor?: string): boolean {
-  const left = normalizeDoctorName(leftDoctor);
-  const right = normalizeDoctorName(rightDoctor);
-  if (left.length < 4 || right.length < 4) return false;
-  return !areDoctorsCompatible(left, right);
+  const leftDoctors = splitDoctorNames(leftDoctor).filter((doc) => normalizeDoctorName(doc).length >= 4);
+  const rightDoctors = splitDoctorNames(rightDoctor).filter((doc) => normalizeDoctorName(doc).length >= 4);
+  if (leftDoctors.length === 0 || rightDoctors.length === 0) return false;
+  return !areDoctorsCompatible(leftDoctors.join('; '), rightDoctors.join('; '));
 }
 
 interface DiagnosisSignature {
@@ -1034,6 +1051,11 @@ export function detectDuplicateEvent(
       reasons.push(`Cùng cơ sở y tế: "${event.facility}"`);
     }
 
+    if (sameDate && facilityMatch) {
+      score += 15;
+      reasons.push('Cùng ngày và cùng cơ sở y tế nên gộp chung hồ sơ khám');
+    }
+
     if (doctorMatch) {
       score += 25;
       reasons.push(`Cùng bác sĩ điều trị: "${incoming.doctorName || event.doctorName}"`);
@@ -1041,6 +1063,7 @@ export function detectDuplicateEvent(
 
     if (incoming.type && event.type) {
       const hasExplicitDoctorConflictWithoutClinicalOverlap =
+        !facilityMatch &&
         doctorsDiffer &&
         sharedMetricCount < 2 &&
         overlappingDiagCount === 0 &&
@@ -1257,14 +1280,19 @@ export function mergeHealthEvents(
   };
 
   const pickBetterDoctorName = (a?: string, b?: string): string | undefined => {
-    const first = a?.trim();
-    const second = b?.trim();
-    if (!first) return second || undefined;
-    if (!second) return first;
-    if (areDoctorsCompatible(first, second)) {
-      return second.length > first.length ? second : first;
+    const combined = [...splitDoctorNames(a), ...splitDoctorNames(b)];
+    if (combined.length === 0) return undefined;
+
+    const deduped: string[] = [];
+    for (const candidate of combined) {
+      const matchIdx = deduped.findIndex((item) => areSingleDoctorsCompatible(item, candidate));
+      if (matchIdx === -1) {
+        deduped.push(candidate);
+      } else if (candidate.length > deduped[matchIdx].length) {
+        deduped[matchIdx] = candidate;
+      }
     }
-    return first;
+    return deduped.join('; ') || undefined;
   };
 
   const pickBetterNextFollowUp = (a?: string, b?: string): string | undefined => {
@@ -1280,14 +1308,30 @@ export function mergeHealthEvents(
     return first;
   };
 
+  const mergedSameDaySameFacilityMultiSpecialist = Boolean(
+    primary.date &&
+    secondary.date &&
+    primary.date === secondary.date &&
+    areFacilitiesCompatible(primary.facility, secondary.facility) &&
+    areDoctorsExplicitlyDifferent(primary.doctorName, secondary.doctorName) &&
+    primary.type !== 'comprehensive_exam' &&
+    primary.type !== 'discharge',
+  );
+  const resolvedType: HealthEvent['type'] = mergedSameDaySameFacilityMultiSpecialist
+    ? 'comprehensive_exam'
+    : primary.type || secondary.type;
+  const resolvedTitle = mergedSameDaySameFacilityMultiSpecialist
+    ? 'Hồ sơ khám tổng quát'
+    : primary.title || secondary.title;
+
   return cleanAndDeduplicateEventData({
     ...primary,
     id: cleanExisting.id,
     sourceFileId: primary.sourceFileId || secondary.sourceFileId,
     sourceFileName: primary.sourceFileName || secondary.sourceFileName,
-    title: primary.title || secondary.title,
+    title: resolvedTitle,
     date: primary.date || secondary.date,
-    type: primary.type || secondary.type,
+    type: resolvedType,
     facility: pickBetterFacility(primary.facility, secondary.facility),
     doctorName: pickBetterDoctorName(primary.doctorName, secondary.doctorName),
     additionalSources: mergedSources.length > 1 ? mergedSources : primary.additionalSources,
@@ -1469,10 +1513,11 @@ export function consolidateTimelineEvents(timeline: HealthEvent[]): {
         ? consolidated.findIndex((item) => item.id === duplicate.matchedEvent.id)
         : consolidated.findIndex((item) => {
             if (compareStructuredEventContainment(item, event) !== 'none') return true;
-            if (item.date !== event.date) return false;
+            if (!item.date || !event.date || item.date !== event.date) return false;
             const sameFacility = areFacilitiesCompatible(item.facility, event.facility);
+            if (sameFacility) return true;
             const sameDoctor = areDoctorsCompatible(item.doctorName, event.doctorName);
-            if (!sameFacility && !sameDoctor) return false;
+            if (!sameDoctor) return false;
             if (areDoctorsExplicitlyDifferent(item.doctorName, event.doctorName)) return false;
 
             if (isComplementaryEpisodePair(item.type, event.type)) {

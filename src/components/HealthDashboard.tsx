@@ -67,6 +67,7 @@ import { AppLogo } from './AppLogo';
 import { FontSizeModal } from './FontSizeModal';
 import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
 import { MemberEditModal, type EditableFamilyMember } from './MemberEditModal';
+import { TimelineEventEditModal } from './TimelineEventEditModal';
 import { UnresolvedSubjectModal } from './UnresolvedSubjectModal';
 const HealthMetricsChart = lazy(() => import('./HealthMetricsChart'));
 import type {
@@ -145,6 +146,7 @@ import {
   mergeHealthProfiles,
   parseHealthProfile,
   summarizeTimeline,
+  updateTimelineEventInProfile,
   upsertDeletionTombstones,
 } from '../utils/healthProfile';
 import {
@@ -241,7 +243,10 @@ import {
   scheduleFollowUpNotifications,
   setupBackgroundAppResumeListener,
 } from '../utils/backgroundNotificationService';
-import { getFollowUpRemindersForSignedInMember } from '../utils/followUpReminders';
+import {
+  formatFollowUpConditions,
+  getFollowUpRemindersForSignedInMember,
+} from '../utils/followUpReminders';
 import {
   CalendarApiDisabledError,
   CalendarPermissionError,
@@ -741,6 +746,12 @@ export function HealthDashboard({
   const [isAddingMember, setIsAddingMember] = useState(false);
   const [editingMember, setEditingMember] = useState<FamilyMember | null>(null);
   const [isSavingMember, setIsSavingMember] = useState(false);
+  const [editingTimelineEvent, setEditingTimelineEvent] = useState<{
+    memberId: string;
+    event: HealthEvent;
+  } | null>(null);
+  const [isSavingTimelineEvent, setIsSavingTimelineEvent] = useState(false);
+  const [openSourceMenuEventId, setOpenSourceMenuEventId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberBirthDate, setNewMemberBirthDate] = useState('');
@@ -892,6 +903,9 @@ export function HealthDashboard({
       if (settingsMenuRef.current && !settingsMenuRef.current.contains(target)) {
         setShowSettingsDropdown(false);
       }
+      if (target instanceof Element && !target.closest('[data-source-menu-root="true"]')) {
+        setOpenSourceMenuEventId(null);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -920,6 +934,14 @@ export function HealthDashboard({
     showSettingsDropdown,
     () => {
       setShowSettingsDropdown(false);
+      return true;
+    },
+    BackPriority.DROPDOWN,
+  );
+  useBackHandler(
+    Boolean(openSourceMenuEventId),
+    () => {
+      setOpenSourceMenuEventId(null);
       return true;
     },
     BackPriority.DROPDOWN,
@@ -1137,8 +1159,12 @@ export function HealthDashboard({
       setSelectedMetric('');
       setTimelineFilter('all');
       setExpandedMetricEventIds({});
+      setOpenSourceMenuEventId(null);
     }
   }, [workspace?.rootFolderId]);
+  useEffect(() => {
+    setOpenSourceMenuEventId(null);
+  }, [activeTab, selectedMemberId]);
   const normalizedUserEmail = userEmail?.trim().toLowerCase() || null;
   const [cacheOwnerEmail, setCacheOwnerEmail] = useState<string | null>(normalizedUserEmail);
   const previousUserEmailRef = useRef(normalizedUserEmail);
@@ -1170,6 +1196,8 @@ export function HealthDashboard({
     setOcrRecoveryJobs([]);
     setWorkspaceAssignments([]);
     setEditingMember(null);
+    setEditingTimelineEvent(null);
+    setOpenSourceMenuEventId(null);
     setErrorMessage('');
   }, [normalizedUserEmail, userEmail]);
   useEffect(() => {
@@ -2644,10 +2672,11 @@ export function HealthDashboard({
     const authIdentity = authIdentityRef.current;
     if (nextWorkspace.rootFolderId === 'local_offline_workspace') {
       const localProfiles = Object.fromEntries(
-        nextWorkspace.family.members.map((member) => [
-          member.id,
-          profilesRef.current[member.id] || createHealthProfile(member),
-        ]),
+        nextWorkspace.family.members.map((member) => {
+          const baseProfile = profilesRef.current[member.id] || createHealthProfile(member);
+          const healed = consolidateProfileWithTombstones(baseProfile);
+          return [member.id, healed.mergedCount > 0 ? healed.profile : baseProfile];
+        }),
       );
       profilesRef.current = localProfiles;
       setProfiles(localProfiles);
@@ -4245,6 +4274,27 @@ export function HealthDashboard({
       showToast('Đã xóa sự kiện y tế thành công.', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể xóa sự kiện.', 'error');
+    }
+  }
+
+  async function handleSaveTimelineEvent(memberId: string, updatedEvent: HealthEvent) {
+    const member = members.find((m) => m.id === memberId) || selectedMember;
+    const profile = profilesRef.current[memberId] || profiles[memberId] || selectedProfile;
+    if (!member || !profile) return;
+
+    setIsSavingTimelineEvent(true);
+    try {
+      const updatedProfile = updateTimelineEventInProfile(profile, updatedEvent);
+      const saved = await saveHealthProfile(member.profileFileId, updatedProfile);
+      profilesRef.current = { ...profilesRef.current, [member.id]: saved };
+      setProfiles((prev) => ({ ...prev, [member.id]: saved }));
+      setEditingTimelineEvent(null);
+      void triggerAutoCalendarSync(members, profilesRef.current);
+      showToast('Đã lưu thay đổi sự kiện y tế.', 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể lưu chỉnh sửa.', 'error');
+    } finally {
+      setIsSavingTimelineEvent(false);
     }
   }
 
@@ -7637,7 +7687,7 @@ export function HealthDashboard({
         ref={mainContentRef}
         className={activeTab === 'assistant'
           ? 'flex-1 min-h-0 max-w-6xl w-full mx-auto px-3 sm:px-4 pt-2 sm:pt-3 assistant-viewport-content overflow-hidden flex flex-col'
-          : 'flex-1 min-h-0 overflow-y-auto overscroll-y-contain max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))]'}>
+          : 'flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-y-contain max-w-6xl w-full mx-auto px-4 py-4 sm:py-6 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))]'}>
         {errorMessage && (() => {
           const isDriveApiDisabled =
             errorMessage.includes('drive.googleapis.com') ||
@@ -7872,7 +7922,7 @@ export function HealthDashboard({
           <>
             {/* VIEW 1: TỔNG QUAN (OVERVIEW) */}
             {activeTab === 'overview' && (
-              <div className={`space-y-6 ${tabSlideClass}`}>
+              <div className={`w-full min-w-0 space-y-6 ${tabSlideClass}`}>
                 {/* Empty Local Data Guidance Card */}
                 {totalTimelineEvents === 0 && (
                   <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs text-center animate-in fade-in zoom-in-95 duration-200">
@@ -7944,32 +7994,32 @@ export function HealthDashboard({
                 )}
                 {/* Upcoming Follow-ups Alert Strip */}
                 {upcomingFollowUps.length > 0 && (
-                  <div className="rounded-2xl border border-slate-200/80 bg-white p-3.5 shadow-2xs space-y-2.5">
+                  <div className="w-full min-w-0 overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-3.5 shadow-2xs space-y-2.5">
                     <div className="flex items-center gap-2 text-slate-900 font-extrabold text-xs">
                       <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
                       <span>Lịch tái khám</span>
                     </div>
-                    <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 min-w-0">
                       {upcomingFollowUps.slice(0, 2).map((item, idx) => (
                         <div
                           key={idx}
-                          className="bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 flex items-start justify-between gap-3 text-xs"
+                          className="min-w-0 w-full overflow-hidden bg-slate-50/70 p-3 rounded-2xl border border-slate-200/60 flex items-start justify-between gap-2.5 text-xs"
                         >
                           <div className="min-w-0 flex-1 space-y-1">
-                            <div className="font-extrabold text-slate-900 text-xs sm:text-sm tracking-tight truncate">
-                              <span className="text-emerald-700">{item.event.diagnoses?.[0] || item.event.title}</span>
+                            <div className="min-w-0 font-extrabold text-emerald-700 text-xs sm:text-sm leading-snug tracking-tight break-words line-clamp-2">
+                              {formatFollowUpConditions(item.event.diagnoses, item.event.title)}
                             </div>
-                            <div className="text-[11px] text-slate-600 truncate flex items-center gap-1">
+                            <div className="min-w-0 text-[11px] text-slate-600 flex items-center gap-1">
                               <span className="shrink-0">📍</span>
-                              <span className="truncate">{item.event.facility || 'Cơ sở y tế'}</span>
+                              <span className="min-w-0 flex-1 truncate">{item.event.facility || 'Cơ sở y tế'}</span>
                             </div>
-                            <div className="text-[11px] font-semibold text-slate-800 flex items-center gap-1">
+                            <div className="min-w-0 text-[11px] font-semibold text-slate-800 flex items-center gap-1">
                               <span className="shrink-0">⏰</span>
-                              <span>Hẹn ngày: {formatDateVN(item.followUpDate)}</span>
+                              <span className="min-w-0 truncate">Hẹn ngày: {formatDateVN(item.followUpDate)}</span>
                             </div>
                           </div>
                           <span
-                            className={`px-2.5 py-1 rounded-xl font-bold text-[10px] shrink-0 ${
+                            className={`px-2.5 py-1 rounded-xl font-bold text-[10px] shrink-0 whitespace-nowrap ${
                               item.daysRemaining < 0
                                 ? 'bg-rose-100 text-rose-800'
                                 : item.daysRemaining <= 3
@@ -8280,7 +8330,7 @@ export function HealthDashboard({
                               </div>
                             </div>
                             <div className="flex items-center justify-end gap-1.5 shrink-0">
-                              {/* View original file(s) on Drive & merged contribution notes */}
+                              {/* View original file(s) on Drive consolidated into 1 trigger button */}
                               {(() => {
                                 const sourcesById = new Map(
                                   (selectedProfile?.sources || []).map((srcItem) => [srcItem.driveFileId, srcItem]),
@@ -8294,25 +8344,16 @@ export function HealthDashboard({
 
                                 const seenLiveIds = new Set<string>();
                                 const liveDriveSources: Array<{ driveFileId: string; fileName: string }> = [];
-                                const mergedSources: Array<{ fileName: string; detail: string }> = [];
-                                const seenMergedNames = new Set<string>();
 
                                 for (const src of rawEventSources) {
                                   if (!src.driveFileId) continue;
                                   const meta = sourcesById.get(src.driveFileId);
-                                  if (meta?.rawDeletedAt) {
-                                    const cleanName = src.fileName || meta.fileName;
-                                    if (cleanName && !seenMergedNames.has(cleanName)) {
-                                      seenMergedNames.add(cleanName);
-                                      const canonicalName = meta.mergedIntoFileName || event.sourceFileName || 'tệp chính';
-                                      mergedSources.push({
-                                        fileName: cleanName,
-                                        detail: `Tệp "${cleanName}" đã được gộp vào "${canonicalName}"; bản thừa đã chuyển vào Thùng rác Drive.`,
-                                      });
-                                    }
-                                  } else if (!src.driveFileId.startsWith('local_file_') && !seenLiveIds.has(src.driveFileId)) {
+                                  if (!meta?.rawDeletedAt && !src.driveFileId.startsWith('local_file_') && !seenLiveIds.has(src.driveFileId)) {
                                     seenLiveIds.add(src.driveFileId);
-                                    liveDriveSources.push(src);
+                                    liveDriveSources.push({
+                                      driveFileId: src.driveFileId,
+                                      fileName: meta?.fileName || src.fileName,
+                                    });
                                   }
                                 }
 
@@ -8327,101 +8368,96 @@ export function HealthDashboard({
                                   }
                                 }
 
-                                const referencedSourceIds = Array.from(
-                                  new Set([
-                                    ...(event.sourceFileId ? [event.sourceFileId] : []),
-                                    ...(event.additionalSources || []).map((s) => s.driveFileId).filter(Boolean),
-                                  ]),
-                                );
-                                for (const sourceId of referencedSourceIds) {
-                                  const sourceMeta = sourcesById.get(sourceId);
-                                  if (!sourceMeta?.sourceContributions?.length) continue;
-                                  const siblingEventsForSource = (selectedProfile?.timeline || []).filter(
-                                    (item) =>
-                                      item.sourceFileId === sourceId ||
-                                      item.additionalSources?.some((s) => s.driveFileId === sourceId),
-                                  ).length;
-                                  for (const contribution of sourceMeta.sourceContributions) {
-                                    const matchesThisEvent =
-                                      contribution.mergedIntoEventId === event.id ||
-                                      (!contribution.mergedIntoEventId && siblingEventsForSource <= 1);
-                                    if (!matchesThisEvent) continue;
-                                    if (!seenMergedNames.has(contribution.fileName)) {
-                                      seenMergedNames.add(contribution.fileName);
-                                      mergedSources.push({
-                                        fileName: contribution.fileName,
-                                        detail:
-                                          contribution.reason ||
-                                          `Tệp "${contribution.fileName}" đã được gộp vào "${sourceMeta.fileName || event.sourceFileName}".`,
-                                      });
-                                    }
-                                  }
+                                if (liveDriveSources.length === 0) return null;
+
+                                if (liveDriveSources.length === 1) {
+                                  return (
+                                    <a
+                                      href={`https://drive.google.com/file/d/${encodeURIComponent(
+                                        liveDriveSources[0].driveFileId
+                                      )}/view`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="h-8 w-8 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 inline-flex items-center justify-center shrink-0 transition-colors"
+                                      title={`Xem tài liệu gốc: ${liveDriveSources[0].fileName}`}
+                                      aria-label={`Xem tài liệu gốc: ${liveDriveSources[0].fileName || 'Tài liệu gốc'}`}
+                                    >
+                                      <FileText className="w-4 h-4" strokeWidth={2.25} />
+                                    </a>
+                                  );
                                 }
 
-                                if (liveDriveSources.length === 0 && mergedSources.length === 0) return null;
-
+                                const isSourceMenuOpen = openSourceMenuEventId === event.id;
                                 return (
-                                  <>
-                                    {liveDriveSources.length > 1 ? (
-                                      liveDriveSources.map((src, idx) => (
-                                        <a
-                                          key={src.driveFileId || idx}
-                                          href={`https://drive.google.com/file/d/${encodeURIComponent(
-                                            src.driveFileId
-                                          )}/view`}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="h-8 w-8 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-700 inline-flex items-center justify-center shrink-0 transition-colors"
-                                          title={`Xem tệp gốc: ${src.fileName}`}
-                                          aria-label={`Xem tệp gốc: ${src.fileName || `Tệp ${idx + 1}`}`}
-                                        >
-                                          <ExternalLink className="w-3.5 h-3.5" />
-                                        </a>
-                                      ))
-                                    ) : liveDriveSources.length === 1 ? (
-                                      <a
-                                        href={`https://drive.google.com/file/d/${encodeURIComponent(
-                                          liveDriveSources[0].driveFileId
-                                        )}/view`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="h-8 w-8 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 inline-flex items-center justify-center shrink-0 transition-colors"
-                                        title={`Xem tài liệu gốc trên Google Drive: ${liveDriveSources[0].fileName}`}
-                                        aria-label={`Xem tài liệu gốc: ${liveDriveSources[0].fileName || 'Tài liệu gốc'}`}
+                                  <div className="relative" data-source-menu-root="true">
+                                    <button
+                                      type="button"
+                                      aria-expanded={isSourceMenuOpen}
+                                      aria-haspopup="menu"
+                                      onClick={() =>
+                                        setOpenSourceMenuEventId((prev) => (prev === event.id ? null : event.id))
+                                      }
+                                      className="relative h-8 w-8 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 inline-flex items-center justify-center shrink-0 transition-colors"
+                                      title={`Chọn tài liệu gốc (${liveDriveSources.length})`}
+                                      aria-label={`Chọn tài liệu gốc (${liveDriveSources.length})`}
+                                    >
+                                      <FileText className="w-4 h-4" strokeWidth={2.25} />
+                                      <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-extrabold leading-[15px] text-center shadow-2xs">
+                                        {liveDriveSources.length}
+                                      </span>
+                                    </button>
+                                    {isSourceMenuOpen && (
+                                      <div
+                                        role="menu"
+                                        className="absolute right-0 mt-1.5 w-64 max-w-[calc(100vw-3rem)] bg-white border border-slate-200 rounded-2xl shadow-xl p-1.5 z-40 animate-in fade-in zoom-in-95 duration-150 space-y-1"
                                       >
-                                        <FileText className="w-4 h-4" strokeWidth={2.25} />
-                                      </a>
-                                    ) : null}
-
-                                    {mergedSources.length > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          showToast(
-                                            mergedSources.map((item) => item.detail).join(' '),
-                                            'info',
-                                          )
-                                        }
-                                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-100 hover:bg-slate-200/70 text-slate-600 inline-flex items-center justify-center shrink-0 transition-colors"
-                                        title={mergedSources.map((item) => item.detail).join('\n')}
-                                        aria-label={`Thông tin gộp từ ${mergedSources.length} tài liệu`}
-                                      >
-                                        <FileStack className="w-4 h-4" />
-                                      </button>
+                                        {liveDriveSources.map((src, idx) => (
+                                          <a
+                                            key={src.driveFileId || idx}
+                                            role="menuitem"
+                                            href={`https://drive.google.com/file/d/${encodeURIComponent(
+                                              src.driveFileId
+                                            )}/view`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={() => setOpenSourceMenuEventId(null)}
+                                            className="w-full flex items-center gap-2.5 p-2 min-h-[40px] rounded-xl hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 transition-colors text-left text-xs font-semibold"
+                                          >
+                                            <FileText className="w-4 h-4 text-blue-600 shrink-0" />
+                                            <span className="flex-1 min-w-0 truncate">
+                                              {src.fileName || `Tài liệu ${idx + 1}`}
+                                            </span>
+                                            <ExternalLink className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                          </a>
+                                        ))}
+                                      </div>
                                     )}
-                                  </>
+                                  </div>
                                 );
                               })()}
                               {selectedMember && (
-                                <button
-                                  type="button"
-                                  onClick={() => void handleDeleteTimelineEvent(selectedMember.id, event.id)}
-                                  className="h-8 w-8 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 inline-flex items-center justify-center transition-colors shrink-0"
-                                  title="Xóa sự kiện y tế này"
-                                  aria-label="Xóa sự kiện y tế này"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingTimelineEvent({ memberId: selectedMember.id, event })
+                                    }
+                                    className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 inline-flex items-center justify-center transition-colors shrink-0"
+                                    title="Chỉnh sửa"
+                                    aria-label="Chỉnh sửa sự kiện y tế"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteTimelineEvent(selectedMember.id, event.id)}
+                                    className="h-8 w-8 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 inline-flex items-center justify-center transition-colors shrink-0"
+                                    title="Xóa sự kiện y tế này"
+                                    aria-label="Xóa sự kiện y tế này"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </>
                               )}
                             </div>
                           </div>
@@ -8829,12 +8865,17 @@ export function HealthDashboard({
                               </div>
                             );
                           })()}
-                          {/* Doctor's Advice & Next Follow-up */}
-                          {(event.advice || event.nextFollowUp) && (
+                          {/* Doctor's Advice, Notes & Next Follow-up */}
+                          {(event.advice || event.notes || event.nextFollowUp) && (
                             <div className="pt-2 border-t border-slate-100 text-xs space-y-1">
                               {event.advice && (
-                                <p className="text-slate-700">
+                                <p className="text-slate-700 break-words">
                                   <strong>Lời dặn:</strong> {event.advice}
+                                </p>
+                              )}
+                              {event.notes && (
+                                <p className="text-slate-600 break-words">
+                                  <strong>Ghi chú:</strong> {event.notes}
                                 </p>
                               )}
                               {event.nextFollowUp && (
@@ -9879,6 +9920,19 @@ export function HealthDashboard({
           isSaving={isSavingMember}
           onClose={() => setEditingMember(null)}
           onSave={(updates) => void handleSaveMember(updates)}
+        />
+      )}
+      {editingTimelineEvent && (
+        <TimelineEventEditModal
+          event={editingTimelineEvent.event}
+          eventTypeOptions={EVENT_TYPE_OPTIONS}
+          isSaving={isSavingTimelineEvent}
+          onClose={() => {
+            if (!isSavingTimelineEvent) setEditingTimelineEvent(null);
+          }}
+          onSave={(updatedEvent) =>
+            void handleSaveTimelineEvent(editingTimelineEvent.memberId, updatedEvent)
+          }
         />
       )}
     </div>

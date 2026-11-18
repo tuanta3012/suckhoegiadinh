@@ -648,7 +648,7 @@ describe('Deduplication Service', () => {
       expect(consolidated.timeline[0].medications).toHaveLength(1);
     });
 
-    it('does not falsely merge same-day visits at the same hospital when doctors and diagnoses explicitly differ', () => {
+    it('merges same-day visits at the same hospital across different doctors into a comprehensive exam dossier', () => {
       const cardioRx: HealthEvent = {
         id: 'ev_cardio',
         sourceFileId: 'file_cardio',
@@ -679,10 +679,124 @@ describe('Deduplication Service', () => {
         recordedAt: '2026-09-15T09:30:00Z',
       };
 
-      expect(detectDuplicateEvent([cardioRx], dermRx)).toBeNull();
+      const match = detectDuplicateEvent([cardioRx], dermRx);
+      expect(match).not.toBeNull();
+      expect(match?.confidence).toBe('high');
+
       const consolidated = consolidateTimelineEvents([cardioRx, dermRx]);
+      expect(consolidated.mergedCount).toBe(1);
+      expect(consolidated.timeline).toHaveLength(1);
+
+      const merged = consolidated.timeline[0];
+      expect(merged.type).toBe('comprehensive_exam');
+      expect(merged.title).toBe('Hồ sơ khám tổng quát');
+      expect(merged.doctorName).toBe('BS. Nguyễn Văn An; BS. Trần Thị Bình');
+      expect(merged.diagnoses).toHaveLength(2);
+      expect(merged.medications).toHaveLength(2);
+      expect(merged.additionalSources?.map((s) => s.driveFileId)).toEqual([
+        'file_cardio',
+        'file_derm',
+      ]);
+    });
+
+    it('merges same-day specialist prescription into comprehensive checkup at the same clinic while preserving both doctors', () => {
+      const eyeRx: HealthEvent = {
+        id: 'ev_eye_0806',
+        sourceFileId: 'file_eye_0806',
+        sourceFileName: 'don_thuoc_mat.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc ngoại trú',
+        date: '2026-06-08',
+        facility: 'Bệnh viện Đại Học Y Dược TP.HCM - Phòng khám Bệnh viện Đại Học Y Dược 1',
+        doctorName: 'BS.CKI. Phạm Lê Hoàng Anh',
+        diagnoses: ['Viêm kết mí mắt (H10.5)'],
+        medications: [
+          { name: 'Natri Hyaluronat (SANLEIN EYE DROP 0.1% 5ML)', dosage: '0.1% 5ML', duration: '14 ngày' },
+          { name: 'Fluorometholon (FLUMETHOLON 0.1% 5ML)', dosage: '0.1% 5ML', duration: '14 ngày' },
+        ],
+        metrics: [],
+        advice: 'Bệnh nhân không dùng lại đơn thuốc này.',
+        notes: 'Đã giao thuốc.',
+        recordedAt: '2026-06-08T09:00:00Z',
+      };
+
+      const checkup: HealthEvent = {
+        id: 'ev_checkup_0806',
+        sourceFileId: 'file_checkup_0806',
+        sourceFileName: 'ho_so_dinh_ky.pdf',
+        type: 'comprehensive_exam',
+        title: 'Hồ sơ sức khỏe định kỳ',
+        date: '2026-06-08',
+        facility: 'Bệnh Viện Đại Học Y Dược TP.HCM - Phòng Khám Bệnh viện Đại Học Y Dược 1',
+        doctorName: 'BSCKI Trần Hữu Lợi',
+        diagnoses: [
+          'Z00.0 - Khám sức khỏe tổng quát',
+          'Bệnh tăng huyết áp vô căn (nguyên phát) (I10)',
+          'Bệnh đái tháo đường không phụ thuộc insulin (E11)',
+        ],
+        medications: [
+          { name: 'Sitagliptin + Metformin (METFORMIN HCL 850/SITAGLIPTIN 50)', dosage: '50MG+850MG', duration: '90 ngày' },
+        ],
+        metrics: [
+          { name: 'Định lượng HbA1c', value: 6.1, unit: '%' },
+        ],
+        advice: 'Định kỳ kiểm tra: Nội tiết, Tiêu hóa gan mật.',
+        notes: 'Đã giao thuốc.',
+        nextFollowUp: '2026-09-07',
+        recordedAt: '2026-06-08T10:30:00Z',
+      };
+
+      const consolidated = consolidateTimelineEvents([eyeRx, checkup]);
+      expect(consolidated.mergedCount).toBe(1);
+      expect(consolidated.timeline).toHaveLength(1);
+
+      const merged = consolidated.timeline[0];
+      expect(merged.type).toBe('comprehensive_exam');
+      expect(merged.title).toBe('Hồ sơ sức khỏe định kỳ');
+      expect(merged.doctorName).toBe('BSCKI Trần Hữu Lợi; BS.CKI. Phạm Lê Hoàng Anh');
+      expect(merged.medications).toHaveLength(3);
+      expect(merged.diagnoses.some((d) => d.includes('H10.5'))).toBe(true);
+      expect(merged.additionalSources?.map((s) => s.driveFileId)).toEqual(
+        expect.arrayContaining(['file_checkup_0806', 'file_eye_0806']),
+      );
+    });
+
+    it('does not merge same-day visits at different hospitals with different doctors and diagnoses', () => {
+      const hospitalARx: HealthEvent = {
+        id: 'ev_hosp_a',
+        sourceFileId: 'file_hosp_a',
+        sourceFileName: 'hosp_a.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc Tim mạch',
+        date: '2026-09-15',
+        facility: 'Bệnh viện Đại học Y Dược TP.HCM',
+        doctorName: 'BS. Nguyễn Văn An',
+        diagnoses: ['I10 - Tăng huyết áp vô căn'],
+        medications: [{ name: 'Amlodipin 5mg' }],
+        metrics: [],
+        recordedAt: '2026-09-15T08:00:00Z',
+      };
+
+      const hospitalBRx: HealthEvent = {
+        id: 'ev_hosp_b',
+        sourceFileId: 'file_hosp_b',
+        sourceFileName: 'hosp_b.jpg',
+        type: 'prescription',
+        title: 'Đơn thuốc Da liễu',
+        date: '2026-09-15',
+        facility: 'Bệnh viện Chợ Rẫy',
+        doctorName: 'BS. Trần Thị Bình',
+        diagnoses: ['L20 - Viêm da cơ địa'],
+        medications: [{ name: 'Desloratadin 5mg' }],
+        metrics: [],
+        recordedAt: '2026-09-15T14:30:00Z',
+      };
+
+      expect(detectDuplicateEvent([hospitalARx], hospitalBRx)).toBeNull();
+      const consolidated = consolidateTimelineEvents([hospitalARx, hospitalBRx]);
       expect(consolidated.mergedCount).toBe(0);
       expect(consolidated.timeline).toHaveLength(2);
     });
   });
 });
+
