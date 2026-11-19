@@ -1,5 +1,6 @@
 import React from 'react';
-import logoUrl from '../assets/images/app_logo_2d_flat_1794137089154.jpg';
+
+const logoUrl = '/pwa-192x192.png';
 
 interface AppLogoProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';

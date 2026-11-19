@@ -57,7 +57,3 @@ export function getOrCreateSharedGeminiRequestContext(rawKeys: unknown): GeminiR
   sharedSchedulerRegistry.set(cacheKey, created);
   return created;
 }
-
-export function resetSharedGeminiRequestContextsForTests(): void {
-  sharedSchedulerRegistry.clear();
-}

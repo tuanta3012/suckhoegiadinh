@@ -16,7 +16,6 @@ import { digitizationLogger } from './digitizationLogger';
 import {
   classifyHealthEventType,
   cleanHospitalizationRecord,
-  isHealthEventType,
 } from './healthEventType';
 import { sleep } from './healthRecordService';
 import { getFirebaseIdToken } from './googleDriveService';
@@ -568,114 +567,6 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
 // Web and native clients send Gemini work through the same backend orchestrator.
 // ============================================================================
 
-export function extractPartialJson(text: string, fileName?: string): Partial<HealthEvent> {
-  const result: Partial<HealthEvent> = {};
-  if (!text || typeof text !== 'string') return result;
-
-  try {
-    const cleaned = text.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object') {
-        return normalizeExtractedEvent(parsed, fileName);
-      }
-    }
-  } catch {
-    // Fallback regex parsing for incomplete streams
-  }
-
-  const nameMatch = text.match(/"patientName"\s*:\s*"([^"]+)"/i);
-  if (nameMatch) result.patientName = nameMatch[1].trim();
-
-  const birthMatch = text.match(/"patientBirthDate"\s*:\s*"([^"]+)"/i);
-  if (birthMatch) result.patientBirthDate = birthMatch[1].trim();
-
-  const genderMatch = text.match(/"patientGender"\s*:\s*"([^"]+)"/i);
-  if (genderMatch) result.patientGender = genderMatch[1].trim();
-
-  const titleMatch = text.match(/"title"\s*:\s*"([^"]+)"/i);
-  if (titleMatch) result.title = titleMatch[1].trim();
-
-  const facilityMatch = text.match(/"facility"\s*:\s*"([^"]+)"/i);
-  if (facilityMatch) result.facility = facilityMatch[1].trim();
-
-  const typeMatch = text.match(/"type"\s*:\s*"([^"]+)"/i);
-  if (typeMatch && isHealthEventType(typeMatch[1].trim())) {
-    result.type = typeMatch[1].trim() as HealthEvent['type'];
-  }
-
-  const dateMatch = text.match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/i);
-  if (dateMatch) result.date = dateMatch[1];
-
-  const diagMatch = text.match(/"diagnoses"\s*:\s*\[([\s\S]*?)\]/i);
-  if (diagMatch) {
-    const items = diagMatch[1].match(/"([^"]+)"/g);
-    if (items) {
-      result.diagnoses = items.map((s) => s.replace(/"/g, '').trim()).filter(Boolean);
-    }
-  }
-
-  const medsMatch = text.match(/"medications"\s*:\s*\[([\s\S]*?)\]/i);
-  if (medsMatch) {
-    const medBlocks = medsMatch[1].match(/\{[\s\S]*?\}/g);
-    if (medBlocks) {
-      const parsedMeds: Medication[] = [];
-      for (const block of medBlocks) {
-        const medName = block.match(/"name"\s*:\s*"([^"]+)"/i);
-        if (medName) {
-          const dosage = block.match(/"dosage"\s*:\s*"([^"]+)"/i);
-          const freq = block.match(/"frequency"\s*:\s*"([^"]+)"/i);
-          const dur = block.match(/"duration"\s*:\s*"([^"]+)"/i);
-          parsedMeds.push({
-            name: medName[1].trim(),
-            dosage: dosage ? dosage[1].trim() : undefined,
-            frequency: freq ? freq[1].trim() : undefined,
-            duration: dur ? dur[1].trim() : undefined,
-          });
-        }
-      }
-      if (parsedMeds.length > 0) {
-        result.medications = parsedMeds;
-      }
-    }
-  }
-
-  const metricsMatch = text.match(/"metrics"\s*:\s*\[([\s\S]*?)\]/i);
-  if (metricsMatch) {
-    const metricBlocks = metricsMatch[1].match(/\{[\s\S]*?\}/g);
-    if (metricBlocks) {
-      const parsedMetrics: HealthMetric[] = [];
-      for (const block of metricBlocks) {
-        const mName = block.match(/"name"\s*:\s*"([^"]+)"/i);
-        const mVal = block.match(/"value"\s*:\s*([0-9.]+)/i);
-        const mUnit = block.match(/"unit"\s*:\s*"([^"]+)"/i);
-        if (mName && mVal) {
-          const num = parseFloat(mVal[1]);
-          if (!isNaN(num)) {
-            parsedMetrics.push({
-              name: mName[1].trim(),
-              value: num,
-              unit: mUnit ? mUnit[1].trim() : '',
-            });
-          }
-        }
-      }
-      if (parsedMetrics.length > 0) {
-        result.metrics = parsedMetrics;
-      }
-    }
-  }
-
-  const adviceMatch = text.match(/"advice"\s*:\s*"([^"]+)"/i);
-  if (adviceMatch) result.advice = adviceMatch[1].trim();
-
-  return {
-    ...result,
-    type: classifyHealthEventType(result, fileName) || result.type,
-  };
-}
-
 async function extractServerHealthEvent(
   file: File,
   member: FamilyMember,
@@ -1052,14 +943,6 @@ export async function extractHealthEventWithProgress(
     if (error instanceof Error && error.message === errorMessage) throw error;
     throw new Error(errorMessage, { cause: error });
   }
-}
-
-export async function extractHealthEvent(
-  file: File,
-  member: FamilyMember,
-): Promise<Partial<HealthEvent>> {
-  const result = await extractHealthEventWithProgress(file, member);
-  return result.extracted;
 }
 
 export async function refineAndOrganizeMemberData(

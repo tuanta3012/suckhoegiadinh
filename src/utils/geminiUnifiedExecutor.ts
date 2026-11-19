@@ -335,10 +335,6 @@ export function parseRetryAfterMs(error: unknown): number {
   return seconds ? Math.min(60_000, Math.max(1_000, Number(seconds[1]) * 1_000)) : 5_000;
 }
 
-export function isDailyQuotaError(error: unknown): boolean {
-  return describeGeminiError(error).isDailyQuota;
-}
-
 export function recordProjectFailure(
   scheduler: GeminiQuotaScheduler,
   projectId: string,

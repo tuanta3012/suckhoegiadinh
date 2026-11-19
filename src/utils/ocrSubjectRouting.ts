@@ -161,12 +161,6 @@ export function normalizeBirthDate(value?: string): string | undefined {
   return undefined;
 }
 
-export function areBirthDatesEquivalent(left?: string, right?: string): boolean {
-  const normLeft = normalizeBirthDate(left);
-  const normRight = normalizeBirthDate(right);
-  return Boolean(normLeft && normRight && normLeft === normRight);
-}
-
 function normalizeGender(value?: string): 'male' | 'female' | undefined {
   const normalized = normalizeVietnamese(value);
   if (['male', 'nam', 'm'].includes(normalized)) return 'male';

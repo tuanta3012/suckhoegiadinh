@@ -10,7 +10,6 @@ const firebaseConfig = JSON.parse(fs.readFileSync(path.join(__dirname, './fireba
 import {
   getOrCreateSharedGeminiRequestContext,
   normalizeGeminiKeysInput,
-  type GeminiRequestContext,
 } from './src/utils/geminiRequestContext.ts';
 import { GeminiRequestAdmission } from './src/utils/geminiRequestAdmission.ts';
 import {

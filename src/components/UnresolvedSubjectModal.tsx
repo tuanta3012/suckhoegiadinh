@@ -42,7 +42,6 @@ export function UnresolvedSubjectModal({
   onCancelQueue,
 }: UnresolvedSubjectModalProps) {
   const [name, setName] = useState(suggestedSubjectName || '');
-  const [showAddForm, setShowAddForm] = useState(members.length === 0 || probableMatches.length === 0);
   const memberName = name.trim();
   const canCreateMember = isRecognizablePatientName(memberName);
 

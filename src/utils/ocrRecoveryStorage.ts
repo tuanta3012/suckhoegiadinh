@@ -90,10 +90,3 @@ export function removeOcrRecoveryJob(
   else storage.removeItem(key);
   return jobs;
 }
-
-export function clearOcrRecoveryJobs(
-  workspaceRootId: string,
-  storage: Storage = localStorage,
-): void {
-  storage.removeItem(getStorageKey(workspaceRootId));
-}

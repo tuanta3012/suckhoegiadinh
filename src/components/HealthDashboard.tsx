@@ -3,17 +3,13 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
-  Bot,
   Calendar,
-  CalendarCheck,
-  Camera,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
   Cloud,
-  Copy,
   ExternalLink,
   FileHeart,
   FileStack,
@@ -23,26 +19,19 @@ import {
   FolderHeart,
   FolderSync,
   GitMerge,
-  Heart,
   HeartPulse,
-  History,
-  Info,
   LayoutGrid,
   KeyRound,
-  Layers,
   LoaderCircle,
   LogIn,
   LogOut,
   Mail,
-  MessageSquare,
   MoreVertical,
   Pencil,
   Pill,
   Plus,
   RefreshCw,
-  RotateCcw,
   Send,
-  Share2,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -85,17 +74,14 @@ import type {
 } from '../types';
 import {
   addDriveFamilyMember,
-  cleanupDuplicateRawFilesOnDrive,
   cleanupExpiredRawFiles,
   clearWorkspaceCache,
   createHealthWorkspace,
   deleteDriveFamilyMember,
   deleteHealthWorkspaceFolder,
   downloadDriveFile,
-  ensureDriveFolderAccess,
   fetchWorkspaceSyncVersionSnapshot,
   flushPendingHealthProfileSaves,
-  factoryResetWorkspaceFolder,
   findExistingHealthWorkspace,
   isMissingWorkspaceError,
   loadSharedAiResources,
@@ -108,7 +94,6 @@ import {
   loadHealthProfile,
   moveDriveFileToMember,
   recreateDriveMemberProfile,
-  revokeDriveFolderAccess,
   saveHealthProfile,
   trashDriveFile,
   deleteOrUnlinkDriveFile,
@@ -135,7 +120,6 @@ import {
 import {
   getWorkspaceMemberRole,
   findMemberForEmail,
-  isMemberForEmail,
   prioritizeMemberForEmail,
 } from '../utils/memberOrdering';
 import { getGoogleAccessToken, getValidGoogleAccessToken } from '../utils/googleDriveService';
@@ -169,7 +153,6 @@ import { standardizeMetricKey } from '../utils/healthRecordService';
 import {
   analyzeComprehensiveHealth,
   cleanErrorMessage,
-  extractHealthEvent,
   extractHealthEventWithProgress,
   isOcrCancelledError,
   refineAndOrganizeMemberData,
@@ -197,8 +180,6 @@ import {
   detectDuplicateEvent,
   cleanAndDeduplicateEventData,
   mergeHealthEvents,
-  type FileDuplicateMatch,
-  type EventDuplicateMatch,
 } from '../utils/deduplicationService';
 import { compareDocumentContainment, createDocumentContentIndex } from '../utils/documentContainment';
 import {
@@ -208,19 +189,13 @@ import {
   type OcrRecoveryJob,
 } from '../utils/ocrRecoveryStorage';
 import {
-  parseRobustJson,
-  sleep,
   sanitizeMetricName,
 } from '../utils/healthRecordService';
 import {
   listHealthWorkspaceAssignments,
-  publishHealthWorkspaceAssignments,
   readHealthWorkspaceAssignment,
-  removeHealthWorkspaceAssignment,
   subscribeHealthWorkspaceAssignments,
   unregisterHealthWorkspace,
-  type HealthWorkspaceAssignment,
-  type WorkspaceAccessRole,
 } from '../utils/workspaceShareRelay';
 import { useConfirmDialog } from '../context/ConfirmDialogContext';
 import { digitizationLogger, type DigitizationLogEntry } from '../utils/digitizationLogger';
@@ -230,7 +205,7 @@ import { clearLegacyHealthDemoData } from '../utils/legacyHealthDemo';
 import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
-import { formatDateVN, formatDateTimeVN, normalizeVietnameseProperName } from '../utils/formatters';
+import { formatDateVN, normalizeVietnameseProperName } from '../utils/formatters';
 import { DatePickerVN } from './DatePickerVN';
 import {
   findDuplicateFamilyMemberPairs,
@@ -247,7 +222,6 @@ import {
   updateBatchNotificationComplete,
   requestNotificationPermission,
   scheduleFollowUpNotifications,
-  setupBackgroundAppResumeListener,
 } from '../utils/backgroundNotificationService';
 import {
   formatFollowUpConditions,
@@ -258,10 +232,8 @@ import {
   CalendarPermissionError,
   collectFutureFollowUpsForMember,
   executePrimaryCalendarSync,
-  normalizeFollowUpDateISO,
   previewPrimaryCalendarSync,
 } from '../utils/googleCalendarSyncService';
-import { getVietnamDateISO } from '../utils/date';
 import {
   BackPriority,
   dispatchBackAction,
@@ -777,9 +749,6 @@ export function HealthDashboard({
   const [newMemberBirthDate, setNewMemberBirthDate] = useState('');
   const [newMemberGender, setNewMemberGender] = useState<'male' | 'female' | 'other'>('male');
   const [newMemberEmail, setNewMemberEmail] = useState('');
-  const [workspaceAssignments, setWorkspaceAssignments] = useState<HealthWorkspaceAssignment[]>([]);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<WorkspaceAccessRole>('EDITOR');
   const [digitizationDraft, setDigitizationDraft] = useState<DigitizationDraft | null>(null);
   const [digitizationError, setDigitizationError] = useState('');
   const [identityResolutionDraft, setIdentityResolutionDraft] = useState<DigitizationDraft | null>(null);
@@ -1265,7 +1234,6 @@ export function HealthDashboard({
     setChatMessages([]);
     setIsChatting(false);
     setOcrRecoveryJobs([]);
-    setWorkspaceAssignments([]);
     setEditingMember(null);
     setEditingTimelineEvent(null);
     setOpenSourceMenuEventId(null);
@@ -2699,10 +2667,6 @@ export function HealthDashboard({
     () => getFollowUpRemindersForSignedInMember(members, profiles, userEmail),
     [members, profiles, userEmail],
   );
-  const futureCalendarFollowUps = useMemo(
-    () => collectFutureFollowUpsForMember(members, profiles, userEmail),
-    [members, profiles, userEmail],
-  );
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     void scheduleFollowUpNotifications(
@@ -3441,9 +3405,7 @@ export function HealthDashboard({
       );
       if (!adminRecord?.migrationComplete) {
         await syncHealthWorkspaceMemberAssignments(activeWorkspace);
-        assignments = await listHealthWorkspaceAssignments(workspaceRootFolderId);
       }
-      setWorkspaceAssignments(assignments);
     } catch (error) {
       console.warn('Lỗi tải quyền chia sẻ:', error);
       setErrorMessage(error instanceof Error ? error.message : 'Không thể đồng bộ quyền chia sẻ Workspace.');
@@ -4590,34 +4552,6 @@ export function HealthDashboard({
       showToast('Đã khởi tạo lại tệp hồ sơ thành công trên Google Drive.', 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể khởi tạo lại tệp hồ sơ.', 'error');
-    } finally {
-      setIsLoading(false);
-    }
-  }
-  async function handleCleanupDriveDuplicates() {
-    if (!workspace || !driveAuthorized) return;
-    const confirmed = await confirm({
-      title: 'Quét & Dọn dẹp tệp trùng trên Google Drive?',
-      message: 'Hệ thống sẽ tự động tìm kiếm toàn bộ các tệp tin trùng lặp trong thư mục Drive của từng thành viên gia đình, giữ lại tệp gốc cũ nhất và xóa sạch các bản sao dư thừa để giải phóng dung lượng.',
-      confirmLabel: 'Quét & Dọn dẹp ngay',
-    });
-    if (!confirmed) return;
-    setIsLoading(true);
-    showToast('Đang quét và xóa các tệp trùng lặp trên Google Drive...', 'info');
-    try {
-      const result = await cleanupDuplicateRawFilesOnDrive(workspace);
-      if (result.deletedFilesCount > 0) {
-        const mbFreed = (result.freedSpaceBytes / (1024 * 1024)).toFixed(1);
-        showToast(
-          `Đã dọn dẹp thành công ${result.deletedFilesCount} tệp trùng lặp trên Google Drive (giải phóng ~${mbFreed} MB)!`,
-          'success'
-        );
-        if (workspace) await reloadProfiles(workspace);
-      } else {
-        showToast('Thư mục Google Drive của bạn đã sạch sẽ, không phát hiện tệp trùng lặp.', 'success');
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Lỗi khi dọn dẹp tệp trùng trên Google Drive.', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -7563,66 +7497,6 @@ export function HealthDashboard({
       setIsRefining(false);
     }
   }
-  async function handleInviteWorkspaceMember(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!workspace || !userEmail || !isWorkspaceAdmin) return;
-    const email = inviteEmail.trim().toLowerCase();
-    setIsLoading(true);
-    setErrorMessage('');
-    try {
-      const assignments = new Map(
-        workspaceAssignments
-          .filter((a) => a.memberEmail !== email)
-          .map((a) => [a.memberEmail, { role: a.role, source: a.source }])
-      );
-      assignments.set(email, {
-        role: inviteRole,
-        source: workspace.family.members.some(
-          (member) => member.email.trim().toLowerCase() === email,
-        ) ? 'family_member' : undefined,
-      });
-      await ensureDriveFolderAccess(workspace.rootFolderId, email, inviteRole);
-      await publishHealthWorkspaceAssignments(
-        workspace.rootFolderId,
-        workspace.familyFileId,
-        userEmail,
-        [...assignments].map(([memberEmail, assignment]) => ({
-          email: memberEmail,
-          role: assignment.role,
-          source: assignment.source,
-        }))
-      );
-      setInviteEmail('');
-      await reloadWorkspaceAssignments();
-      showToast(
-        `Đã cấp quyền Drive và gửi lời mời Workspace cho ${email}.`,
-        'success'
-      );
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : 'Không thể gửi lời mời Workspace.'
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }
-  async function handleRevokeWorkspaceMember(memberEmail: string) {
-    if (!workspace || !isWorkspaceAdmin) return;
-    setIsLoading(true);
-    setErrorMessage('');
-    try {
-      await revokeDriveFolderAccess(workspace.rootFolderId, memberEmail);
-      await removeHealthWorkspaceAssignment(workspace.rootFolderId, memberEmail);
-      await reloadWorkspaceAssignments();
-      showToast('Đã thu hồi quyền Drive và xóa lời mời Workspace.', 'success');
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : 'Không thể thu hồi quyền chia sẻ.'
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }
   const handleRootTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     if (event.touches.length !== 1) {
       swipeTouchStartRef.current = null;
@@ -9386,7 +9260,6 @@ export function HealthDashboard({
                                 `Firestore chưa xác nhận đủ bản ghi quyền${missingEmails.length ? ` cho: ${missingEmails.join(', ')}` : ''}. Kiểm tra Rules đã deploy đúng database chưa.`,
                               );
                             }
-                            setWorkspaceAssignments(assignments);
                             showToast('Đã đồng bộ quyền truy cập thành công!', 'success');
                           } catch (error) {
                             const msg = error instanceof Error ? error.message : 'Lỗi đồng bộ quyền.';
@@ -10827,18 +10700,6 @@ function validEventType(value?: string): HealthEvent['type'] {
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-function stableSerialize(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableSerialize).join(',')}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'undefined';
 }
 function UploadMemberPickerModal({
   isOpen,

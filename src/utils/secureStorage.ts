@@ -9,30 +9,6 @@ const isNative = Capacitor.isNativePlatform();
 const LEGACY_GEMINI_KEYS_STORAGE_KEY = 'stk_gemini_api_keys_pool';
 
 /**
- * Securely store a key-value pair.
- * On native platforms, uses the encrypted SecureStoragePlugin.
- * On web/iframe, falls back to Capacitor Preferences with unencrypted localStorage.
- */
-export async function setSecureItem(key: string, value: string): Promise<void> {
-  if (isNative) {
-    try {
-      await SecureStoragePlugin.set({ key, value });
-      return;
-    } catch (err) {
-      console.warn(`[SecureStorage] Failed to set native secure storage for key: ${key}. Falling back to Preferences...`, err);
-    }
-  }
-
-  // Fallback to Preferences (and also update localStorage just in case)
-  try {
-    await Preferences.set({ key, value });
-    localStorage.setItem(key, value);
-  } catch (err) {
-    console.error(`[SecureStorage] Failed fallback storage for key: ${key}`, err);
-  }
-}
-
-/**
  * Store authentication credentials without downgrading to unencrypted storage on native platforms.
  */
 export async function setAuthSecureItem(key: string, value: string): Promise<void> {
@@ -42,36 +18,6 @@ export async function setAuthSecureItem(key: string, value: string): Promise<voi
     return;
   }
   await SecureStoragePlugin.set({ key, value });
-}
-
-/**
- * Retrieve a securely stored value by key.
- * On native platforms, uses the encrypted SecureStoragePlugin.
- * On web/iframe, falls back to Capacitor Preferences and localStorage.
- */
-export async function getSecureItem(key: string): Promise<string | null> {
-  if (isNative) {
-    try {
-      const result = await SecureStoragePlugin.get({ key });
-      if (result && result.value) {
-        return result.value;
-      }
-    } catch (err) {
-      console.info(`[SecureStorage] Key "${key}" not found or failed to read from native secure storage. Trying Preferences fallback...`);
-    }
-  }
-
-  // Fallback to Preferences/localStorage
-  try {
-    const prefResult = await Preferences.get({ key });
-    if (prefResult && prefResult.value) {
-      return prefResult.value;
-    }
-    return localStorage.getItem(key) || null;
-  } catch (err) {
-    console.error(`[SecureStorage] Failed fallback retrieval for key: ${key}`, err);
-    return null;
-  }
 }
 
 /**
@@ -98,9 +44,9 @@ export async function removeAuthSecureItem(key: string): Promise<void> {
 }
 
 /**
- * Remove a securely stored key-value pair.
+ * Remove a legacy stored key-value pair during startup cleanup.
  */
-export async function removeSecureItem(key: string): Promise<void> {
+async function removeSecureItem(key: string): Promise<void> {
   if (isNative) {
     try {
       await SecureStoragePlugin.remove({ key });

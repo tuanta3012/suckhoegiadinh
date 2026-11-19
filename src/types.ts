@@ -261,9 +261,6 @@ export interface WorkspaceMember {
   addedAt: string;
 }
 
-export function canEditData(role?: string | null): boolean {
-  return role === 'Owner' || role === 'Editor';
-}
 export interface AuthUser {
   email: string;
   name: string;
