@@ -273,9 +273,17 @@ import {
 import {
   cameraPhotoToFile,
   finalizeCapturedCameraPages,
+  processMlKitScanResultToFile,
   resolveQuickActionTargetLabel,
   type CapturedPageItem,
 } from '../utils/cameraDocumentBundle';
+import {
+  DocumentScanner,
+  isMlKitScannerCancelledError,
+  isMlKitScannerUnavailableError,
+  type DocumentScanMode,
+  type DocumentScanResult,
+} from '../plugins/documentScanner';
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 export type AutoCalendarSyncOutcome =
   | {
@@ -1026,6 +1034,7 @@ export function HealthDashboard({
 
     let backListenerHandle: { remove: () => Promise<void> } | null = null;
     let restoredListenerHandle: { remove: () => Promise<void> } | null = null;
+    let mlKitRestoredListenerHandle: { remove: () => Promise<void> } | null = null;
     let disposed = false;
 
     if (Capacitor.isNativePlatform()) {
@@ -1054,6 +1063,18 @@ export function HealthDashboard({
           }
         })
         .catch(() => {});
+
+      void DocumentScanner.addListener('scanRestored', (result) => {
+        void handleRestoredMlKitScanRef.current(result);
+      })
+        .then((handle) => {
+          if (disposed) {
+            void handle.remove();
+          } else {
+            mlKitRestoredListenerHandle = handle;
+          }
+        })
+        .catch(() => {});
     }
 
     return () => {
@@ -1064,6 +1085,9 @@ export function HealthDashboard({
       }
       if (restoredListenerHandle) {
         void restoredListenerHandle.remove();
+      }
+      if (mlKitRestoredListenerHandle) {
+        void mlKitRestoredListenerHandle.remove();
       }
     };
   }, [handleBackNavigation]);
@@ -1173,6 +1197,7 @@ export function HealthDashboard({
     data?: { webPath?: string; format?: string };
     error?: { message: string };
   }) => Promise<void>>(async () => {});
+  const handleRestoredMlKitScanRef = useRef<(result: DocumentScanResult) => Promise<void>>(async () => {});
   const batchStagingMemberIdRef = useRef<string | undefined>(undefined);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
   authIdentityRef.current = { userEmail, driveAuthorized };
@@ -6609,10 +6634,71 @@ export function HealthDashboard({
     }
   }
 
+  async function tryScanWithMlKitDocumentScanner(mode: DocumentScanMode): Promise<boolean> {
+    if (!Capacitor.isNativePlatform()) {
+      return false;
+    }
+    const pageLimit = mode === 'multi' ? 20 : 1;
+    digitizationLogger.log(
+      'info',
+      'camera',
+      `Mở Google ML Kit Document Scanner (${mode === 'multi' ? `tối đa ${pageLimit} trang` : '1 trang'})...`,
+    );
+    savePendingCameraSession(mode);
+    try {
+      const scanResult = await DocumentScanner.scan({
+        mode,
+        pageLimit,
+        allowGalleryImport: false,
+      });
+      clearPendingCameraSession();
+      const targetMemberId = pickedMemberIdForBatchRef.current;
+      const readyFile = await processMlKitScanResultToFile(scanResult, mode);
+      digitizationLogger.log(
+        'info',
+        'camera',
+        `ML Kit quét xong: "${readyFile.name}" (${(readyFile.size / 1024).toFixed(1)} KB, ${scanResult.pages?.length ?? 1} trang)`,
+        { fileName: readyFile.name, fileSize: readyFile.size, mode, pageCount: scanResult.pages?.length ?? 1 },
+      );
+      await stageFilesAndStart([readyFile], targetMemberId);
+      return true;
+    } catch (error) {
+      clearPendingCameraSession();
+      setIsCameraTriggerActive(false);
+      if (isMlKitScannerCancelledError(error)) {
+        updatePickedMemberIdForBatch(undefined);
+        digitizationLogger.log('info', 'camera', 'Người dùng đã đóng/hủy trình quét tài liệu ML Kit');
+        return true;
+      }
+      if (isMlKitScannerUnavailableError(error)) {
+        digitizationLogger.log(
+          'warn',
+          'camera',
+          `Google ML Kit Document Scanner chưa khả dụng trên thiết bị này, chuyển sang camera mặc định (${error instanceof Error ? error.message : 'Unavailable'})`,
+        );
+        return false;
+      }
+      updatePickedMemberIdForBatch(undefined);
+      digitizationLogger.log(
+        'error',
+        'camera',
+        `Lỗi khi quét tài liệu bằng ML Kit: ${error instanceof Error ? error.message : 'Unknown'}`,
+      );
+      if (error instanceof Error) {
+        showToast(error.message, 'error');
+      }
+      return true;
+    }
+  }
+
   async function handleSingleShotCapture(skipMemberPicker = false) {
     if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
       setIsCameraTriggerActive(true);
       setShowUploadMemberPicker(true);
+      return;
+    }
+    const handledByMlKit = await tryScanWithMlKitDocumentScanner('single');
+    if (handledByMlKit) {
       return;
     }
     digitizationLogger.log('info', 'camera', 'Mở camera chụp tài liệu 1 trang...');
@@ -6648,6 +6734,12 @@ export function HealthDashboard({
       setIsCameraTriggerActive(true);
       setShowUploadMemberPicker(true);
       return;
+    }
+    if (multiShotPagesRef.current.length === 0) {
+      const handledByMlKit = await tryScanWithMlKitDocumentScanner('multi');
+      if (handledByMlKit) {
+        return;
+      }
     }
     setIsCapturingMultiShot(true);
     digitizationLogger.log(
@@ -6750,6 +6842,32 @@ export function HealthDashboard({
       setIsFinalizingMultiShot(false);
     }
   }
+
+  handleRestoredMlKitScanRef.current = async (scanResult) => {
+    let savedMode: DocumentScanMode = scanResult.mode === 'multi' ? 'multi' : 'single';
+    let savedMemberId: string | undefined;
+    try {
+      const raw = sessionStorage.getItem(PENDING_CAMERA_SESSION_KEY);
+      clearPendingCameraSession();
+      if (raw) {
+        const parsed = JSON.parse(raw) as { mode?: DocumentScanMode; memberId?: string };
+        savedMode = parsed.mode === 'multi' ? 'multi' : savedMode;
+        savedMemberId = typeof parsed.memberId === 'string' ? parsed.memberId : undefined;
+      }
+    } catch {
+      clearPendingCameraSession();
+    }
+    try {
+      updatePickedMemberIdForBatch(savedMemberId);
+      const readyFile = await processMlKitScanResultToFile(scanResult, savedMode);
+      await stageFilesAndStart([readyFile], savedMemberId);
+    } catch (error) {
+      updatePickedMemberIdForBatch(undefined);
+      if (error instanceof Error) {
+        showToast(error.message, 'error');
+      }
+    }
+  };
 
   handleRestoredCameraResultRef.current = async (event) => {
     let savedMode: 'single' | 'multi' = 'single';

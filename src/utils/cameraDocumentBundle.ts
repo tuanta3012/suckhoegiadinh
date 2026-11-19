@@ -1,4 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
+import type { DocumentScanMode, DocumentScanResult } from '../plugins/documentScanner';
 import { compressImageIfNeeded } from './imageCompressor';
 
 export interface CapturedPageItem {
@@ -181,4 +182,60 @@ export async function finalizeCapturedCameraPages(
     return compressImageIfNeeded(files[0], 1800, 0.88);
   }
   return buildMultiPageCameraPdf(files);
+}
+
+export async function processMlKitScanResultToFile(
+  result: DocumentScanResult,
+  requestedMode: DocumentScanMode,
+  fetchUri: (uri: string) => Promise<Blob> = async (uri) => {
+    const response = await fetch(uri);
+    if (!response.ok) {
+      throw new Error('Không đọc được tệp tài liệu sau khi quét.');
+    }
+    return response.blob();
+  },
+): Promise<File> {
+  const mode: DocumentScanMode = result.mode || requestedMode;
+  const datePart = new Date().toISOString().slice(0, 10);
+  const uniqueSuffix = Date.now().toString().slice(-4);
+  const pages = (result.pages || []).filter((page) => Boolean(page?.webPath || page?.path));
+
+  const useCompiledPdf =
+    Boolean(result.pdf?.webPath || result.pdf?.path) &&
+    ((mode === 'multi' && (result.pdf?.pageCount ?? pages.length) >= 2) || pages.length === 0);
+
+  if (useCompiledPdf && result.pdf) {
+    const pdfUri = result.pdf.webPath || result.pdf.path!;
+    const pdfBlob = await fetchUri(pdfUri);
+    const pageCount = Math.max(1, result.pdf.pageCount || pages.length || 1);
+    return new File([pdfBlob], `kham-benh-${datePart}-${pageCount}trang-${uniqueSuffix}.pdf`, {
+      type: 'application/pdf',
+      lastModified: Date.now(),
+    });
+  }
+
+  if (pages.length === 0) {
+    throw new Error('Không nhận được trang tài liệu nào từ máy quét.');
+  }
+
+  const pageFiles: File[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    const pageUri = page.webPath || page.path!;
+    const blob = await fetchUri(pageUri);
+    const ext = (page.format || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+    const mimeType = blob.type && blob.type.startsWith('image/')
+      ? blob.type
+      : ext === 'png'
+      ? 'image/png'
+      : 'image/jpeg';
+    pageFiles.push(
+      new File([blob], `kham-benh-${datePart}-trang${i + 1}-${uniqueSuffix}.${ext}`, {
+        type: mimeType,
+        lastModified: Date.now(),
+      }),
+    );
+  }
+
+  return finalizeCapturedCameraPages(pageFiles, mode);
 }

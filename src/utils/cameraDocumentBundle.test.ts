@@ -3,6 +3,7 @@ import { PDFDocument } from 'pdf-lib';
 import {
   buildMultiPageCameraPdf,
   finalizeCapturedCameraPages,
+  processMlKitScanResultToFile,
   resolveQuickActionTargetLabel,
 } from './cameraDocumentBundle';
 
@@ -65,6 +66,62 @@ describe('cameraDocumentBundle', () => {
 
   it('throws when trying to finalize an empty page list', async () => {
     await expect(finalizeCapturedCameraPages([], 'multi')).rejects.toThrow();
+  });
+
+  it('processes ML Kit single-page scan as cropped image and multi-page scan as compiled PDF', async () => {
+    const samplePdf = await PDFDocument.create();
+    samplePdf.addPage([200, 300]);
+    samplePdf.addPage([200, 300]);
+    const samplePdfBytes = await samplePdf.save();
+
+    const singleFile = await processMlKitScanResultToFile(
+      {
+        mode: 'single',
+        pages: [{ webPath: 'https://localhost/_capacitor_file_/p1.jpg', format: 'jpeg' }],
+        pdf: { webPath: 'https://localhost/_capacitor_file_/doc.pdf', pageCount: 1 },
+      },
+      'single',
+      async (uri) =>
+        uri.endsWith('.pdf')
+          ? new Blob([samplePdfBytes], { type: 'application/pdf' })
+          : new Blob([TINY_PNG_BYTES], { type: 'image/png' }),
+    );
+    expect(singleFile.type).toBe('image/png');
+
+    const multiPdfFile = await processMlKitScanResultToFile(
+      {
+        mode: 'multi',
+        pages: [
+          { webPath: 'https://localhost/_capacitor_file_/p1.jpg', format: 'jpeg' },
+          { webPath: 'https://localhost/_capacitor_file_/p2.jpg', format: 'jpeg' },
+        ],
+        pdf: { webPath: 'https://localhost/_capacitor_file_/doc.pdf', pageCount: 2 },
+      },
+      'multi',
+      async (uri) =>
+        uri.endsWith('.pdf')
+          ? new Blob([samplePdfBytes], { type: 'application/pdf' })
+          : new Blob([TINY_PNG_BYTES], { type: 'image/png' }),
+    );
+    expect(multiPdfFile.type).toBe('application/pdf');
+    expect(multiPdfFile.name).toMatch(/-2trang-\d+\.pdf$/);
+
+    const multiFallbackPdf = await processMlKitScanResultToFile(
+      {
+        mode: 'multi',
+        pages: [
+          { webPath: 'https://localhost/_capacitor_file_/p1.png', format: 'png' },
+          { webPath: 'https://localhost/_capacitor_file_/p2.png', format: 'png' },
+        ],
+      },
+      'multi',
+      async () => new Blob([TINY_PNG_BYTES], { type: 'image/png' }),
+    );
+    expect(multiFallbackPdf.type).toBe('application/pdf');
+    const parsedFallback = await PDFDocument.load(
+      new Uint8Array(await multiFallbackPdf.arrayBuffer()),
+    );
+    expect(parsedFallback.getPageCount()).toBe(2);
   });
 
   it('resolves auto-detect vs explicit member label accurately for the input modal', () => {
