@@ -29,6 +29,7 @@ import {
   Info,
   LayoutGrid,
   KeyRound,
+  Layers,
   LoaderCircle,
   LogIn,
   LogOut,
@@ -56,9 +57,13 @@ import {
 } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
-import { CameraResultType, CameraSource } from '@capacitor/camera';
+import {
+  Camera as CapacitorCamera,
+  CameraDirection,
+  CameraResultType,
+  CameraSource,
+} from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
-import { Camera as CapacitorCamera } from '@capacitor/camera';
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppUpdateModal } from './AppUpdateModal';
 import { AiResourcesModal } from './AiResourcesModal';
@@ -68,6 +73,7 @@ import { FontSizeModal } from './FontSizeModal';
 import { AiDeepAnalysisCard } from './AiDeepAnalysisCard';
 import { MemberEditModal, type EditableFamilyMember } from './MemberEditModal';
 import { TimelineEventEditModal } from './TimelineEventEditModal';
+import { MultiPageCaptureModal } from './MultiPageCaptureModal';
 import { UnresolvedSubjectModal } from './UnresolvedSubjectModal';
 const HealthMetricsChart = lazy(() => import('./HealthMetricsChart'));
 import type {
@@ -264,6 +270,12 @@ import {
   shouldIgnoreHorizontalSwipeStart,
   useBackHandler,
 } from '../utils/backNavigation';
+import {
+  cameraPhotoToFile,
+  finalizeCapturedCameraPages,
+  resolveQuickActionTargetLabel,
+  type CapturedPageItem,
+} from '../utils/cameraDocumentBundle';
 export type DashboardTab = 'overview' | 'timeline' | 'assistant' | 'family';
 export type AutoCalendarSyncOutcome =
   | {
@@ -801,6 +813,11 @@ export function HealthDashboard({
   const [isFileTriggerActive, setIsFileTriggerActive] = useState(false);
   const [isQuickActionTriggerActive, setIsQuickActionTriggerActive] = useState(false);
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
+  const [pickedMemberIdForBatch, setPickedMemberIdForBatch] = useState<string | undefined>(undefined);
+  const [multiShotPages, setMultiShotPages] = useState<CapturedPageItem[]>([]);
+  const [showMultiShotModal, setShowMultiShotModal] = useState(false);
+  const [isCapturingMultiShot, setIsCapturingMultiShot] = useState(false);
+  const [isFinalizingMultiShot, setIsFinalizingMultiShot] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState(false);
@@ -950,7 +967,7 @@ export function HealthDashboard({
     showQuickActionModal,
     () => {
       setShowQuickActionModal(false);
-      pickedMemberIdForBatchRef.current = undefined;
+      updatePickedMemberIdForBatch(undefined);
       return true;
     },
     BackPriority.SHEET,
@@ -1008,6 +1025,7 @@ export function HealthDashboard({
     window.addEventListener('keydown', handleKeyDown);
 
     let backListenerHandle: { remove: () => Promise<void> } | null = null;
+    let restoredListenerHandle: { remove: () => Promise<void> } | null = null;
     let disposed = false;
 
     if (Capacitor.isNativePlatform()) {
@@ -1022,6 +1040,20 @@ export function HealthDashboard({
           }
         })
         .catch(() => {});
+
+      void CapacitorApp.addListener('appRestoredResult', (event) => {
+        if (event.pluginId === 'Camera' && event.methodName === 'getPhoto') {
+          void handleRestoredCameraResultRef.current(event);
+        }
+      })
+        .then((handle) => {
+          if (disposed) {
+            void handle.remove();
+          } else {
+            restoredListenerHandle = handle;
+          }
+        })
+        .catch(() => {});
     }
 
     return () => {
@@ -1029,6 +1061,9 @@ export function HealthDashboard({
       window.removeEventListener('keydown', handleKeyDown);
       if (backListenerHandle) {
         void backListenerHandle.remove();
+      }
+      if (restoredListenerHandle) {
+        void restoredListenerHandle.remove();
       }
     };
   }, [handleBackNavigation]);
@@ -1127,6 +1162,17 @@ export function HealthDashboard({
   const lastAutoCalendarSyncKeyRef = useRef('');
   const autoCalendarApiDisabledRef = useRef(false);
   const pickedMemberIdForBatchRef = useRef<string | undefined>(undefined);
+  const updatePickedMemberIdForBatch = useCallback((memberId: string | undefined) => {
+    pickedMemberIdForBatchRef.current = memberId;
+    setPickedMemberIdForBatch(memberId);
+  }, []);
+  const multiShotPagesRef = useRef<CapturedPageItem[]>([]);
+  multiShotPagesRef.current = multiShotPages;
+  const handleRestoredCameraResultRef = useRef<(event: {
+    success: boolean;
+    data?: { webPath?: string; format?: string };
+    error?: { message: string };
+  }) => Promise<void>>(async () => {});
   const batchStagingMemberIdRef = useRef<string | undefined>(undefined);
   const authIdentityRef = useRef({ userEmail, driveAuthorized });
   authIdentityRef.current = { userEmail, driveAuthorized };
@@ -1593,7 +1639,7 @@ export function HealthDashboard({
       });
       batchFailureCountRef.current = 0;
       updateQueueStatus(null);
-      pickedMemberIdForBatchRef.current = undefined;
+      updatePickedMemberIdForBatch(undefined);
       batchStagingMemberIdRef.current = undefined;
       if (updatedMemberIds.length > 0) {
         void runFamilyDoctorSummaryAfterQueue(updatedMemberIds);
@@ -6308,7 +6354,7 @@ export function HealthDashboard({
     pendingUploadIdsRef.current = [];
     setUploadQueue([]);
     updateQueueStatus(null);
-    pickedMemberIdForBatchRef.current = undefined;
+    updatePickedMemberIdForBatch(undefined);
     batchStagingMemberIdRef.current = undefined;
     setIdentityResolutionDraft(null);
     setPendingSubjectMember(null);
@@ -6507,62 +6553,249 @@ export function HealthDashboard({
     setIsCameraTriggerActive(false);
     setShowUploadMemberPicker(true);
   }
-  async function handleCameraCapture(skipMemberPicker = false) {
-    if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
-      setIsCameraTriggerActive(true);
-      setShowUploadMemberPicker(true);
-      return;
+  const PENDING_CAMERA_SESSION_KEY = 'stk_pending_camera_capture_v1';
+
+  function savePendingCameraSession(mode: 'single' | 'multi') {
+    try {
+      sessionStorage.setItem(
+        PENDING_CAMERA_SESSION_KEY,
+        JSON.stringify({ mode, memberId: pickedMemberIdForBatchRef.current }),
+      );
+    } catch {
+      // ignore sessionStorage failure
     }
-    digitizationLogger.log('info', 'camera', 'Mở camera chụp ảnh hồ sơ y tế...');
+  }
+
+  function clearPendingCameraSession() {
+    try {
+      sessionStorage.removeItem(PENDING_CAMERA_SESSION_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  function revokeMultiShotPreviews(pages: CapturedPageItem[]) {
+    for (const page of pages) {
+      if (page.previewUrl) {
+        URL.revokeObjectURL(page.previewUrl);
+      }
+    }
+  }
+
+  async function captureCameraPhotoFile(mode: 'single' | 'multi', pageIndex?: number): Promise<File | null> {
+    savePendingCameraSession(mode);
     try {
       const photo = await CapacitorCamera.getPhoto({
         quality: 85,
         resultType: CameraResultType.Uri,
         source: CameraSource.Camera,
+        direction: CameraDirection.Rear,
+        webUseInput: !Capacitor.isNativePlatform(),
       });
       if (!photo.webPath) {
         digitizationLogger.log('warn', 'camera', 'Không nhận được đường dẫn ảnh từ camera');
-        return;
+        return null;
       }
-      const response = await fetch(photo.webPath);
-      if (!response.ok) throw new Error('Không đọc được ảnh chụp từ camera.');
-      const blob = await response.blob();
-      const file = new File(
-        [blob],
-        `kham-benh-${new Date().toISOString().slice(0, 10)}-${Date.now().toString().slice(-4)}.${photo.format || 'jpg'}`,
-        { type: blob.type || 'image/jpeg' }
-      );
+      const file = await cameraPhotoToFile(photo, pageIndex);
       digitizationLogger.log(
         'info',
         'camera',
         `Chụp ảnh thành công: "${file.name}" (${(file.size / 1024).toFixed(1)} KB, định dạng ${photo.format || 'jpg'})`,
-        { fileName: file.name, fileSize: file.size, format: photo.format }
+        { fileName: file.name, fileSize: file.size, format: photo.format, mode },
       );
-      
-      await stageFilesAndStart([file], pickedMemberIdForBatchRef.current);
-      
-      // Automatic loop for batch capture
-      setTimeout(() => {
-        void handleCameraCapture(true);
-      }, 500);
+      return file;
+    } finally {
+      clearPendingCameraSession();
+    }
+  }
+
+  async function handleSingleShotCapture(skipMemberPicker = false) {
+    if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
+      setIsCameraTriggerActive(true);
+      setShowUploadMemberPicker(true);
+      return;
+    }
+    digitizationLogger.log('info', 'camera', 'Mở camera chụp tài liệu 1 trang...');
+    try {
+      const rawFile = await captureCameraPhotoFile('single');
+      if (!rawFile) {
+        updatePickedMemberIdForBatch(undefined);
+        return;
+      }
+      const readyFile = await finalizeCapturedCameraPages([rawFile], 'single');
+      await stageFilesAndStart([readyFile], pickedMemberIdForBatchRef.current);
     } catch (error) {
-      // User cancelled or error - stop loop
       setIsCameraTriggerActive(false);
-      pickedMemberIdForBatchRef.current = undefined;
+      updatePickedMemberIdForBatch(undefined);
       const isCancelled = error instanceof Error && /cancel|cancelled|canceled/i.test(error.message);
       if (isCancelled) {
-        digitizationLogger.log('info', 'camera', 'Người dùng đã đóng/hủy chụp ảnh');
+        digitizationLogger.log('info', 'camera', 'Người dùng đã đóng/hủy chụp ảnh 1 trang');
       } else {
         digitizationLogger.log(
           'error',
           'camera',
-          `Lỗi khi chụp ảnh từ camera: ${error instanceof Error ? error.message : 'Unknown'}`
+          `Lỗi khi chụp ảnh từ camera: ${error instanceof Error ? error.message : 'Unknown'}`,
         );
         if (error instanceof Error) {
           showToast(error.message, 'error');
         }
       }
     }
+  }
+
+  async function handleMultiShotCapture(skipMemberPicker = false) {
+    if (!skipMemberPicker && pickedMemberIdForBatchRef.current === undefined) {
+      setIsCameraTriggerActive(true);
+      setShowUploadMemberPicker(true);
+      return;
+    }
+    setIsCapturingMultiShot(true);
+    digitizationLogger.log(
+      'info',
+      'camera',
+      `Mở camera chụp trang thứ ${multiShotPagesRef.current.length + 1}...`,
+    );
+    try {
+      const nextPageNumber = multiShotPagesRef.current.length + 1;
+      const file = await captureCameraPhotoFile('multi', nextPageNumber);
+      if (!file) {
+        if (multiShotPagesRef.current.length === 0) {
+          updatePickedMemberIdForBatch(undefined);
+        }
+        return;
+      }
+      const previewUrl = URL.createObjectURL(file);
+      const pageItem: CapturedPageItem = {
+        id: `cam_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        previewUrl,
+      };
+      setMultiShotPages((prev) => [...prev, pageItem]);
+      setShowMultiShotModal(true);
+    } catch (error) {
+      setIsCameraTriggerActive(false);
+      const isCancelled = error instanceof Error && /cancel|cancelled|canceled/i.test(error.message);
+      if (isCancelled) {
+        digitizationLogger.log('info', 'camera', 'Người dùng đã dừng chụp trang tiếp theo');
+        if (multiShotPagesRef.current.length > 0) {
+          setShowMultiShotModal(true);
+        } else {
+          updatePickedMemberIdForBatch(undefined);
+        }
+      } else {
+        digitizationLogger.log(
+          'error',
+          'camera',
+          `Lỗi khi chụp ảnh nhiều trang: ${error instanceof Error ? error.message : 'Unknown'}`,
+        );
+        if (error instanceof Error) {
+          showToast(error.message, 'error');
+        }
+      }
+    } finally {
+      setIsCapturingMultiShot(false);
+    }
+  }
+
+  function handleRemoveMultiShotPage(pageId: string) {
+    setMultiShotPages((prev) => {
+      const removed = prev.find((page) => page.id === pageId);
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return prev.filter((page) => page.id !== pageId);
+    });
+  }
+
+  function handleMoveMultiShotPage(pageId: string, direction: 'left' | 'right') {
+    setMultiShotPages((prev) => {
+      const index = prev.findIndex((page) => page.id === pageId);
+      if (index === -1) return prev;
+      const targetIndex = direction === 'left' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(index, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
+
+  function handleCancelMultiShot() {
+    revokeMultiShotPreviews(multiShotPagesRef.current);
+    setMultiShotPages([]);
+    setShowMultiShotModal(false);
+    updatePickedMemberIdForBatch(undefined);
+  }
+
+  async function handleFinalizeMultiShot() {
+    const pagesToBundle = multiShotPagesRef.current;
+    if (pagesToBundle.length === 0 || isFinalizingMultiShot) return;
+    setIsFinalizingMultiShot(true);
+    try {
+      const bundledFile = await finalizeCapturedCameraPages(
+        pagesToBundle.map((page) => page.file),
+        'multi',
+      );
+      const targetMemberId = pickedMemberIdForBatchRef.current;
+      revokeMultiShotPreviews(pagesToBundle);
+      setMultiShotPages([]);
+      setShowMultiShotModal(false);
+      await stageFilesAndStart([bundledFile], targetMemberId);
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : 'Không thể đóng gói các trang ảnh đã chụp.',
+        'error',
+      );
+    } finally {
+      setIsFinalizingMultiShot(false);
+    }
+  }
+
+  handleRestoredCameraResultRef.current = async (event) => {
+    let savedMode: 'single' | 'multi' = 'single';
+    let savedMemberId: string | undefined;
+    try {
+      const raw = sessionStorage.getItem(PENDING_CAMERA_SESSION_KEY);
+      clearPendingCameraSession();
+      if (raw) {
+        const parsed = JSON.parse(raw) as { mode?: 'single' | 'multi'; memberId?: string };
+        savedMode = parsed.mode === 'multi' ? 'multi' : 'single';
+        savedMemberId = typeof parsed.memberId === 'string' ? parsed.memberId : undefined;
+      }
+    } catch {
+      clearPendingCameraSession();
+    }
+    if (!event.success || !event.data?.webPath) return;
+    try {
+      updatePickedMemberIdForBatch(savedMemberId);
+      const file = await cameraPhotoToFile(
+        event.data,
+        savedMode === 'multi' ? multiShotPagesRef.current.length + 1 : undefined,
+      );
+      if (savedMode === 'multi') {
+        const previewUrl = URL.createObjectURL(file);
+        setMultiShotPages((prev) => [
+          ...prev,
+          {
+            id: `cam_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            file,
+            previewUrl,
+          },
+        ]);
+        setShowMultiShotModal(true);
+      } else {
+        const readyFile = await finalizeCapturedCameraPages([file], 'single');
+        await stageFilesAndStart([readyFile], savedMemberId);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        showToast(error.message, 'error');
+      }
+    }
+  };
+
+  async function handleCameraCapture(skipMemberPicker = false) {
+    await handleSingleShotCapture(skipMemberPicker);
   }
   async function handleSaveDigitization(
     submitEvent: React.FormEvent<HTMLFormElement> | FormData,
@@ -9528,75 +9761,147 @@ export function HealthDashboard({
         </div>
       </nav>
       {/* Quick Action Sheet Modal */}
-      {showQuickActionModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/50 backdrop-blur-xs p-3 animate-in fade-in duration-150"
-          onClick={() => {
-            setShowQuickActionModal(false);
-            pickedMemberIdForBatchRef.current = undefined;
-          }}
-        >
+      {showQuickActionModal && (() => {
+        const quickTarget = resolveQuickActionTargetLabel(pickedMemberIdForBatch, members);
+        return (
           <div
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl space-y-4 animate-in slide-in-from-bottom duration-200"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/50 backdrop-blur-xs p-3 animate-in fade-in duration-150"
+            onClick={() => {
+              setShowQuickActionModal(false);
+              updatePickedMemberIdForBatch(undefined);
+            }}
           >
-            <div className="w-10 h-1 bg-slate-200 rounded-full mx-auto mb-2" />
-            <h3 className="text-base font-extrabold text-slate-900 text-center">
-              Ghi nhận tài liệu sức khỏe
-            </h3>
-            <p className="text-xs text-slate-500 text-center">
-              Đang thêm cho: <strong>{selectedMember?.name || 'Thành viên'}</strong>
-            </p>
-            <div className="grid gap-2.5 pt-2">
+            <div
+              className="w-full max-w-sm bg-white rounded-3xl p-4 sm:p-5 shadow-2xl space-y-3.5 animate-in slide-in-from-bottom duration-200"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-10 h-1 bg-slate-200 rounded-full mx-auto" />
+              <div className="text-center space-y-1.5">
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Nhập tài liệu
+                </h3>
+                <div
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                    quickTarget.isAutoDetect
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {quickTarget.isAutoDetect ? (
+                    <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <User className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span className="truncate max-w-[220px]">{quickTarget.label}</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center gap-3.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickActionModal(false);
+                    void handleSingleShotCapture(true);
+                  }}
+                  aria-label="Chụp 1 trang"
+                  title="Chụp 1 trang"
+                  className="w-[68px] h-[68px] rounded-[18px] bg-emerald-50/90 hover:bg-emerald-100 active:scale-95 border-2 border-emerald-200/80 flex items-center justify-center transition-all shadow-2xs shrink-0"
+                >
+                  <svg viewBox="0 0 56 56" className="w-14 h-14" aria-hidden="true">
+                    <rect x="15" y="6" width="26" height="31" rx="4" fill="#d1fae5" stroke="#10b981" strokeWidth="2.2" />
+                    <path d="M21 13h14M21 18h9" stroke="#059669" strokeWidth="2.2" strokeLinecap="round" />
+                    <path d="M20 22l2.4-4.5h11.2L36 22z" fill="#059669" />
+                    <rect x="9" y="21" width="38" height="27" rx="6.5" fill="#059669" />
+                    <circle cx="28" cy="34.5" r="7.2" fill="none" stroke="#ffffff" strokeWidth="2.6" />
+                    <circle cx="28" cy="34.5" r="2.6" fill="#ffffff" />
+                    <circle cx="39.5" cy="27.5" r="1.8" fill="#ffffff" />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickActionModal(false);
+                    void handleMultiShotCapture(true);
+                  }}
+                  aria-label="Chụp nhiều trang"
+                  title="Chụp nhiều trang"
+                  className="w-[68px] h-[68px] rounded-[18px] bg-teal-50/90 hover:bg-teal-100 active:scale-95 border-2 border-teal-200/80 flex items-center justify-center transition-all shadow-2xs shrink-0"
+                >
+                  <svg viewBox="0 0 56 56" className="w-14 h-14" aria-hidden="true">
+                    <rect x="21" y="4" width="24" height="28" rx="4" fill="#99f6e4" stroke="#0d9488" strokeWidth="1.8" />
+                    <rect x="16" y="7" width="25" height="29" rx="4" fill="#ccfbf1" stroke="#0d9488" strokeWidth="2" />
+                    <rect x="11" y="10" width="26" height="29" rx="4" fill="#f0fdfa" stroke="#0f766e" strokeWidth="2.2" />
+                    <path d="M20 22l2.4-4.5h11.2L36 22z" fill="#0f766e" />
+                    <rect x="9" y="21" width="38" height="27" rx="6.5" fill="#0f766e" />
+                    <circle cx="28" cy="34.5" r="7.2" fill="none" stroke="#ffffff" strokeWidth="2.6" />
+                    <circle cx="28" cy="34.5" r="2.6" fill="#ffffff" />
+                    <circle cx="39.5" cy="27.5" r="1.8" fill="#ffffff" />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickActionModal(false);
+                    setIsFileTriggerActive(false);
+                    setIsCameraTriggerActive(false);
+                    fileInputRef.current?.click();
+                  }}
+                  aria-label="Chọn ảnh hoặc PDF từ bộ nhớ"
+                  title="Chọn ảnh hoặc PDF từ bộ nhớ"
+                  className="w-[68px] h-[68px] rounded-[18px] bg-slate-100/90 hover:bg-slate-200/80 active:scale-95 border-2 border-slate-200/90 flex items-center justify-center transition-all shadow-2xs shrink-0"
+                >
+                  <svg viewBox="0 0 56 56" className="w-14 h-14" aria-hidden="true">
+                    <path
+                      d="M17 7h15l8 8v21a2 2 0 0 1-2 2H17a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"
+                      fill="#ffffff"
+                      stroke="#334155"
+                      strokeWidth="2.4"
+                      strokeLinejoin="round"
+                    />
+                    <path d="M32 7v8h8" fill="none" stroke="#334155" strokeWidth="2.4" strokeLinejoin="round" />
+                    <path d="M27.5 29V18.5m0 0l-4 4m4-4l4 4" fill="none" stroke="#059669" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+                    <rect x="8" y="34" width="40" height="15" rx="4.5" fill="#1e293b" />
+                    <path d="M14 41.5h13" stroke="#64748b" strokeWidth="2.4" strokeLinecap="round" />
+                    <circle cx="34.5" cy="41.5" r="1.8" fill="#94a3b8" />
+                    <circle cx="40.5" cy="41.5" r="1.8" fill="#34d399" />
+                  </svg>
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={() => {
                   setShowQuickActionModal(false);
-                  void handleCameraCapture(true);
+                  updatePickedMemberIdForBatch(undefined);
                 }}
-                className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 text-emerald-950 font-bold text-xs transition-all text-left"
+                className="w-full py-2 text-center text-xs font-bold text-slate-400 hover:text-slate-600"
               >
-                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                  <Camera className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="text-sm font-extrabold">Chụp ảnh tài liệu</div>
-                  <div className="text-[11px] text-emerald-700 font-normal">
-                    Sổ khám, đơn thuốc, xét nghiệm
-                  </div>
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowQuickActionModal(false);
-                  setIsFileTriggerActive(false);
-                  setIsCameraTriggerActive(false);
-                  fileInputRef.current?.click();
-                }}
-                className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 text-slate-900 font-bold text-xs transition-all text-left"
-              >
-                <div className="w-10 h-10 rounded-xl bg-slate-800 text-white flex items-center justify-center shrink-0">
-                  <FileUp className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="text-sm font-extrabold">Tải ảnh hoặc tệp PDF</div>
-                  <div className="text-[11px] text-slate-500 font-normal">
-                    Chọn từ bộ nhớ thiết bị
-                  </div>
-                </div>
+                Hủy
               </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowQuickActionModal(false)}
-              className="w-full py-2.5 text-center text-xs font-bold text-slate-400 hover:text-slate-600"
-            >
-              Hủy bỏ
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
+      {(() => {
+        const multiShotTarget = resolveQuickActionTargetLabel(pickedMemberIdForBatch, members);
+        return (
+          <MultiPageCaptureModal
+            isOpen={showMultiShotModal}
+            pages={multiShotPages}
+            targetLabel={multiShotTarget.label}
+            isAutoDetect={multiShotTarget.isAutoDetect}
+            isCapturing={isCapturingMultiShot}
+            isFinalizing={isFinalizingMultiShot}
+            onCaptureNext={() => void handleMultiShotCapture(true)}
+            onRemovePage={handleRemoveMultiShotPage}
+            onMovePage={handleMoveMultiShotPage}
+            onComplete={() => void handleFinalizeMultiShot()}
+            onCancel={handleCancelMultiShot}
+          />
+        );
+      })()}
       {/* Digitization Progress Tracker Modal */}
       {trackerMember && (
         <DigitizationProgressTrackerModal
@@ -9840,11 +10145,11 @@ export function HealthDashboard({
           setIsFileTriggerActive(false);
           setIsCameraTriggerActive(false);
           setIsQuickActionTriggerActive(false);
-          pickedMemberIdForBatchRef.current = undefined;
+          updatePickedMemberIdForBatch(undefined);
         }}
         onSelect={(memberId) => {
           setShowUploadMemberPicker(false);
-          pickedMemberIdForBatchRef.current = memberId;
+          updatePickedMemberIdForBatch(memberId);
           if (memberId) setSelectedMemberId(memberId);
           if (isCameraTriggerActive) {
             setIsCameraTriggerActive(false);
@@ -9871,7 +10176,7 @@ export function HealthDashboard({
             const newId = await handleQuickAddMember(name);
             if (!newId) return;
             setShowUploadMemberPicker(false);
-            pickedMemberIdForBatchRef.current = newId;
+            updatePickedMemberIdForBatch(newId);
             setSelectedMemberId(newId);
             if (isCameraTriggerActive) {
               setIsCameraTriggerActive(false);
@@ -10444,86 +10749,81 @@ function UploadMemberPickerModal({
   );
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
-        <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-          <div>
-            <h3 className="text-base font-black text-slate-900 tracking-tight">Chọn hồ sơ thao tác</h3>
-            <p className="text-[11px] text-slate-500 font-medium">Chọn hồ sơ để gán tài liệu y tế</p>
-          </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+          <h3 className="text-sm font-black text-slate-900 tracking-tight">Chọn hồ sơ thao tác</h3>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-400"
+            aria-label="Đóng"
+            className="p-1.5 hover:bg-slate-200 rounded-full transition-colors text-slate-400"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-4 space-y-2 max-h-[60vh] overflow-y-auto">
+        <div className="p-2.5 space-y-1.5 max-h-[72vh] overflow-y-auto">
           {/* Members List */}
-          <div className="grid grid-cols-1 gap-2">
+          <div className="grid grid-cols-1 gap-1">
             {members.map((member) => {
               const memberRole = getWorkspaceMemberRole(member, adminEmail);
               return (
               <button
                 key={member.id}
                 onClick={() => onSelect(member.id)}
-                className="flex items-center justify-between gap-3 p-3 rounded-2xl border border-slate-100 bg-white hover:border-emerald-200 hover:bg-emerald-50 transition-all text-left group"
+                className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl border border-slate-100 bg-white hover:border-emerald-200 hover:bg-emerald-50 transition-all text-left group"
               >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 font-bold shrink-0 group-hover:scale-105 transition-transform text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-7 h-7 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold shrink-0 text-[11px]">
                     {member.name.charAt(0).toUpperCase()}
                   </div>
-                  <span className="font-bold text-slate-800 text-sm truncate">{member.name}</span>
+                  <span className="font-bold text-slate-800 text-[13px] leading-tight truncate">{member.name}</span>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
                     memberRole === 'Admin'
                       ? 'bg-emerald-100 text-emerald-700'
                       : 'bg-slate-100 text-slate-600'
                   }`}>
                     {memberRole}
                   </span>
-                  <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 group-hover:translate-x-0.5 transition-all" />
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-emerald-500 transition-all" />
                 </div>
               </button>
               );
             })}
           </div>
-          <div className="pt-2 space-y-2 border-t border-slate-100 mt-2">
+          <div className="pt-1.5 space-y-1 border-t border-slate-100">
             {/* Auto detect option */}
             <button
               onClick={() => onSelect(undefined)}
-              className="w-full flex items-center gap-3 p-3 rounded-2xl border border-dashed border-emerald-200 bg-emerald-50/30 hover:bg-emerald-50 text-emerald-700 transition-all text-left font-bold text-xs"
+              className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/40 hover:bg-emerald-50 text-emerald-700 transition-all text-left font-bold text-xs"
             >
-              <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center">
-                <Sparkles className="w-4 h-4" />
+              <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                <Sparkles className="w-3.5 h-3.5" />
               </div>
-              <div className="flex-1">
-                <div>Tự động nhận diện</div>
-                <div className="text-[9px] font-normal text-emerald-600/70">AI sẽ tự tìm chủ thể trong tài liệu</div>
-              </div>
+              <span className="truncate">Tự động nhận diện</span>
             </button>
             {/* Add new member trigger */}
             {!showAddForm ? (
               <button
                 onClick={() => setShowAddForm(true)}
-                className="w-full flex items-center gap-3 p-3 rounded-2xl border border-dashed border-slate-200 hover:border-emerald-300 hover:bg-slate-50 text-slate-600 hover:text-emerald-700 transition-all text-left font-bold text-xs"
+                className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl border border-dashed border-slate-200 hover:border-emerald-300 hover:bg-slate-50 text-slate-600 hover:text-emerald-700 transition-all text-left font-bold text-xs"
               >
-                <div className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center group-hover:text-emerald-600">
-                  <Plus className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center shrink-0">
+                  <Plus className="w-3.5 h-3.5" />
                 </div>
-                <span>Thêm hồ sơ thành viên mới</span>
+                <span className="truncate">Thêm hồ sơ thành viên mới</span>
               </button>
             ) : (
-              <div className="p-3 rounded-2xl border border-emerald-200 bg-emerald-50/30 animate-in slide-in-from-top-2 duration-200">
-                <div className="flex gap-2">
+              <div className="p-2 rounded-xl border border-emerald-200 bg-emerald-50/30 animate-in slide-in-from-top-2 duration-200">
+                <div className="flex gap-1.5">
                   <input
                     autoFocus
                     type="text"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     placeholder="Nhập tên thành viên..."
-                    className="flex-1 bg-white border border-emerald-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    className="flex-1 bg-white border border-emerald-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500/20"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && newName.trim()) onAddNew(newName);
                     }}
@@ -10531,7 +10831,7 @@ function UploadMemberPickerModal({
                   <button
                     disabled={!newName.trim()}
                     onClick={() => onAddNew(newName)}
-                    className="bg-emerald-600 text-white px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50"
+                    className="bg-emerald-600 text-white px-2.5 py-1.5 rounded-lg text-xs font-bold disabled:opacity-50"
                   >
                     Thêm
                   </button>
@@ -10540,7 +10840,7 @@ function UploadMemberPickerModal({
                       setShowAddForm(false);
                       setNewName('');
                     }}
-                    className="p-2 text-slate-400 hover:text-slate-600"
+                    className="p-1.5 text-slate-400 hover:text-slate-600"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -10549,7 +10849,7 @@ function UploadMemberPickerModal({
             )}
           </div>
         </div>
-        <div className="p-4 bg-slate-50 flex justify-end border-t border-slate-100">
+        <div className="px-4 py-2.5 bg-slate-50 flex justify-end border-t border-slate-100">
           <button
             onClick={onClose}
             className="text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors"

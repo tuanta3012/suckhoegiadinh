@@ -7,7 +7,13 @@ export async function compressImageIfNeeded(
   maxDimension = 1800,
   quality = 0.88,
 ): Promise<File> {
-  if (!file.type.startsWith('image/')) {
+  if (
+    !file.type.startsWith('image/') ||
+    typeof Image === 'undefined' ||
+    typeof document === 'undefined' ||
+    typeof URL === 'undefined' ||
+    typeof URL.createObjectURL !== 'function'
+  ) {
     return file;
   }
 
