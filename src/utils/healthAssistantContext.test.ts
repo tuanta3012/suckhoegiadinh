@@ -71,6 +71,9 @@ describe('health assistant context', () => {
       isPersonalHealthHistoryQuery('Huyết áp của Tú Anh là bao nhiêu ', ['Trương Anh Tuấn', 'Vũ Thị Tú Anh']),
     ).toBe(true);
     expect(
+      isPersonalHealthHistoryQuery('Nhóm máu của Tú Anh là gì?', ['Trương Anh Tuấn', 'Vũ Thị Tú Anh']),
+    ).toBe(true);
+    expect(
       createMedicalSearchQuery('Huyết áp của Tú Anh là bao nhiêu ', 'Trương Anh Tuấn', ['Vũ Thị Tú Anh']),
     ).toBe('');
 

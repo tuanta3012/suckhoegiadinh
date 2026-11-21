@@ -57,6 +57,8 @@ const METRIC_DISPLAY_NAMES: Record<string, string> = {
   NA: 'Natri (Na⁺)',
   K: 'Kali (K⁺)',
   CL: 'Clo (Cl⁻)',
+  BLOOD_GROUP: 'Nhóm máu',
+  RH_FACTOR: 'Yếu tố Rh',
   [VITAL_HEIGHT_KEY]: 'Chiều cao',
   [VITAL_WEIGHT_KEY]: 'Cân nặng',
   [VITAL_BP_KEY]: 'Huyết áp',
@@ -1054,6 +1056,11 @@ export function classifyHealthMetricForDisplay(
   metric: HealthMetric,
   gender?: 'male' | 'female' | 'other',
 ): { rangeStatus: HealthMetricRangeStatus; isAbnormal: boolean } {
+  const stdKey = getHealthMetricStandardKey(metric);
+  if (stdKey === 'BLOOD_GROUP' || stdKey === 'RH_FACTOR') {
+    return { rangeStatus: 'normal', isAbnormal: false };
+  }
+
   const rawStatus = metric.status?.trim();
   if (rawStatus && EXPLICIT_ABNORMAL_STATUS_RE.test(rawStatus)) {
     const inferred: HealthMetricRangeStatus = /low|thấp|thap|^l$/i.test(rawStatus)

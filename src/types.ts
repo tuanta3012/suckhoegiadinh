@@ -138,10 +138,19 @@ export interface HealthDeletionTombstone {
   deletedAt: string;
 }
 
+export interface HealthSummaryExtractedEntry {
+  key: string;
+  value: JsonValue;
+  date: string;
+  eventTitle?: string;
+}
+
 export interface HealthSummary {
   latestEventDate?: string;
   latestDiagnoses: string[];
   latestMetrics: Record<string, HealthMetric & { date: string }>;
+  latestExtractedData?: Record<string, HealthSummaryExtractedEntry>;
+  bloodType?: string;
   nextFollowUp?: string;
   narrative?: string;
 }

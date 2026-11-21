@@ -59,6 +59,8 @@ const METRIC_STANDARDIZATION_MAP: Array<{
   { standardKey: 'NA', aliases: ['na', 'natri', 'sodium', 'na huyet thanh', 'dinh luong natri'] },
   { standardKey: 'K', aliases: ['k', 'kali', 'potassium', 'kali huyet thanh', 'dinh luong kali'] },
   { standardKey: 'CL', aliases: ['cl', 'clo', 'clorua', 'chloride', 'cl huyet thanh', 'dinh luong clo'] },
+  { standardKey: 'BLOOD_GROUP', aliases: ['nhom mau', 'nhom mau abo', 'nhom mau he abo', 'nhom mau abo rhesus', 'nhom mau abo rh', 'blood group', 'blood type', 'abo'] },
+  { standardKey: 'RH_FACTOR', aliases: ['rh', 'rhesus', 'rhesus factor', 'yeu to rh', 'yeu to rhesus', 'nhom mau rh', 'khang nguyen d', 'rh d', 'rhd'] },
 ];
 
 const METRIC_ALIAS_TO_KEY = new Map(
@@ -126,6 +128,7 @@ export function prepareDataForDeepDive(member: any, profile: any) {
     'CHOLESTEROL', 'TRIGLYCERID', 'TRIGLYCERIDE', 'HDL_C', 'HDL', 'LDL_C', 'LDL',
     'AST', 'ALT', 'GGT', 'SGOT', 'SGPT',
     'WBC', 'RBC', 'HGB', 'PLT',
+    'BLOOD_GROUP', 'RH_FACTOR', 'ABO', 'RHESUS', 'NHOM_MAU',
   ];
 
   const isCoreIndicator = (key: string, name: string): boolean => {
@@ -221,6 +224,11 @@ export function prepareDataForDeepDive(member: any, profile: any) {
         }
       : undefined;
 
+    const extractedData =
+      evt.extractedData && typeof evt.extractedData === 'object' && !Array.isArray(evt.extractedData) && Object.keys(evt.extractedData).length > 0
+        ? evt.extractedData
+        : undefined;
+
     return {
       d: evt.date,
       inFocus3Y,
@@ -233,6 +241,7 @@ export function prepareDataForDeepDive(member: any, profile: any) {
       ...(imagingResults.length > 0 ? { img: imagingResults.slice(0, 10) } : {}),
       ...(vacc.length > 0 ? { vacc } : {}),
       ...(hosp && Object.keys(hosp).length > 0 ? { hosp } : {}),
+      ...(extractedData ? { extractedData } : {}),
       ...(typeof evt.advice === 'string' && evt.advice.trim()
         ? { adv: evt.advice.trim().slice(0, inFocus3Y ? 280 : 160) }
         : {}),
@@ -278,6 +287,10 @@ export function prepareDataForDeepDive(member: any, profile: any) {
             latestDiagnoses: Array.isArray(profile.summary.latestDiagnoses)
               ? profile.summary.latestDiagnoses.slice(0, 15)
               : [],
+            ...(profile.summary.bloodType ? { bloodType: profile.summary.bloodType } : {}),
+            ...(profile.summary.latestExtractedData && Object.keys(profile.summary.latestExtractedData).length > 0
+              ? { latestExtractedData: profile.summary.latestExtractedData }
+              : {}),
             nextFollowUp: profile.summary.nextFollowUp,
           },
         }

@@ -799,5 +799,72 @@ describe('Gemini service backend routing', () => {
 
     expect(generateContentMock).not.toHaveBeenCalled();
   });
+
+  it('forwards extractedData, bloodType, and older blood-group events beyond the latest 12 events to assistant', async () => {
+    vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+    vi.stubEnv('VITE_BACKEND_URL', '');
+    vi.stubEnv('VITE_APP_MODE', 'apk');
+    vi.mocked(getSharedGeminiKeysForRequest).mockResolvedValue(['AIzaSy-blood-group-key']);
+
+    const olderBloodEvent = {
+      id: 'evt-blood-2024',
+      sourceFileId: 'f-blood',
+      sourceFileName: 'nhom_mau.pdf',
+      type: 'test_result' as const,
+      title: 'Kết quả xét nghiệm nhóm máu',
+      date: '2024-05-29',
+      diagnoses: [],
+      medications: [],
+      metrics: [],
+      extractedData: {
+        nhom_mau: 'AB',
+        rhesus_factor: 'Dương',
+      },
+      notes: 'Nhóm máu (ABO + Rhesus) tự động: AB, Rhesus Factor: Dương.',
+      recordedAt: '2024-05-29T00:00:00.000Z',
+    };
+    const newerEvents = Array.from({ length: 14 }, (_, idx) => ({
+      id: `evt-new-${idx + 1}`,
+      sourceFileId: `f-${idx + 1}`,
+      sourceFileName: `doc-${idx + 1}.pdf`,
+      type: 'medical_report' as const,
+      title: `Khám định kỳ ${idx + 1}`,
+      date: `2025-${String((idx % 12) + 1).padStart(2, '0')}-15`,
+      diagnoses: [],
+      medications: [],
+      metrics: [],
+      recordedAt: `2025-${String((idx % 12) + 1).padStart(2, '0')}-15T00:00:00.000Z`,
+    }));
+
+    let capturedPromptJson: any;
+    generateContentStreamMock.mockImplementation(async (_apiKey: string, args: any) => {
+      capturedPromptJson = JSON.parse(args.contents[0].text);
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { text: 'Nhóm máu của bạn là AB, Rh Dương.' };
+        },
+      };
+    });
+
+    const result = await streamHealthAssistant(
+      'Nhóm máu của tôi là gì',
+      member,
+      {
+        ...profile,
+        timeline: [olderBloodEvent, ...newerEvents],
+      },
+      () => {},
+    );
+
+    expect(result.answer).toContain('AB');
+    expect(capturedPromptJson.healthProfile.bloodType).toBe('AB (Rh Dương)');
+    expect(capturedPromptJson.healthProfile.latestMetrics.BLOOD_GROUP.value).toBe('AB');
+    expect(capturedPromptJson.healthProfile.latestExtractedData.nhom_mau.value).toBe('AB');
+    expect(
+      capturedPromptJson.healthProfile.olderTimelineHighlights.some(
+        (evt: any) => evt.extractedData?.nhom_mau === 'AB',
+      ),
+    ).toBe(true);
+  });
 });
 

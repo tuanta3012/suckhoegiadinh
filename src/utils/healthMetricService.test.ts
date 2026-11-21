@@ -461,4 +461,20 @@ describe('Overview vital signs (height, weight, blood pressure)', () => {
 
     expect(extractOverviewHealthMetricOptions(timeline, 'male')).toEqual([]);
   });
+
+  it('standardizes blood group and Rhesus factor and never marks Rh+ as abnormal', () => {
+    expect(standardizeMetricKey('Nhóm máu', '', 'Nhóm máu ABO')).toBe('BLOOD_GROUP');
+    expect(standardizeMetricKey('Rhesus Factor', '', 'Yếu tố Rh')).toBe('RH_FACTOR');
+
+    const { abnormal, normal } = partitionHealthMetricsForDisplay(
+      [
+        { name: 'Nhóm máu', value: 'B', unit: '' },
+        { name: 'Rhesus Factor', value: '+', unit: '' },
+      ],
+      'female',
+    );
+
+    expect(abnormal).toEqual([]);
+    expect(normal).toHaveLength(2);
+  });
 });

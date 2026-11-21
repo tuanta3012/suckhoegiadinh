@@ -707,6 +707,57 @@ describe('health profile', () => {
     expect(edited.aiAnalysis).toBeUndefined();
     expect(edited.aiAnalysisInvalidatedAt).toBe('2026-05-10T10:00:00.000Z');
   });
+
+  it('aggregates qualitative metrics, extractedData fields, and bloodType across older and newer timeline events', () => {
+    const parsed = parseHealthProfile({
+      timeline: [
+        {
+          ...event,
+          id: 'evt-blood',
+          date: '2024-05-29',
+          title: 'Kết quả xét nghiệm nhóm máu',
+          metrics: [
+            { name: 'HBsAg', value: 'Âm tính', unit: '' },
+          ],
+          extractedData: {
+            nhom_mau: 'AB',
+            rhesus_factor: 'Dương',
+          },
+        },
+        {
+          ...event,
+          id: 'evt-recent',
+          date: '2026-02-07',
+          title: 'Khám tổng quát',
+          metrics: [
+            { name: 'Hemoglobin', standardKey: 'HGB', value: 13.5, unit: 'g/dL' },
+          ],
+        },
+      ],
+    }, member);
+
+    expect(parsed.summary.bloodType).toBe('AB (Rh Dương)');
+    expect(parsed.summary.latestMetrics.BLOOD_GROUP).toMatchObject({
+      value: 'AB',
+      date: '2024-05-29',
+    });
+    expect(parsed.summary.latestMetrics.RH_FACTOR).toMatchObject({
+      value: 'Dương',
+      date: '2024-05-29',
+    });
+    expect(parsed.summary.latestMetrics.HBSAG).toMatchObject({
+      value: 'Âm tính',
+      date: '2024-05-29',
+    });
+    expect(parsed.summary.latestMetrics.HGB).toMatchObject({
+      value: 13.5,
+      date: '2026-02-07',
+    });
+    expect(parsed.summary.latestExtractedData?.nhom_mau).toMatchObject({
+      value: 'AB',
+      date: '2024-05-29',
+    });
+  });
 });
 
 

@@ -1324,6 +1324,15 @@ export function mergeHealthEvents(
     ? 'Hồ sơ khám tổng quát'
     : primary.title || secondary.title;
 
+  const mergedExtractedData =
+    (primary.extractedData && Object.keys(primary.extractedData).length > 0) ||
+    (secondary.extractedData && Object.keys(secondary.extractedData).length > 0)
+      ? {
+          ...(secondary.extractedData || {}),
+          ...(primary.extractedData || {}),
+        }
+      : undefined;
+
   return cleanAndDeduplicateEventData({
     ...primary,
     id: cleanExisting.id,
@@ -1343,6 +1352,7 @@ export function mergeHealthEvents(
     vaccinations: primary.vaccinations?.length ? primary.vaccinations : secondary.vaccinations,
     hospitalization: cleanHospitalizationRecord(primary.hospitalization) ||
       cleanHospitalizationRecord(secondary.hospitalization),
+    ...(mergedExtractedData ? { extractedData: mergedExtractedData } : {}),
     advice: mergedAdvice,
     notes: mergedNotes,
     nextFollowUp: pickBetterNextFollowUp(primary.nextFollowUp, secondary.nextFollowUp),

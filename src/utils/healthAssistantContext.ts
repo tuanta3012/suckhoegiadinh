@@ -365,7 +365,6 @@ export function isPersonalHealthHistoryQuery(
     /phong ngua/,
     /nguyen nhan/,
     /trieu chung/,
-    /la gi/,
   ];
   if (generalMedicalAdvicePatterns.some((pattern) => pattern.test(normalized))) {
     return false;
@@ -377,14 +376,14 @@ export function isPersonalHealthHistoryQuery(
   const mentionsFamilyMember = pseudoMembers.some(
     (entry) => matchMemberPhraseInText(question, entry).score > 0,
   );
-  if (!mentionsFamilyMember) {
-    return false;
-  }
 
   // When a specific family member is named AND the question asks about their measurements,
-  // status, results, medications, or visits, treat it as a personal health record query.
+  // blood type, status, results, medications, or visits, treat it as a personal health record query.
   const personalMeasurementOrRecordPatterns = [
     /bao nhieu/,
+    /nhom mau/,
+    /rhesus/,
+    /\brh\b/,
     /huyet ap/,
     /duong huyet/,
     /nhip tim/,
@@ -413,7 +412,15 @@ export function isPersonalHealthHistoryQuery(
     /gan day/,
   ];
 
-  return personalMeasurementOrRecordPatterns.some((pattern) => pattern.test(normalized));
+  if (mentionsFamilyMember && personalMeasurementOrRecordPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  if (/la gi/.test(normalized)) {
+    return false;
+  }
+
+  return false;
 }
 
 export function createMedicalSearchQuery(

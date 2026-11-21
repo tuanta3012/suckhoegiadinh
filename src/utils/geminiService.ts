@@ -18,6 +18,7 @@ import {
   cleanHospitalizationRecord,
 } from './healthEventType';
 import { sleep } from './healthRecordService';
+import { summarizeTimeline } from './healthProfile';
 import { getFirebaseIdToken } from './googleDriveService';
 import { createApiRequestId } from './apiRequestId';
 import { getSharedGeminiKeysForRequest } from './geminiSharedResources';
@@ -122,7 +123,6 @@ function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
         .map((evt) => ({
           ...evt,
           additionalSources: undefined,
-          extractedData: undefined,
           imagingResults: Array.isArray(evt.imagingResults)
             ? evt.imagingResults.map((img) => ({
                 modality: img.modality,
@@ -132,6 +132,10 @@ function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
             : undefined,
         }))
     : [];
+  const computedSummary =
+    timeline.length > 0
+      ? summarizeTimeline(timeline, profile?.summary?.narrative)
+      : undefined;
   return {
     schemaVersion: profile?.schemaVersion || 2,
     member: profile?.member,
@@ -139,12 +143,18 @@ function compactProfileForDeepDive(profile: HealthProfile): HealthProfile {
     timeline,
     sources: [],
     summary: {
-      latestEventDate: profile?.summary?.latestEventDate,
-      latestDiagnoses: Array.isArray(profile?.summary?.latestDiagnoses)
-        ? profile.summary.latestDiagnoses.slice(-15)
+      latestEventDate: computedSummary?.latestEventDate ?? profile?.summary?.latestEventDate,
+      latestDiagnoses: Array.isArray(computedSummary?.latestDiagnoses ?? profile?.summary?.latestDiagnoses)
+        ? (computedSummary?.latestDiagnoses ?? profile?.summary?.latestDiagnoses ?? []).slice(-15)
         : [],
-      latestMetrics: profile?.summary?.latestMetrics || {},
-      nextFollowUp: profile?.summary?.nextFollowUp,
+      latestMetrics: computedSummary?.latestMetrics ?? profile?.summary?.latestMetrics ?? {},
+      ...(computedSummary?.latestExtractedData || profile?.summary?.latestExtractedData
+        ? { latestExtractedData: computedSummary?.latestExtractedData ?? profile?.summary?.latestExtractedData }
+        : {}),
+      ...(computedSummary?.bloodType || profile?.summary?.bloodType
+        ? { bloodType: computedSummary?.bloodType ?? profile?.summary?.bloodType }
+        : {}),
+      nextFollowUp: computedSummary?.nextFollowUp ?? profile?.summary?.nextFollowUp,
     },
     createdAt: profile?.createdAt || '',
     updatedAt: profile?.updatedAt || '',
@@ -187,18 +197,24 @@ function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
         (a, b) => new Date(a.date || a.recordedAt).getTime() - new Date(b.date || b.recordedAt).getTime(),
       )
     : [];
-  const latestTen = sortedTimeline.slice(-10);
-  const latestPhysicalExamEvent = [...sortedTimeline]
-    .reverse()
-    .find((evt) => Boolean(evt?.physicalExam));
-  const mergedEvents =
-    latestPhysicalExamEvent && !latestTen.some((evt) => evt.id === latestPhysicalExamEvent.id)
-      ? [latestPhysicalExamEvent, ...latestTen]
-      : latestTen;
+  const latestTwelve = sortedTimeline.slice(-12);
+  const includedIds = new Set(latestTwelve.map((evt) => evt.id));
+  const importantOlderEvents = sortedTimeline.slice(0, -12).filter((evt) =>
+    Boolean(
+      (evt?.extractedData && Object.keys(evt.extractedData).length > 0) ||
+        (evt?.vaccinations && evt.vaccinations.length > 0) ||
+        evt?.hospitalization ||
+        evt?.physicalExam ||
+        (evt?.metrics && evt.metrics.some((m) => typeof m.value === 'string' && !/^-?\d+(?:[.,]\d+)?$/.test(m.value.trim()))),
+    ),
+  );
+  const mergedEvents = [
+    ...importantOlderEvents.filter((evt) => !includedIds.has(evt.id)),
+    ...latestTwelve,
+  ];
   const recentTimeline = mergedEvents.map((evt) => ({
     ...evt,
     additionalSources: undefined,
-    extractedData: undefined,
     imagingResults: Array.isArray(evt.imagingResults)
       ? evt.imagingResults.map((img) => ({
           modality: img.modality,
@@ -207,18 +223,29 @@ function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
         }))
       : undefined,
   }));
+  const computedSummary =
+    sortedTimeline.length > 0
+      ? summarizeTimeline(sortedTimeline, profile?.summary?.narrative)
+      : undefined;
   return {
     schemaVersion: profile?.schemaVersion || 2,
     member: profile?.member,
+    ...(profile?.medicalHistory ? { medicalHistory: profile.medicalHistory } : {}),
     timeline: recentTimeline,
     sources: [],
     summary: {
-      latestEventDate: profile?.summary?.latestEventDate,
-      latestDiagnoses: Array.isArray(profile?.summary?.latestDiagnoses)
-        ? profile.summary.latestDiagnoses.slice(-12)
+      latestEventDate: computedSummary?.latestEventDate ?? profile?.summary?.latestEventDate,
+      latestDiagnoses: Array.isArray(computedSummary?.latestDiagnoses ?? profile?.summary?.latestDiagnoses)
+        ? (computedSummary?.latestDiagnoses ?? profile?.summary?.latestDiagnoses ?? []).slice(-12)
         : [],
-      latestMetrics: profile?.summary?.latestMetrics || {},
-      nextFollowUp: profile?.summary?.nextFollowUp,
+      latestMetrics: computedSummary?.latestMetrics ?? profile?.summary?.latestMetrics ?? {},
+      ...(computedSummary?.latestExtractedData || profile?.summary?.latestExtractedData
+        ? { latestExtractedData: computedSummary?.latestExtractedData ?? profile?.summary?.latestExtractedData }
+        : {}),
+      ...(computedSummary?.bloodType || profile?.summary?.bloodType
+        ? { bloodType: computedSummary?.bloodType ?? profile?.summary?.bloodType }
+        : {}),
+      nextFollowUp: computedSummary?.nextFollowUp ?? profile?.summary?.nextFollowUp,
     },
     createdAt: profile?.createdAt || '',
     updatedAt: profile?.updatedAt || '',

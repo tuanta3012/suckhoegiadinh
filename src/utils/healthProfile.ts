@@ -6,6 +6,8 @@ import type {
   HealthMetric,
   HealthProfile,
   HealthSource,
+  HealthSummaryExtractedEntry,
+  JsonValue,
 } from '../types';
 import {
   cleanAndDeduplicateEventData,
@@ -534,6 +536,7 @@ function normalizeTimelineSignature(timeline: HealthEvent[]): string {
         advice: item.advice || '',
         nextFollowUp: item.nextFollowUp || '',
         notes: item.notes || '',
+        extractedData: item.extractedData || null,
       })),
   );
 }
@@ -665,46 +668,199 @@ export function canDeleteRawSource(profile: HealthProfile, sourceFileId: string)
 
 import { standardizeMetricKey } from './healthRecordService';
 
+function normalizeExtractedKey(key: string): string {
+  return key
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isBloodGroupExtractedKey(normalizedKey: string): boolean {
+  return (
+    normalizedKey === 'nhom_mau' ||
+    normalizedKey === 'nhom_mau_abo' ||
+    normalizedKey === 'nhom_mau_he_abo' ||
+    normalizedKey === 'blood_group' ||
+    normalizedKey === 'blood_type' ||
+    normalizedKey === 'abo' ||
+    normalizedKey === 'abo_group'
+  );
+}
+
+function isRhesusExtractedKey(normalizedKey: string): boolean {
+  return (
+    normalizedKey === 'rhesus_factor' ||
+    normalizedKey === 'rhesus' ||
+    normalizedKey === 'rh_factor' ||
+    normalizedKey === 'rh' ||
+    normalizedKey === 'yeu_to_rh' ||
+    normalizedKey === 'yeu_to_rhesus' ||
+    normalizedKey === 'nhom_mau_rh'
+  );
+}
+
+function isNonEmptySummaryValue(value: unknown): value is JsonValue {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return value.length > 0;
+  if (isJsonRecord(value)) return Object.keys(value).length > 0;
+  return false;
+}
+
+function extractBloodInfoFromNotes(notes?: string): { bloodGroup?: string; rhFactor?: string } {
+  if (!notes || typeof notes !== 'string') return {};
+  const aboMatch = notes.match(
+    /nh[óo]m\s*m[áa]u(?:\s*\([^)]*\))?(?:\s*t[ựư]\s*[đd][ộo]ng)?\s*[:=]\s*(AB|A|B|O)\b(?:\s*([+-]|Rh\s*(?:Dương|Âm|[+-])))?/i,
+  );
+  const rhMatch = notes.match(
+    /(?:rhesus(?:\s*factor)?|y[ếe]u\s*t[ốo]\s*rh(?:esus)?)\s*[:=]\s*(Dương(?:\s*tính)?|Âm(?:\s*tính)?|Positive|Negative|[+-])/i,
+  );
+  return {
+    bloodGroup: aboMatch?.[1]?.toUpperCase(),
+    rhFactor: rhMatch?.[1]?.trim() || aboMatch?.[2]?.replace(/^Rh\s*/i, '').trim(),
+  };
+}
+
 export function summarizeTimeline(
   timeline: HealthEvent[],
   narrative?: string,
 ): HealthProfile['summary'] {
+  const chronologicalTimeline = [...timeline].sort((a, b) =>
+    (a?.date || a?.recordedAt || '').localeCompare(b?.date || b?.recordedAt || ''),
+  );
   const latest = [...timeline]
     .filter((event) => event.date)
     .sort((a, b) => b.date.localeCompare(a.date))[0];
   const latestMetrics: Record<string, HealthMetric & { date: string }> = {};
-  
-  for (const event of timeline) {
-    if (!event || !Array.isArray(event.metrics)) continue;
+  const latestExtractedData: Record<string, HealthSummaryExtractedEntry> = {};
+
+  for (const event of chronologicalTimeline) {
+    if (!event) continue;
     const eventDate = event.date || '';
 
-    for (const metric of event.metrics) {
-      if (!metric) continue;
-      const numericValue =
-        typeof metric.value === 'number'
-          ? metric.value
-          : typeof metric.value === 'string'
-            ? Number(metric.value.trim().replace(',', '.'))
-            : Number.NaN;
-      if (!Number.isFinite(numericValue)) continue;
+    if (Array.isArray(event.metrics)) {
+      for (const metric of event.metrics) {
+        if (!metric) continue;
+        let resolvedValue: number | string | undefined;
+        if (typeof metric.value === 'number' && Number.isFinite(metric.value)) {
+          resolvedValue = metric.value;
+        } else if (typeof metric.value === 'string') {
+          const trimmedVal = metric.value.trim();
+          if (!trimmedVal) continue;
+          if (/^-?\d+(?:[.,]\d+)?$/.test(trimmedVal)) {
+            const parsedNum = Number(trimmedVal.replace(',', '.'));
+            resolvedValue = Number.isFinite(parsedNum) ? parsedNum : trimmedVal;
+          } else {
+            resolvedValue = trimmedVal;
+          }
+        }
+        if (resolvedValue === undefined) continue;
 
-      const rawKey = metric.standardKey || metric.name || '';
-      const stdKey = standardizeMetricKey(rawKey, metric.unit || '', metric.name);
+        const rawKey = metric.standardKey || metric.name || '';
+        const stdKey = standardizeMetricKey(rawKey, metric.unit || '', metric.name);
+        if (!stdKey) continue;
 
-      if (!stdKey) continue;
+        const previous = latestMetrics[stdKey];
+        if (!previous || !previous.date || (eventDate && eventDate >= previous.date)) {
+          latestMetrics[stdKey] = {
+            ...metric,
+            value: resolvedValue,
+            standardKey: stdKey,
+            date: eventDate,
+          };
+        }
+      }
+    }
 
-      const previous = latestMetrics[stdKey];
-      // Strictly one entry per standardized key, prioritized by latest date
-      if (!previous || eventDate >= previous.date) {
-        latestMetrics[stdKey] = {
-          ...metric,
-          value: numericValue,
-          standardKey: stdKey,
+    if (isJsonRecord(event.extractedData)) {
+      for (const [rawKey, rawVal] of Object.entries(event.extractedData)) {
+        const cleanKey = rawKey.trim();
+        if (!cleanKey || !isNonEmptySummaryValue(rawVal)) continue;
+
+        const existingEntry = latestExtractedData[cleanKey];
+        if (!existingEntry || !existingEntry.date || (eventDate && eventDate >= existingEntry.date)) {
+          latestExtractedData[cleanKey] = {
+            key: cleanKey,
+            value: typeof rawVal === 'string' ? rawVal.trim() : rawVal,
+            date: eventDate,
+            ...(event.title ? { eventTitle: event.title } : {}),
+          };
+        }
+
+        const normKey = normalizeExtractedKey(cleanKey);
+        const strVal = typeof rawVal === 'string' ? rawVal.trim() : '';
+        if (strVal && isBloodGroupExtractedKey(normKey)) {
+          const prevBg = latestMetrics.BLOOD_GROUP;
+          if (!prevBg || !prevBg.date || (eventDate && eventDate >= prevBg.date)) {
+            latestMetrics.BLOOD_GROUP = {
+              name: 'Nhóm máu',
+              standardKey: 'BLOOD_GROUP',
+              value: strVal,
+              unit: '',
+              date: eventDate,
+            };
+          }
+        } else if (strVal && isRhesusExtractedKey(normKey)) {
+          const prevRh = latestMetrics.RH_FACTOR;
+          if (!prevRh || !prevRh.date || (eventDate && eventDate >= prevRh.date)) {
+            latestMetrics.RH_FACTOR = {
+              name: 'Yếu tố Rh',
+              standardKey: 'RH_FACTOR',
+              value: strVal,
+              unit: '',
+              date: eventDate,
+            };
+          }
+        }
+      }
+    }
+
+    const fromNotes = extractBloodInfoFromNotes(event.notes);
+    if (fromNotes.bloodGroup) {
+      const prevBg = latestMetrics.BLOOD_GROUP;
+      if (!prevBg || !prevBg.date || (eventDate && eventDate > prevBg.date)) {
+        latestMetrics.BLOOD_GROUP = {
+          name: 'Nhóm máu',
+          standardKey: 'BLOOD_GROUP',
+          value: fromNotes.bloodGroup,
+          unit: '',
+          date: eventDate,
+        };
+      }
+    }
+    if (fromNotes.rhFactor) {
+      const prevRh = latestMetrics.RH_FACTOR;
+      if (!prevRh || !prevRh.date || (eventDate && eventDate > prevRh.date)) {
+        latestMetrics.RH_FACTOR = {
+          name: 'Yếu tố Rh',
+          standardKey: 'RH_FACTOR',
+          value: fromNotes.rhFactor,
+          unit: '',
           date: eventDate,
         };
       }
     }
   }
+
+  const bloodGroupValue =
+    typeof latestMetrics.BLOOD_GROUP?.value === 'string'
+      ? latestMetrics.BLOOD_GROUP.value.trim()
+      : '';
+  const rhFactorValue =
+    typeof latestMetrics.RH_FACTOR?.value === 'string'
+      ? latestMetrics.RH_FACTOR.value.trim()
+      : '';
+  const bloodType = bloodGroupValue
+    ? rhFactorValue && !/rh|[+-]|dương|âm/i.test(bloodGroupValue)
+      ? `${bloodGroupValue} (Rh ${rhFactorValue})`
+      : bloodGroupValue
+    : undefined;
 
   const followUp = [...timeline]
     .reverse()
@@ -715,6 +871,8 @@ export function summarizeTimeline(
     latestEventDate: latest?.date,
     latestDiagnoses: latest?.diagnoses || [],
     latestMetrics,
+    ...(Object.keys(latestExtractedData).length > 0 ? { latestExtractedData } : {}),
+    ...(bloodType ? { bloodType } : {}),
     nextFollowUp: followUp,
     narrative,
   };
