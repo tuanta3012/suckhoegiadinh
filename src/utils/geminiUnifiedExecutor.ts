@@ -259,9 +259,11 @@ export function describeGeminiError(error: unknown): {
     !isInternalSchedulerMessage && (
       isDeadline ||
       isOverloaded ||
+      statusCode === 408 ||
       statusCode === 500 ||
       statusCode === 502 ||
-      /502|500|timeout|timed out|failed to fetch|networkerror|load failed|network request failed|empty response|empty stream/i.test(
+      statusValue === 'INTERNAL' ||
+      /502|500|408|INTERNAL|timeout|timed out|failed to fetch|networkerror|load failed|network request failed|econnreset|etimedout|socket hang up|empty response|empty stream/i.test(
         candidateMessage,
       )
     );
@@ -481,7 +483,7 @@ export async function executeGeminiWithPool(
     || (options.task === 'digitization' ? GEMINI_TIMEOUTS.ocrTotalMs : GEMINI_TIMEOUTS.analysisTotalMs);
   const deadline = Date.now() + totalBudgetMs;
   const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs, totalBudgetMs);
-  const maxPoolPasses = options.maxPoolPasses ?? (options.task === 'digitization' ? 2 : 2);
+  const maxPoolPasses = options.maxPoolPasses ?? 4;
   let lastError: Error | null = null;
   let lastAttemptedModel = primaryModel;
   let allModelsExhaustedDailyQuota = projects.length > 0;
@@ -705,6 +707,7 @@ export async function executeGeminiWithPool(
 
       const backoffMs = Math.min(
         Math.pow(2, pass + 1) * 1_500,
+        10_000,
         Math.max(1_000, deadline - Date.now() - minimumAttemptMs),
       );
       options.onProgress?.(`Tất cả API key đều đang bận; thử lại lượt ${pass + 2}/${maxPoolPasses} sau ${Math.ceil(backoffMs / 1000)}s...`);
@@ -743,7 +746,7 @@ export async function executeGeminiWithPool(
   const finalDetails = describeGeminiError(finalError);
   const finalErrInfo = getRawErrorText(finalError);
   digitizationLogger.log(
-    options.nonFatal ? 'warn' : 'error',
+    options.nonFatal || finalDetails.isTransient ? 'warn' : 'error',
     'gemini_request_failed',
     `Tác vụ Gemini thất bại: ${finalErrInfo.errorMessage}`,
     {
@@ -775,7 +778,7 @@ export async function executeGeminiStreamWithPool(
   const totalBudgetMs = options.timeoutMs || GEMINI_TIMEOUTS.analysisTotalMs;
   const deadline = Date.now() + totalBudgetMs;
   const minimumAttemptMs = getMinimumAttemptDuration(options.task, options.attemptTimeoutMs, totalBudgetMs);
-  const maxPoolPasses = options.maxPoolPasses ?? 2;
+  const maxPoolPasses = options.maxPoolPasses ?? 4;
   const dailyQuotaExhaustedProjectIds = new Set<string>();
   let lastError: Error | null = null;
   digitizationLogger.log('info', 'gemini_stream_start', 'Bắt đầu luồng Gemini.', {
@@ -977,6 +980,7 @@ export async function executeGeminiStreamWithPool(
 
     const backoffMs = Math.min(
       Math.pow(2, pass + 1) * 1_500,
+      10_000,
       Math.max(1_000, deadline - Date.now() - minimumAttemptMs),
     );
     await sleep(backoffMs, options.signal);
@@ -999,17 +1003,22 @@ export async function executeGeminiStreamWithPool(
   const finalError = lastError || new Error('Đã hết thời gian chờ phản hồi từ trợ lý Gemini. Vui lòng thử lại sau.');
   const finalDetails = describeGeminiError(finalError);
   const finalErrInfo = getRawErrorText(finalError);
-  digitizationLogger.log('error', 'gemini_stream_failed', `Luồng Gemini thất bại: ${finalErrInfo.errorMessage}`, {
-    requestId: options.requestId,
-    task: options.task,
-    model: targetModel,
-    keyCount: projects.length,
-    durationMs: Date.now() - requestStartedAt,
-    status: finalDetails.status,
-    errorName: finalErrInfo.errorName,
-    errorMessage: finalErrInfo.errorMessage,
-    errorCategory: getErrorCategory(finalDetails),
-  });
+  digitizationLogger.log(
+    options.nonFatal || finalDetails.isTransient ? 'warn' : 'error',
+    'gemini_stream_failed',
+    `Luồng Gemini thất bại: ${finalErrInfo.errorMessage}`,
+    {
+      requestId: options.requestId,
+      task: options.task,
+      model: targetModel,
+      keyCount: projects.length,
+      durationMs: Date.now() - requestStartedAt,
+      status: finalDetails.status,
+      errorName: finalErrInfo.errorName,
+      errorMessage: finalErrInfo.errorMessage,
+      errorCategory: getErrorCategory(finalDetails),
+    },
+  );
   throw finalError;
 }
 
@@ -1105,22 +1114,35 @@ export async function testGeminiApiKeyDirect(
   const timer = setTimeout(() => controller.abort(new Error('Kiểm tra API key bị quá thời gian chờ.')), timeoutMs);
   try {
     const ai = createGeminiSdkClient(cleanKey, timeoutMs);
-    await ai.models.generateContent({
-      model: modelUsed,
-      contents: 'OK',
-      config: { maxOutputTokens: 16, abortSignal: controller.signal },
-    });
-    digitizationLogger.log('info', 'gemini_key_test_complete', 'Gemini API key kiểm tra thành công.', {
-      task: 'key_test',
-      model: modelUsed,
-      durationMs: Date.now() - startedAt,
-    }, Date.now() - startedAt);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await ai.models.generateContent({
+          model: modelUsed,
+          contents: 'OK',
+          config: { maxOutputTokens: 16, abortSignal: controller.signal },
+        });
+        digitizationLogger.log('info', 'gemini_key_test_complete', 'Gemini API key kiểm tra thành công.', {
+          task: 'key_test',
+          model: modelUsed,
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+        }, Date.now() - startedAt);
+        return { valid: true, workingModel: modelUsed };
+      } catch (err) {
+        const details = describeGeminiError(err);
+        if (details.isTransient && attempt === 0 && !controller.signal.aborted) {
+          await sleep(1_000, controller.signal);
+          continue;
+        }
+        throw err;
+      }
+    }
     return { valid: true, workingModel: modelUsed };
   } catch (err) {
     const details = describeGeminiError(err);
     const errInfo = getRawErrorText(err);
     digitizationLogger.log(
-      details.isRateLimit || details.status === 429 ? 'warn' : 'error',
+      details.isTransient || details.isRateLimit || details.status === 429 ? 'warn' : 'error',
       'gemini_key_test_failed',
       `Gemini API key kiểm tra thất bại: ${errInfo.errorMessage}`,
       {

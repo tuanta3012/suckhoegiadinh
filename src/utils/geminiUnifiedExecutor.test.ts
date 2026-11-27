@@ -302,5 +302,49 @@ describe('Gemini unified executor', () => {
       maxPoolPasses: 2,
     })).rejects.toThrow();
   });
+
+  it('retries transient ApiError across default 4 pool passes and logs warn when exhausted', async () => {
+    vi.useFakeTimers();
+    const logSpy = vi.spyOn(digitizationLogger, 'log');
+    try {
+      const transientApiError = Object.assign(new Error('{"error":{"code":503,"message":"Unavailable","status":"UNAVAILABLE"}}'), {
+        name: 'ApiError',
+        status: 503,
+      });
+
+      generateContentMock
+        .mockRejectedValueOnce(transientApiError)
+        .mockRejectedValueOnce(transientApiError)
+        .mockResolvedValueOnce({ text: 'Recovered on pass 3.' });
+
+      const context1 = createGeminiRequestContext(['AIzaSy-test-key-012345678901234567890123456789012345']);
+      const promise1 = executeGeminiWithPool({
+        task: 'analysis',
+        contents: [{ text: 'Analyze' }],
+        requestContext: context1,
+      });
+      await vi.runAllTimersAsync();
+      await expect(promise1).resolves.toMatchObject({ text: 'Recovered on pass 3.' });
+      expect(generateContentMock).toHaveBeenCalledTimes(3);
+
+      // Exhaust all 4 default passes transiently -> throws error without console.error (logs warn)
+      generateContentMock.mockReset();
+      generateContentMock.mockRejectedValue(transientApiError);
+      const context2 = createGeminiRequestContext(['AIzaSy-another-key-01234567890123456789012345678901']);
+      const promise2 = executeGeminiWithPool({
+        task: 'analysis',
+        contents: [{ text: 'Analyze' }],
+        requestContext: context2,
+      });
+      const assertion = expect(promise2).rejects.toThrow();
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(generateContentMock).toHaveBeenCalledTimes(4);
+      expect(logSpy.mock.calls.some(([level]) => level === 'error')).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 

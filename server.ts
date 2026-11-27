@@ -145,8 +145,15 @@ function logServerRouteError(
 ): void {
   const errorName = error instanceof Error ? error.name : 'UnknownError';
   const errorMessage = error instanceof Error ? error.message : String(error ?? 'Unknown error');
+  const details = describeGeminiError(error);
+  const isTransientUpstream =
+    details.isTransient ||
+    status === 429 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504;
   digitizationLogger.log(
-    'error',
+    isTransientUpstream ? 'warn' : 'error',
     'api_http_error',
     `Server route lỗi tại ${endpoint}: ${errorMessage}`,
     {
@@ -381,7 +388,6 @@ async function startServer() {
       });
       res.json({ success: true, text, modelUsed });
     } catch (err) {
-      console.error('[Gemini Server GenerateContent Error]', err);
       const details = describeGeminiError(err);
       logServerRouteError('/api/gemini/generate-content', res, err, details.status || 500);
       res.status(details.status || 500).json({ error: details.message || 'Lỗi khi gọi Gemini API.' });
@@ -529,7 +535,6 @@ async function startServer() {
       }
       const details = describeGeminiError(error);
       logServerRouteError('/api/gemini/extract-health-event', res, error, details.status || 500);
-      console.error('[Gemini Server Extract Error]', { status: details.status });
       if (res.headersSent) {
         writeSse(res, { type: 'error', error: details.message });
         res.end();
@@ -575,7 +580,6 @@ async function startServer() {
     } catch (error) {
       const details = describeGeminiError(error);
       logServerRouteError('/api/gemini/refine-and-organize', res, error, details.status || 500);
-      console.error('[Gemini Server Refine Error]', { status: details.status });
       res.status(details.status || 500).json({ error: details.message });
     }
   });
@@ -601,7 +605,6 @@ async function startServer() {
     } catch (error) {
       const details = describeGeminiError(error);
       logServerRouteError('/api/gemini/summarize', res, error, details.status || 500);
-      console.error('[Gemini Server Summary Error]', { status: details.status });
       res.status(details.status || 500).json({ error: details.message });
     }
   });
@@ -643,7 +646,6 @@ async function startServer() {
     } catch (error) {
       const details = describeGeminiError(error);
       logServerRouteError('/api/gemini/analyze-comprehensive', res, error, details.status || 500);
-      console.error('[Gemini Server Analyze Error]', { status: details.status });
       res.status(details.status || 500).json({ error: details.message });
     }
   });
@@ -771,7 +773,6 @@ async function startServer() {
     } catch (error) {
       const details = describeGeminiError(error);
       logServerRouteError('/api/gemini/ask-assistant', res, error, details.status || 500, { stream: Boolean(req.body?.stream) });
-      console.error('[Gemini Server Assistant Error]', { status: details.status });
       if (res.headersSent) {
         writeSse(res, {
           type: 'error',

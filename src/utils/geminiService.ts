@@ -500,8 +500,21 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
         }
         if (status === 502 || status === 503 || status === 504) {
           const textBody = await response.text().catch(() => '');
+          let extractedMessage = textBody.trim();
+          if (extractedMessage.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(extractedMessage) as { error?: unknown; message?: unknown };
+              if (typeof parsed.error === 'string' && parsed.error.trim()) {
+                extractedMessage = parsed.error.trim();
+              } else if (typeof parsed.message === 'string' && parsed.message.trim()) {
+                extractedMessage = parsed.message.trim();
+              }
+            } catch {
+              // keep trimmed raw text
+            }
+          }
           throw new BackendGatewayError(
-            textBody.trim() || `Server Gemini (${endpoint}) gặp sự cố tạm thời (HTTP ${status}).`,
+            extractedMessage || `Server Gemini (${endpoint}) gặp sự cố tạm thời (HTTP ${status}).`,
             status,
           );
         }
@@ -570,14 +583,16 @@ async function callGemini<T>(endpoint: string, body: Record<string, unknown>): P
   const durationMs = getDuration();
   const rawErrInfo = getRawErrorDetails(lastError);
   const errorMessage = cleanErrorMessage(rawErrInfo.errorMessage);
+  const resolvedStatus = lastHttpStatus ?? (lastError instanceof BackendGatewayError ? lastError.status : undefined);
+  const isTransientOrRateLimit = resolvedStatus === 429 || resolvedStatus === 502 || resolvedStatus === 503 || resolvedStatus === 504;
   digitizationLogger.log(
-    'error',
+    isTransientOrRateLimit ? 'warn' : 'error',
     'api_request_failed',
     `Gemini gateway request thất bại (${endpoint}): ${rawErrInfo.errorMessage}`,
     {
       requestId,
       endpoint,
-      status: lastHttpStatus ?? (lastError instanceof BackendGatewayError ? lastError.status : undefined),
+      status: resolvedStatus,
       errorName: rawErrInfo.errorName,
       errorMessage: rawErrInfo.errorMessage,
       cleanMessage: errorMessage,
