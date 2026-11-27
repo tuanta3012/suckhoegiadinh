@@ -16,6 +16,7 @@ vi.mock('@capacitor/app', () => ({
 }));
 
 import {
+  buildBatchCompleteNotificationContent,
   buildBatchProgressNotificationContent,
   buildFollowUpNotificationPlan,
 } from './backgroundNotificationService';
@@ -103,3 +104,50 @@ describe('buildFollowUpNotificationPlan', () => {
     expect(new Set(plan.map(({ id }) => id)).size).toBe(4);
   });
 });
+
+describe('buildBatchCompleteNotificationContent', () => {
+  it('formats notification body with target member name when provided', () => {
+    const content = buildBatchCompleteNotificationContent({
+      total: 1,
+      memberName: 'Vũ Thị Tú Anh',
+    });
+    expect(content).toEqual({
+      title: 'Đã xử lý 1 tài liệu',
+      body: 'Đã lưu vào hồ sơ Vũ Thị Tú Anh.',
+    });
+  });
+
+  it('formats notification body with multiple member names', () => {
+    const content = buildBatchCompleteNotificationContent({
+      total: 2,
+      memberName: 'Vũ Thị Tú Anh & Trương Anh Tuấn',
+    });
+    expect(content).toEqual({
+      title: 'Đã xử lý 2 tài liệu',
+      body: 'Đã lưu vào hồ sơ Vũ Thị Tú Anh & Trương Anh Tuấn.',
+    });
+  });
+
+  it('formats generic body without member name when not provided', () => {
+    const content = buildBatchCompleteNotificationContent({
+      total: 3,
+    });
+    expect(content).toEqual({
+      title: 'Đã xử lý 3 tài liệu',
+      body: 'Đã lưu vào hồ sơ.',
+    });
+  });
+
+  it('formats failure notice when some files failed', () => {
+    const content = buildBatchCompleteNotificationContent({
+      total: 3,
+      failedCount: 1,
+      memberName: 'Vũ Thị Tú Anh',
+    });
+    expect(content).toEqual({
+      title: 'Đã xử lý 2/3 tài liệu',
+      body: '1 tài liệu cần thử lại.',
+    });
+  });
+});
+

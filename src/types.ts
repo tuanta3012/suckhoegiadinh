@@ -153,6 +153,43 @@ export interface HealthSummary {
   bloodType?: string;
   nextFollowUp?: string;
   narrative?: string;
+  menstrualCycleSummary?: MenstrualCycleSummary;
+}
+
+export type MenstrualFlowLevel = 'light' | 'medium' | 'heavy' | 'spotting';
+
+export interface MenstrualCycleEntry {
+  id: string;
+  startDate: string; // YYYY-MM-DD
+  endDate?: string; // YYYY-MM-DD (optional if ongoing)
+  flowLevel?: MenstrualFlowLevel;
+  symptoms?: string[];
+  notes?: string;
+  source?: 'logged' | 'confirmed';
+  updatedAt: string;
+}
+
+export interface MenstrualCycleSettings {
+  defaultCycleLength?: number; // e.g. 28
+  defaultPeriodLength?: number; // e.g. 5
+  remindBeforeDays?: number; // e.g. 2
+  reminderEnabled?: boolean;
+}
+
+export interface MenstrualCycleSummary {
+  lastPeriodStart?: string;
+  currentCycleDay?: number;
+  averageCycleLength: number;
+  averagePeriodLength: number;
+  nextPredictedPeriod?: string;
+  daysUntilNextPeriod?: number; // negative if overdue
+  fertileWindowStart?: string;
+  fertileWindowEnd?: string;
+  predictedOvulationDate?: string;
+  regularityStatus: 'regular' | 'irregular' | 'insufficient_data';
+  recentCycleCount: number;
+  hasMenorrhagia?: boolean; // rong kinh hoặc kinh nhiều kéo dài
+  notes?: string;
 }
 
 export interface MedicalHistory {
@@ -236,7 +273,12 @@ export interface HealthProfile {
   sources: HealthSource[];
   deletedEvents?: HealthDeletionTombstone[];
   deletedSources?: HealthDeletionTombstone[];
+  deletedCycles?: HealthDeletionTombstone[];
   summary: HealthSummary;
+  cycles?: MenstrualCycleEntry[];
+  cyclesUpdatedAt?: string;
+  cycleSettings?: MenstrualCycleSettings;
+  cycleSettingsUpdatedAt?: string;
   aiDeepAnalysis?: AiDeepAnalysisResult;
   aiAnalysis?: AiAnalysisBlock;
   aiAnalysisInvalidatedAt?: string;

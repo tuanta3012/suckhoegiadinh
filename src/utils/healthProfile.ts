@@ -19,6 +19,7 @@ import {
   cleanHospitalizationRecord,
   HEALTH_EVENT_TYPES,
 } from './healthEventType';
+import { buildCycleSummaryForAi, mergeCycleEntries } from './menstrualCycleService';
 
 const EVENT_TYPES = new Set<HealthEvent['type']>(HEALTH_EVENT_TYPES);
 
@@ -227,6 +228,9 @@ export function mergeHealthProfiles(
   );
   const deletedSourceMap = new Map(
     upsertDeletionTombstones(current.deletedSources, incoming.deletedSources).map((item) => [item.id, item]),
+  );
+  const deletedCycleMap = new Map(
+    upsertDeletionTombstones(current.deletedCycles, incoming.deletedCycles).map((item) => [item.id, item]),
   );
 
   const events = new Map<string, HealthEvent>();
@@ -441,6 +445,46 @@ export function mergeHealthProfiles(
     nextMedicalHistoryUpdatedAt = currentMedHistoryTs;
   }
 
+  const mergedCycles = mergeCycleEntries(
+    current.cycles,
+    incoming.cycles,
+    [...deletedCycleMap.values()],
+  );
+  for (const cycle of mergedCycles) {
+    const tombstone = deletedCycleMap.get(cycle.id);
+    if (tombstone && isTimestampStrictlyAfter(cycle.updatedAt, tombstone.deletedAt)) {
+      deletedCycleMap.delete(cycle.id);
+    }
+  }
+  const mergedDeletedCycles = upsertDeletionTombstones([...deletedCycleMap.values()]);
+
+  const currentCycleSettingsTs = current.cycleSettings
+    ? current.cycleSettingsUpdatedAt || current.updatedAt
+    : undefined;
+  const incomingCycleSettingsTs = incoming.cycleSettings
+    ? incoming.cycleSettingsUpdatedAt || incoming.updatedAt
+    : undefined;
+  let nextCycleSettings = incoming.cycleSettings || current.cycleSettings;
+  let nextCycleSettingsUpdatedAt = incoming.cycleSettingsUpdatedAt || current.cycleSettingsUpdatedAt;
+  if (current.cycleSettings && incoming.cycleSettings) {
+    if (isTimestampStrictlyAfter(currentCycleSettingsTs, incomingCycleSettingsTs)) {
+      nextCycleSettings = current.cycleSettings;
+      nextCycleSettingsUpdatedAt = currentCycleSettingsTs;
+    } else {
+      nextCycleSettings = incoming.cycleSettings;
+      nextCycleSettingsUpdatedAt = incomingCycleSettingsTs;
+    }
+  } else if (incoming.cycleSettings) {
+    nextCycleSettings = incoming.cycleSettings;
+    nextCycleSettingsUpdatedAt = incomingCycleSettingsTs;
+  } else if (current.cycleSettings) {
+    nextCycleSettings = current.cycleSettings;
+    nextCycleSettingsUpdatedAt = currentCycleSettingsTs;
+  }
+
+  const cycleSummary = mergedCycles.length > 0 ? buildCycleSummaryForAi(mergedCycles, nextCycleSettings) : undefined;
+  const baseSummary = summarizeTimeline(timeline, incoming.summary.narrative || current.summary.narrative);
+
   return {
     schemaVersion: 2,
     member: incoming.member || current.member,
@@ -449,7 +493,14 @@ export function mergeHealthProfiles(
     sources: mergedSources,
     ...(mergedDeletedEvents.length > 0 ? { deletedEvents: mergedDeletedEvents } : {}),
     ...(mergedDeletedSources.length > 0 ? { deletedSources: mergedDeletedSources } : {}),
-    summary: summarizeTimeline(timeline, incoming.summary.narrative || current.summary.narrative),
+    ...(mergedDeletedCycles.length > 0 ? { deletedCycles: mergedDeletedCycles } : {}),
+    summary: {
+      ...baseSummary,
+      ...(cycleSummary ? { menstrualCycleSummary: cycleSummary } : {}),
+    },
+    ...(mergedCycles.length > 0 ? { cycles: mergedCycles } : {}),
+    ...(nextCycleSettings ? { cycleSettings: nextCycleSettings } : {}),
+    ...(nextCycleSettingsUpdatedAt ? { cycleSettingsUpdatedAt: nextCycleSettingsUpdatedAt } : {}),
     aiAnalysis: nextAiAnalysis,
     aiDeepAnalysis: nextAiDeepAnalysis,
     ...(nextInvalidatedAt ? { aiAnalysisInvalidatedAt: nextInvalidatedAt } : {}),
@@ -1078,6 +1129,15 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
   const deletedSources = upsertDeletionTombstones(
     Array.isArray(data.deletedSources) ? data.deletedSources : undefined,
   );
+  const deletedCycles = upsertDeletionTombstones(
+    Array.isArray(data.deletedCycles) ? data.deletedCycles : undefined,
+  );
+
+  const rawCycles = Array.isArray(data.cycles)
+    ? mergeCycleEntries([], data.cycles, deletedCycles)
+    : undefined;
+  const cycleSettings = data.cycleSettings && typeof data.cycleSettings === 'object' ? data.cycleSettings : undefined;
+  const cycleSummary = rawCycles && rawCycles.length > 0 ? buildCycleSummaryForAi(rawCycles, cycleSettings) : undefined;
 
   const normalized: HealthProfile = {
     schemaVersion: 2,
@@ -1087,7 +1147,13 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
     sources,
     ...(deletedEvents.length > 0 ? { deletedEvents } : {}),
     ...(deletedSources.length > 0 ? { deletedSources } : {}),
+    ...(deletedCycles.length > 0 ? { deletedCycles } : {}),
     summary: data.summary || { latestDiagnoses: [], latestMetrics: {} },
+    ...(rawCycles && rawCycles.length > 0 ? { cycles: rawCycles } : {}),
+    ...(cycleSettings ? { cycleSettings } : {}),
+    ...(typeof data.cycleSettingsUpdatedAt === 'string'
+      ? { cycleSettingsUpdatedAt: data.cycleSettingsUpdatedAt }
+      : {}),
     aiAnalysis: data.aiAnalysis,
     aiDeepAnalysis: data.aiDeepAnalysis,
     ...(typeof data.aiAnalysisInvalidatedAt === 'string'
@@ -1102,7 +1168,10 @@ export function parseHealthProfile(value: unknown, member: FamilyMember): Health
   };
   return {
     ...normalized,
-    summary: summarizeTimeline(normalized.timeline, normalized.summary?.narrative),
+    summary: {
+      ...summarizeTimeline(normalized.timeline, normalized.summary?.narrative),
+      ...(cycleSummary ? { menstrualCycleSummary: cycleSummary } : {}),
+    },
   };
 }
 

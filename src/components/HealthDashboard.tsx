@@ -31,6 +31,7 @@ import {
   Pill,
   Plus,
   RefreshCw,
+  Search,
   Send,
   ShieldAlert,
   ShieldCheck,
@@ -65,12 +66,17 @@ import { TimelineEventEditModal } from './TimelineEventEditModal';
 import { MultiPageCaptureModal } from './MultiPageCaptureModal';
 import { UnresolvedSubjectModal } from './UnresolvedSubjectModal';
 const HealthMetricsChart = lazy(() => import('./HealthMetricsChart'));
+import { MenstrualCycleCard } from './MenstrualCycleCard';
+import { buildCycleSummaryForAi, sortCyclesDesc } from '../utils/menstrualCycleService';
 import type {
   FamilyMember,
   HealthEvent,
   HealthProfile,
   HealthSource,
+  HealthSummary,
   JsonValue,
+  MenstrualCycleEntry,
+  MenstrualCycleSettings,
 } from '../types';
 import {
   addDriveFamilyMember,
@@ -206,7 +212,9 @@ import { compressImageIfNeeded } from '../utils/imageCompressor';
 import { compressPdfIfNeeded } from '../utils/pdfCompressor';
 import { auth } from '../utils/googleDriveService';
 import { formatDateVN, normalizeVietnameseProperName } from '../utils/formatters';
+import { doesMetricMatchTimelineKeyword, filterTimelineEvents } from '../utils/healthTimelineFilter';
 import { DatePickerVN } from './DatePickerVN';
+import { HighlightedKeywordText } from './HighlightedKeywordText';
 import {
   findDuplicateFamilyMemberPairs,
   findMemberByOcrPatientName,
@@ -222,6 +230,7 @@ import {
   updateBatchNotificationComplete,
   requestNotificationPermission,
   scheduleFollowUpNotifications,
+  scheduleMenstrualNotification,
 } from '../utils/backgroundNotificationService';
 import {
   formatFollowUpConditions,
@@ -802,6 +811,7 @@ export function HealthDashboard({
   const chatRequestIdRef = useRef(0);
   const [selectedMetric, setSelectedMetric] = useState('');
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
+  const [timelineKeyword, setTimelineKeyword] = useState<string>('');
   const [expandedMetricEventIds, setExpandedMetricEventIds] = useState<Record<string, boolean>>({});
   const [selectedAbnormalMetricByEvent, setSelectedAbnormalMetricByEvent] = useState<Record<string, number | null>>({});
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -1073,6 +1083,9 @@ export function HealthDashboard({
   const queueErrorAdvanceTimerRef = useRef<number | null>(null);
   const activeUploadOpRef = useRef<string | null>(null);
   const isUploadingRef = useRef(false);
+  const cycleSaveSeqRef = useRef<Record<string, number>>({});
+  const cycleSaveQueueRef = useRef<Record<string, Promise<void>>>({});
+  const cycleCalendarSyncTimerRef = useRef<number | null>(null);
   const [queueElapsedSeconds, setQueueElapsedSeconds] = useState(0);
   const queueStartedAtRef = useRef<number | null>(null);
   const updateQueueStatus = useCallback((next: { current: number; total: number } | null) => {
@@ -1589,7 +1602,10 @@ export function HealthDashboard({
         { index: nextCurrent, total: currentStatus.total, fileName: nextFile.name, size: nextFile.size }
       );
       showToast(`Hàng đợi tải lên: Đang xử lý tệp ${nextCurrent}/${currentStatus.total} (${nextFile.name})...`, 'info');
-      notifyBatchProgress(nextFile.name, selectedMember?.name, 'Chuẩn bị');
+      const nextTargetMemberName = pickedMemberIdForBatchRef.current
+        ? (workspaceRef.current?.family.members || members).find((m) => m.id === pickedMemberIdForBatchRef.current)?.name
+        : undefined;
+      notifyBatchProgress(nextFile.name, nextTargetMemberName, 'Chuẩn bị');
       void beginDigitization(nextFile, {
         memberId: batchStagingMemberIdRef.current,
         pendingUploadId,
@@ -1625,9 +1641,28 @@ export function HealthDashboard({
           : `Đã nhập dữ liệu xong ${finalTotal} tệp vào hồ sơ! Bấm nút "AI Y khoa Chuyên sâu" để cập nhật tổng kết.`,
         failedCount > 0 ? 'info' : 'success',
       );
+      const allMembers = workspaceRef.current?.family.members || members;
+      const updatedMembers = updatedMemberIds
+        .map((id) => allMembers.find((m) => m.id === id))
+        .filter((m): m is FamilyMember => Boolean(m));
+
+      let notificationMemberName: string | undefined;
+      if (updatedMembers.length === 1) {
+        notificationMemberName = updatedMembers[0].name;
+      } else if (updatedMembers.length === 2) {
+        notificationMemberName = `${updatedMembers[0].name} & ${updatedMembers[1].name}`;
+      } else if (updatedMembers.length > 2) {
+        notificationMemberName = `${updatedMembers.length} thành viên`;
+      } else {
+        const fallbackTargetId = pickedMemberIdForBatchRef.current || selectedMemberIdRef.current;
+        notificationMemberName = fallbackTargetId
+          ? allMembers.find((m) => m.id === fallbackTargetId)?.name
+          : undefined;
+      }
+
       void updateBatchNotificationComplete({
         total: finalTotal,
-        memberName: selectedMember?.name,
+        memberName: notificationMemberName,
         failedCount,
       });
       batchFailureCountRef.current = 0;
@@ -1817,10 +1852,11 @@ export function HealthDashboard({
     queueStartedAtRef.current = Date.now();
     setQueueElapsedSeconds(0);
     updateQueueStatus(initialStatus);
+    const isAutoDetect = !memberId;
     showToast(
       files.length === 1
-        ? `Đang xử lý tài liệu cho ${targetMember.name}...`
-        : `Đã xếp ${files.length} tệp; bắt đầu xử lý theo thứ tự.`,
+        ? (!isAutoDetect ? `Đang xử lý tài liệu cho ${targetMember.name}...` : 'Đang tự động nhận diện và xử lý tài liệu...')
+        : (!isAutoDetect ? `Đã xếp ${files.length} tệp cho ${targetMember.name}; bắt đầu xử lý theo thứ tự.` : `Đã xếp ${files.length} tệp; bắt đầu tự động nhận diện và xử lý...`),
       'info',
     );
     void requestNotificationPermission();
@@ -1828,7 +1864,7 @@ export function HealthDashboard({
       current: 1,
       total: files.length,
       fileName: files[0].name,
-      memberName: targetMember.name,
+      memberName: !isAutoDetect ? targetMember.name : undefined,
       phase: 'Chuẩn bị',
     });
     startQueueOcrPrefetch(
@@ -2649,19 +2685,27 @@ export function HealthDashboard({
     if (!selectedProfile?.timeline || !selectedMetric) return [];
     return buildHealthMetricChartData(selectedProfile.timeline, selectedMetric);
   }, [selectedProfile, selectedMetric]);
-  // Filtered timeline
-  const filteredTimeline = useMemo(() => {
-    if (!selectedProfile?.timeline) return [];
-    const list = selectedProfile.timeline
+  // Filtered timeline (smart keyword + event type)
+  const { keywordMatchedTimeline, filteredTimeline } = useMemo(() => {
+    if (!selectedProfile?.timeline) {
+      return { keywordMatchedTimeline: [] as HealthEvent[], filteredTimeline: [] as HealthEvent[] };
+    }
+    const sorted = selectedProfile.timeline
       .map(cleanAndDeduplicateEventData)
       .sort(
         (a, b) =>
           new Date(b.date || b.recordedAt).getTime() -
           new Date(a.date || a.recordedAt).getTime(),
       );
-    if (timelineFilter === 'all') return list;
-    return list.filter((event) => event.type === timelineFilter);
-  }, [selectedProfile, timelineFilter]);
+    const typeLabelMap = Object.fromEntries(EVENT_TYPE_OPTIONS.map((opt) => [opt.value, opt.label]));
+    const { keywordMatched, filtered } = filterTimelineEvents(sorted, {
+      typeFilter: timelineFilter,
+      keyword: timelineKeyword,
+      memberGender: selectedMember?.gender,
+      typeLabelMap,
+    });
+    return { keywordMatchedTimeline: keywordMatched, filteredTimeline: filtered };
+  }, [selectedProfile, timelineFilter, timelineKeyword, selectedMember?.gender]);
   // Follow-up reminders belong to the member profile linked to the signed-in account.
   const upcomingFollowUps = useMemo(
     () => getFollowUpRemindersForSignedInMember(members, profiles, userEmail),
@@ -5262,19 +5306,19 @@ export function HealthDashboard({
           ? effectiveSignal.reason
           : new Error('Người dùng đã dừng tác vụ OCR.');
       }
+      const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
       const reportProgress = (update: ExtractionProgressUpdate) => {
         if (effectiveSignal?.aborted) return;
         applyExtractionProgress(update);
         latestProgress = update.progressPercent;
         notifyBatchProgress(
           file.name,
-          member.name,
+          isAutoDetect ? undefined : member.name,
           EXTRACTION_NOTIFICATION_PHASES[update.stage],
           update.progressPercent,
         );
         if (driveFileId) persistOcrRecoveryJob(driveFileId, 'processing', latestProgress, file.name);
       };
-      const isAutoDetect = pickedMemberIdForBatchRef.current === undefined;
       const result = preExtractedResult || (prefetchedResultPromise
         ? await prefetchedResultPromise
         : await extractHealthEventWithProgress(file, member, reportProgress, {
@@ -5366,6 +5410,7 @@ export function HealthDashboard({
       setSelectedMemberId(targetMember.id);
       selectedMemberIdRef.current = targetMember.id;
       setTrackerState((previous) => ({ ...previous, memberId: targetMember.id }));
+      notifyBatchProgress(file.name, targetMember.name, 'Đang lưu kết quả');
       const saved = await saveExtractedDocumentAutomatically(draft, targetMember, true);
       if (!saved) {
         batchFailureCountRef.current += 1;
@@ -7127,7 +7172,7 @@ export function HealthDashboard({
           `Đã hợp nhất dữ liệu vào hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
-        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
+        if (effectiveMember?.id) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }
@@ -7193,7 +7238,7 @@ export function HealthDashboard({
           `Đã cập nhật ghi đè hồ sơ "${existingMatch.title}" của ${effectiveMember.name}.`,
           'success'
         );
-        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
+        if (effectiveMember?.id) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }
@@ -7240,7 +7285,7 @@ export function HealthDashboard({
           saveMs
         );
         showToast(`Đã lưu hồ sơ sức khỏe cho ${effectiveMember.name} lên Google Drive.`, 'success');
-        if (draft.queueContext) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
+        if (effectiveMember?.id) updatedQueueMemberIdsRef.current.add(effectiveMember.id);
         if (!queueStatusRef.current || queueStatusRef.current.total <= 1) {
           setActiveTab('timeline');
         }
@@ -7497,6 +7542,110 @@ export function HealthDashboard({
       setIsRefining(false);
     }
   }
+
+  async function handleSaveCycles(
+    memberId: string,
+    nextCycles: MenstrualCycleEntry[],
+    nextSettings?: MenstrualCycleSettings,
+  ) {
+    const member = members.find((m) => m.id === memberId);
+    const profile = profilesRef.current[memberId] || profiles[memberId];
+    if (!member || !profile) return;
+
+    const now = new Date().toISOString();
+    const sortedNextCycles = sortCyclesDesc(nextCycles);
+    const prevCycles = profile.cycles || [];
+    const nextCycleIds = new Set(sortedNextCycles.map((c) => c.id));
+    const removedTombstones = prevCycles
+      .filter((c) => c?.id && !nextCycleIds.has(c.id))
+      .map((c) => ({ id: c.id, deletedAt: now }));
+    const nextDeletedCycles = upsertDeletionTombstones(profile.deletedCycles, removedTombstones);
+
+    const effectiveSettings = nextSettings ?? profile.cycleSettings;
+    const cycleSummary =
+      sortedNextCycles.length > 0
+        ? buildCycleSummaryForAi(sortedNextCycles, effectiveSettings)
+        : undefined;
+
+    const { menstrualCycleSummary: _discardedCycleSummary, ...restSummary } = profile.summary;
+    const nextSummary: HealthSummary = {
+      ...restSummary,
+      ...(cycleSummary ? { menstrualCycleSummary: cycleSummary } : {}),
+    };
+
+    const { deletedCycles: _oldDeletedCycles, ...profileWithoutDeletedCycles } = profile;
+    const updatedProfile: HealthProfile = {
+      ...profileWithoutDeletedCycles,
+      cycles: sortedNextCycles,
+      ...(nextDeletedCycles.length > 0 ? { deletedCycles: nextDeletedCycles } : {}),
+      ...(nextSettings ? { cycleSettings: nextSettings, cycleSettingsUpdatedAt: now } : {}),
+      summary: nextSummary,
+      updatedAt: now,
+    };
+
+    // Apply optimistic update immediately so UI has zero network lag
+    const nextSeq = (cycleSaveSeqRef.current[memberId] || 0) + 1;
+    cycleSaveSeqRef.current[memberId] = nextSeq;
+    const optimisticProfiles = { ...profilesRef.current, [member.id]: updatedProfile };
+    profilesRef.current = optimisticProfiles;
+    setProfiles(optimisticProfiles);
+
+    if (Capacitor.isNativePlatform()) {
+      void scheduleMenstrualNotification({
+        memberId: member.id,
+        memberName: member.name,
+        predictedDate: cycleSummary?.nextPredictedPeriod,
+        remindBeforeDays: effectiveSettings?.remindBeforeDays ?? 2,
+        enabled: effectiveSettings?.reminderEnabled ?? true,
+      });
+    }
+
+    const wasDeletion = removedTombstones.length > 0 && sortedNextCycles.length < prevCycles.length;
+    const isSettingsOnly = Boolean(nextSettings) && removedTombstones.length === 0 && sortedNextCycles.length === prevCycles.length;
+    if (wasDeletion) {
+      showToast('Đã xóa kỳ kinh.', 'success');
+    } else if (isSettingsOnly) {
+      showToast('Đã lưu cấu hình chu kỳ.', 'success');
+    } else {
+      showToast('Đã cập nhật chu kỳ.', 'success');
+    }
+
+    // Serialize remote Drive persistence per member in the background
+    const previousSave = cycleSaveQueueRef.current[memberId] || Promise.resolve();
+    const persistTask = previousSave
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const saved = await saveHealthProfile(member.profileFileId, updatedProfile);
+          if (cycleSaveSeqRef.current[memberId] === nextSeq) {
+            const latestProfiles = { ...profilesRef.current, [member.id]: saved };
+            profilesRef.current = latestProfiles;
+            setProfiles(latestProfiles);
+          }
+
+          if (driveAuthorized && navigator.onLine) {
+            if (cycleCalendarSyncTimerRef.current !== null) {
+              window.clearTimeout(cycleCalendarSyncTimerRef.current);
+            }
+            cycleCalendarSyncTimerRef.current = window.setTimeout(() => {
+              cycleCalendarSyncTimerRef.current = null;
+              void triggerAutoCalendarSync(members, profilesRef.current);
+            }, 900);
+          }
+        } catch (error) {
+          console.error('[MenstrualCycle] Lỗi lưu chu kỳ:', error);
+          if (cycleSaveSeqRef.current[memberId] === nextSeq) {
+            const rollbackProfiles = { ...profilesRef.current, [member.id]: profile };
+            profilesRef.current = rollbackProfiles;
+            setProfiles(rollbackProfiles);
+          }
+          showToast(error instanceof Error ? error.message : 'Lỗi đồng bộ chu kỳ lên Drive.', 'error');
+        }
+      });
+    cycleSaveQueueRef.current[memberId] = persistTask;
+    await persistTask;
+  }
+
   const handleRootTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     if (event.touches.length !== 1) {
       swipeTouchStartRef.current = null;
@@ -8314,6 +8463,18 @@ export function HealthDashboard({
                         </div>
                       );
                     })()}
+                    {/* Menstrual Cycle Card for female members */}
+                    {selectedMember?.gender === 'female' && (
+                      <MenstrualCycleCard
+                        member={selectedMember}
+                        cycles={selectedProfile.cycles}
+                        settings={selectedProfile.cycleSettings}
+                        onSaveCycles={(nextCycles, nextSettings) => {
+                          void handleSaveCycles(selectedMember.id, nextCycles, nextSettings);
+                        }}
+                        onOpenCalendarSync={driveAuthorized ? () => setShowGoogleCalendarSyncModal(true) : undefined}
+                      />
+                    )}
                   </div>
                 )}
                 {/* Compact Family Members List */}
@@ -8398,20 +8559,20 @@ export function HealthDashboard({
             )}
             {/* VIEW 2: HỒ SƠ Y TẾ (TIMELINE & VITALS) */}
             {activeTab === 'timeline' && (
-              <div className={`space-y-6 ${tabSlideClass}`}>
-                {/* Active Member Bar & Action CTAs */}
+              <div className={`space-y-3 ${tabSlideClass}`}>
+                {/* Active Member Bar & Action CTAs (Compact) */}
                 {selectedProfile && selectedProfile.timeline.length > 0 && (
-                  <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-lg shrink-0">
+                  <div className="bg-white px-3 py-2 sm:px-3.5 sm:py-2 rounded-2xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-sm shrink-0">
                         {selectedMember?.name.charAt(0) || 'U'}
                       </div>
-                      <div className="min-w-0">
-                        <h3 className="font-extrabold text-slate-900 text-sm truncate">
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-extrabold text-slate-900 text-[13px] leading-tight truncate">
                           {selectedMember?.name}
                         </h3>
-                        {selectedMember && (
-                          <p className="text-[11px] text-slate-500 truncate">
+                        {selectedMember && (selectedMember.gender || selectedMember.birthDate) && (
+                          <p className="text-[11px] text-slate-500 leading-tight truncate mt-0.5">
                             {[
                               selectedMember.gender === 'male' ? 'Nam' : selectedMember.gender === 'female' ? 'Nữ' : selectedMember.gender === 'other' ? 'Khác' : '',
                               selectedMember.birthDate ? `Sinh ${formatDateVN(selectedMember.birthDate)}` : '',
@@ -8420,76 +8581,125 @@ export function HealthDashboard({
                         )}
                       </div>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
                         onClick={handleFileUploadTrigger}
                         disabled={(!driveAuthorized && !canUseLocalWorkspace) || isUploading}
-                        className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-xs active:scale-[0.98]"
+                        className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-all disabled:opacity-50 shadow-2xs active:scale-[0.98]"
                       >
-                        <FileUp className="w-4 h-4" />
+                        <FileUp className="w-3.5 h-3.5" />
                         <span>Tải tài liệu</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => setShowRawFilesModal(true)}
                         disabled={!driveAuthorized && !canUseLocalWorkspace}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-teal-200 bg-teal-50/80 hover:bg-teal-100 text-teal-900 font-bold text-xs transition-all disabled:opacity-50 shrink-0"
+                        className="inline-flex items-center justify-center gap-1.5 h-8 px-2.5 rounded-xl border border-teal-200 bg-teal-50/80 hover:bg-teal-100 text-teal-900 font-bold text-xs transition-all disabled:opacity-50 shrink-0"
                         title="Quản lý tài liệu gốc và trạng thái số hóa"
                       >
-                        <FileStack className="w-4 h-4 text-teal-600" />
+                        <FileStack className="w-3.5 h-3.5 text-teal-600" />
                         <span>Tài liệu gốc</span>
                       </button>
                     </div>
                   </div>
                 )}
-                {/* Timeline Filter Tabs */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                  <button
-                    type="button"
-                    onClick={() => setTimelineFilter('all')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
-                      timelineFilter === 'all'
-                        ? 'bg-slate-900 text-white shadow-xs'
-                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    Tất cả ({selectedProfile?.timeline.length || 0})
-                  </button>
-                  {EVENT_TYPE_OPTIONS.map((opt) => {
-                    const count =
-                      selectedProfile?.timeline.filter((e) => e.type === opt.value).length || 0;
-                    if (count === 0 && timelineFilter !== opt.value) return null;
-                    return (
+                {/* Timeline Filter Bar: Smart Keyword Input + Event Type Chips */}
+                <div className="flex items-center gap-1.5 w-full">
+                  <div className="relative w-28 sm:w-40 shrink-0">
+                    <Search className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      inputMode="search"
+                      enterKeyHint="search"
+                      value={timelineKeyword}
+                      onChange={(e) => setTimelineKeyword(e.target.value)}
+                      placeholder="Search"
+                      aria-label="Search sự kiện hồ sơ"
+                      className="w-full h-8 pl-7 pr-6 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/15 transition-all"
+                    />
+                    {timelineKeyword && (
                       <button
-                        key={opt.value}
                         type="button"
-                        onClick={() => setTimelineFilter(opt.value)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
-                          timelineFilter === opt.value
-                            ? 'bg-slate-900 text-white shadow-xs'
-                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
+                        onClick={() => setTimelineKeyword('')}
+                        aria-label="Xóa từ khóa lọc"
+                        className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors"
                       >
-                        {opt.label} ({count})
+                        <X className="w-3 h-3" />
                       </button>
-                    );
-                  })}
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1 min-w-0 py-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setTimelineFilter('all')}
+                      className={`h-8 px-3 rounded-xl text-xs font-bold whitespace-nowrap transition-all shrink-0 inline-flex items-center ${
+                        timelineFilter === 'all'
+                          ? 'bg-slate-900 text-white shadow-xs'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      Tất cả ({keywordMatchedTimeline.length})
+                    </button>
+                    {EVENT_TYPE_OPTIONS.map((opt) => {
+                      const count = keywordMatchedTimeline.filter((e) => e.type === opt.value).length;
+                      if (count === 0 && timelineFilter !== opt.value) return null;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setTimelineFilter(opt.value)}
+                          className={`h-8 px-3 rounded-xl text-xs font-bold whitespace-nowrap transition-all shrink-0 inline-flex items-center ${
+                            timelineFilter === opt.value
+                              ? 'bg-slate-900 text-white shadow-xs'
+                              : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          {opt.label} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 {/* Health Events List */}
                 <div className="space-y-4">
                   {filteredTimeline.length === 0 ? (
-                    <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center">
-                      <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3 border border-emerald-100 shadow-2xs">
-                        <FolderHeart className="w-7 h-7" />
+                    (selectedProfile?.timeline.length || 0) > 0 && (timelineKeyword.trim() || timelineFilter !== 'all') ? (
+                      <div className="rounded-2xl border border-slate-200 bg-white p-6 text-center space-y-2.5">
+                        <div className="w-11 h-11 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                          <Search className="w-5 h-5" />
+                        </div>
+                        <h4 className="font-extrabold text-slate-800 text-sm">
+                          Không tìm thấy sự kiện phù hợp
+                        </h4>
+                        <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                          Thử đổi từ khóa khác (ví dụ: tên bệnh, thuốc, chỉ số, ngày khám, bệnh viện hoặc "bất thường").
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTimelineKeyword('');
+                            setTimelineFilter('all');
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold transition-colors"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>Xóa bộ lọc</span>
+                        </button>
                       </div>
-                      <h4 className="font-extrabold text-slate-800 text-base">
-                        Chưa có sự kiện y tế
-                      </h4>
-                      <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                        Tải ảnh hoặc PDF sổ khám, đơn thuốc, xét nghiệm để số hóa.
-                      </p>
-                    </div>
+                    ) : (
+                      <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3 border border-emerald-100 shadow-2xs">
+                          <FolderHeart className="w-7 h-7" />
+                        </div>
+                        <h4 className="font-extrabold text-slate-800 text-base">
+                          Chưa có sự kiện y tế
+                        </h4>
+                        <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                          Tải ảnh hoặc PDF sổ khám, đơn thuốc, xét nghiệm để số hóa.
+                        </p>
+                      </div>
+                    )
                   ) : (
                     filteredTimeline.map((event) => {
                       const opt =
@@ -8510,16 +8720,16 @@ export function HealthDashboard({
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                                   <span className="text-xs font-extrabold text-emerald-800 leading-tight">
-                                    {opt.label}
+                                    <HighlightedKeywordText text={opt.label} keyword={timelineKeyword} />
                                   </span>
                                   {event.customCategory && (
                                     <span className="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium text-[10px] border border-slate-200 truncate max-w-[140px]">
-                                      {event.customCategory}
+                                      <HighlightedKeywordText text={event.customCategory} keyword={timelineKeyword} />
                                     </span>
                                   )}
                                 </div>
                                 <div className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5 leading-tight">
-                                  {formatDateVN(event.date) || 'Chưa rõ ngày'}
+                                  <HighlightedKeywordText text={formatDateVN(event.date) || 'Chưa rõ ngày'} keyword={timelineKeyword} />
                                 </div>
                               </div>
                             </div>
@@ -8658,23 +8868,30 @@ export function HealthDashboard({
                           {/* Event Title & Metadata Block (Full Width Edge-to-Edge) */}
                           <div className="w-full space-y-2">
                             <h4 className="text-base font-extrabold text-slate-900 leading-snug break-words w-full">
-                              {event.title}
+                              <HighlightedKeywordText text={event.title} keyword={timelineKeyword} />
                             </h4>
                             {(event.facility || event.doctorName) && (
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-x-4 gap-y-1.5 pt-1 text-xs text-slate-600 w-full">
                                 {event.facility && (
                                   <p className="flex items-start gap-1.5 font-medium text-slate-700 min-w-0">
                                     <Stethoscope className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                                    <span className="break-words">{event.facility}</span>
+                                    <span className="break-words">
+                                      <HighlightedKeywordText text={event.facility} keyword={timelineKeyword} />
+                                    </span>
                                   </p>
                                 )}
                                 {event.doctorName && (
                                   <p className="flex items-start gap-1.5 font-medium text-slate-700 min-w-0 sm:text-right shrink-0">
                                     <User className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
                                     <span className="break-words">
-                                      {event.doctorName.toLowerCase().startsWith('bs') || event.doctorName.toLowerCase().startsWith('bác sĩ')
-                                        ? event.doctorName
-                                        : `BS. ${event.doctorName}`}
+                                      <HighlightedKeywordText
+                                        text={
+                                          event.doctorName.toLowerCase().startsWith('bs') || event.doctorName.toLowerCase().startsWith('bác sĩ')
+                                            ? event.doctorName
+                                            : `BS. ${event.doctorName}`
+                                        }
+                                        keyword={timelineKeyword}
+                                      />
                                     </span>
                                   </p>
                                 )}
@@ -8685,7 +8902,9 @@ export function HealthDashboard({
                           {event.diagnoses.length > 0 && (
                             <div className="text-xs bg-slate-50 rounded-xl p-2.5 border border-slate-100">
                               <span className="font-bold text-slate-700">Chẩn đoán: </span>
-                              <span className="text-slate-800">{event.diagnoses.join('; ')}</span>
+                              <span className="text-slate-800">
+                                <HighlightedKeywordText text={event.diagnoses.join('; ')} keyword={timelineKeyword} />
+                              </span>
                             </div>
                           )}
                           {/* Medications table/list */}
@@ -8701,26 +8920,31 @@ export function HealthDashboard({
                                     className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 text-xs space-y-1"
                                   >
                                     <div className="flex items-center justify-between font-bold text-slate-900">
-                                      <span>💊 {med.name}</span>
+                                      <span>
+                                        💊 <HighlightedKeywordText text={med.name} keyword={timelineKeyword} />
+                                      </span>
                                       {med.quantity && (
                                         <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md">
-                                          SL: {med.quantity}
+                                          SL: <HighlightedKeywordText text={med.quantity} keyword={timelineKeyword} />
                                         </span>
                                       )}
                                     </div>
                                     <div className="text-slate-600 text-[11px] flex flex-wrap gap-x-2 gap-y-0.5">
-                                      {[med.dosage, med.frequency, med.duration]
-                                        .filter(Boolean)
-                                        .join(' · ')}
+                                      <HighlightedKeywordText
+                                        text={[med.dosage, med.frequency, med.duration]
+                                          .filter(Boolean)
+                                          .join(' · ')}
+                                        keyword={timelineKeyword}
+                                      />
                                     </div>
                                     {med.timing && (
                                       <div className="text-[11px] text-slate-500">
-                                        ⏰ {med.timing}
+                                        ⏰ <HighlightedKeywordText text={med.timing} keyword={timelineKeyword} />
                                       </div>
                                     )}
                                     {med.instructions && (
                                       <div className="text-[11px] text-amber-900/90 bg-amber-50/70 p-1 rounded-md border border-amber-100/80">
-                                        👉 {med.instructions}
+                                        👉 <HighlightedKeywordText text={med.instructions} keyword={timelineKeyword} />
                                       </div>
                                     )}
                                   </div>
@@ -8742,7 +8966,9 @@ export function HealthDashboard({
                                     className="p-2.5 rounded-xl bg-teal-50/80 border border-teal-200 text-xs space-y-1"
                                   >
                                     <div className="flex items-center justify-between">
-                                      <span className="font-bold text-teal-950">💉 {vac.vaccineName}</span>
+                                      <span className="font-bold text-teal-950">
+                                        💉 <HighlightedKeywordText text={vac.vaccineName} keyword={timelineKeyword} />
+                                      </span>
                                       {vac.doseNumber && (
                                         <span className="px-2 py-0.5 rounded-md bg-teal-600 text-white font-bold text-[10px]">
                                           Mũi {vac.doseNumber}
@@ -8751,22 +8977,34 @@ export function HealthDashboard({
                                     </div>
                                     {vac.targetDisease && (
                                       <p className="text-[11px] text-teal-800">
-                                        <strong>Phòng bệnh:</strong> {vac.targetDisease}
+                                        <strong>Phòng bệnh:</strong>{' '}
+                                        <HighlightedKeywordText text={vac.targetDisease} keyword={timelineKeyword} />
                                       </p>
                                     )}
                                     <div className="text-[11px] text-slate-600 flex flex-wrap gap-x-2">
-                                      {vac.lotNumber && <span>Lô: {vac.lotNumber}</span>}
-                                      {vac.manufacturer && <span>SX: {vac.manufacturer}</span>}
+                                      {vac.lotNumber && (
+                                        <span>
+                                          Lô: <HighlightedKeywordText text={vac.lotNumber} keyword={timelineKeyword} />
+                                        </span>
+                                      )}
+                                      {vac.manufacturer && (
+                                        <span>
+                                          SX: <HighlightedKeywordText text={vac.manufacturer} keyword={timelineKeyword} />
+                                        </span>
+                                      )}
                                     </div>
                                     {vac.nextDoseDate && (
                                       <div className="mt-1 px-2 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-[11px] flex items-center gap-1">
                                         <Calendar className="w-3 h-3 text-amber-600" />
-                                        <span>Hẹn tiêm tiếp: {formatDateVN(vac.nextDoseDate)}</span>
+                                        <span>
+                                          Hẹn tiêm tiếp:{' '}
+                                          <HighlightedKeywordText text={formatDateVN(vac.nextDoseDate)} keyword={timelineKeyword} />
+                                        </span>
                                       </div>
                                     )}
                                     {vac.reactionNotes && (
                                       <p className="text-[11px] text-slate-500 italic">
-                                        Phản ứng: {vac.reactionNotes}
+                                        Phản ứng: <HighlightedKeywordText text={vac.reactionNotes} keyword={timelineKeyword} />
                                       </p>
                                     )}
                                   </div>
@@ -8783,34 +9021,51 @@ export function HealthDashboard({
                               </span>
                               <div className="flex flex-wrap gap-x-4 gap-y-1 text-slate-700">
                                 {event.hospitalization.department && (
-                                  <span><strong>Khoa:</strong> {event.hospitalization.department}</span>
+                                  <span>
+                                    <strong>Khoa:</strong>{' '}
+                                    <HighlightedKeywordText text={event.hospitalization.department} keyword={timelineKeyword} />
+                                  </span>
                                 )}
                                 {event.hospitalization.admissionDate && (
-                                  <span><strong>Nhập viện:</strong> {formatDateVN(event.hospitalization.admissionDate)}</span>
+                                  <span>
+                                    <strong>Nhập viện:</strong>{' '}
+                                    <HighlightedKeywordText text={formatDateVN(event.hospitalization.admissionDate)} keyword={timelineKeyword} />
+                                  </span>
                                 )}
                                 {event.hospitalization.dischargeDate && (
-                                  <span><strong>Ra viện:</strong> {formatDateVN(event.hospitalization.dischargeDate)}</span>
+                                  <span>
+                                    <strong>Ra viện:</strong>{' '}
+                                    <HighlightedKeywordText text={formatDateVN(event.hospitalization.dischargeDate)} keyword={timelineKeyword} />
+                                  </span>
                                 )}
                               </div>
                               {event.hospitalization.treatmentSummary && (
                                 <p className="text-slate-700">
-                                  <strong>Tóm tắt điều trị:</strong> {event.hospitalization.treatmentSummary}
+                                  <strong>Tóm tắt điều trị:</strong>{' '}
+                                  <HighlightedKeywordText text={event.hospitalization.treatmentSummary} keyword={timelineKeyword} />
                                 </p>
                               )}
                               {event.hospitalization.surgicalNotes && (
                                 <p className="text-indigo-900 font-medium">
-                                  <strong>Phẫu thuật / Thủ thuật:</strong> {event.hospitalization.surgicalNotes}
+                                  <strong>Phẫu thuật / Thủ thuật:</strong>{' '}
+                                  <HighlightedKeywordText text={event.hospitalization.surgicalNotes} keyword={timelineKeyword} />
                                 </p>
                               )}
                             </div>
                           )}
-                          {/* Metrics chips: abnormal always visible, normal collapsed by default */}
+                          {/* Metrics chips: abnormal always visible, normal collapsed by default (auto-expanded when matched by keyword) */}
                           {event.metrics.length > 0 && (() => {
                             const { abnormal, normal } = partitionHealthMetricsForDisplay(
                               event.metrics,
                               selectedMember?.gender,
                             );
-                            const isNormalExpanded = Boolean(expandedMetricEventIds[event.id]);
+                            const normalMatchedByKeyword =
+                              Boolean(timelineKeyword.trim()) &&
+                              normal.some((item) =>
+                                doesMetricMatchTimelineKeyword(item.metric, timelineKeyword, selectedMember?.gender),
+                              );
+                            const isNormalExpanded =
+                              Boolean(expandedMetricEventIds[event.id]) || normalMatchedByKeyword;
                             const selectedAbnormalIndex = selectedAbnormalMetricByEvent[event.id] ?? null;
                             const selectedAbnormalItem =
                               selectedAbnormalIndex !== null
@@ -8844,10 +9099,14 @@ export function HealthDashboard({
                                     <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                                   )}
                                   <span>
-                                    {met.name}: <strong>{met.value}</strong> {met.unit}
+                                    <HighlightedKeywordText text={met.name} keyword={timelineKeyword} />:{' '}
+                                    <strong>
+                                      <HighlightedKeywordText text={String(met.value)} keyword={timelineKeyword} />
+                                    </strong>{' '}
+                                    <HighlightedKeywordText text={met.unit} keyword={timelineKeyword} />
                                     {isWarning && met.refRange ? (
                                       <span className="ml-1 text-[11px] font-normal opacity-80">
-                                        ({met.refRange})
+                                        (<HighlightedKeywordText text={met.refRange} keyword={timelineKeyword} />)
                                       </span>
                                     ) : null}
                                   </span>
@@ -8964,14 +9223,18 @@ export function HealthDashboard({
                                 {event.imagingResults.map((img, idx) => (
                                   <div key={idx} className="p-2.5 rounded-xl bg-purple-50/80 border border-purple-200 text-xs">
                                     <div className="font-bold text-purple-950 flex items-center gap-1">
-                                      <span>🖥️ {img.modality}</span>
+                                      <span>
+                                        🖥️ <HighlightedKeywordText text={img.modality} keyword={timelineKeyword} />
+                                      </span>
                                     </div>
                                     {img.findings && (
-                                      <p className="text-[11px] text-slate-600 mt-0.5">{img.findings}</p>
+                                      <p className="text-[11px] text-slate-600 mt-0.5">
+                                        <HighlightedKeywordText text={img.findings} keyword={timelineKeyword} />
+                                      </p>
                                     )}
                                     {img.conclusion && (
                                       <p className="text-xs font-semibold text-purple-900 mt-1">
-                                        👉 Kết luận: {img.conclusion}
+                                        👉 Kết luận: <HighlightedKeywordText text={img.conclusion} keyword={timelineKeyword} />
                                       </p>
                                     )}
                                   </div>
@@ -9022,10 +9285,12 @@ export function HealthDashboard({
                                         >
                                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
                                             {icon && <span>{icon}</span>}
-                                            <span>{label}</span>
+                                            <span>
+                                              <HighlightedKeywordText text={label} keyword={timelineKeyword} />
+                                            </span>
                                           </span>
                                           <span className="text-xs font-semibold text-slate-900 break-words">
-                                            {displayVal}
+                                            <HighlightedKeywordText text={displayVal} keyword={timelineKeyword} />
                                           </span>
                                         </div>
                                       );
@@ -9046,10 +9311,12 @@ export function HealthDashboard({
                                         >
                                           <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-700 uppercase tracking-wide">
                                             {icon && <span className="text-xs">{icon}</span>}
-                                            <span>{label}</span>
+                                            <span>
+                                              <HighlightedKeywordText text={label} keyword={timelineKeyword} />
+                                            </span>
                                           </div>
                                           <p className="text-xs text-slate-800 leading-relaxed whitespace-pre-line text-left">
-                                            {displayVal}
+                                            <HighlightedKeywordText text={displayVal} keyword={timelineKeyword} />
                                           </p>
                                         </div>
                                       );
@@ -9064,18 +9331,23 @@ export function HealthDashboard({
                             <div className="pt-2 border-t border-slate-100 text-xs space-y-1">
                               {event.advice && (
                                 <p className="text-slate-700 break-words">
-                                  <strong>Lời dặn:</strong> {event.advice}
+                                  <strong>Lời dặn:</strong>{' '}
+                                  <HighlightedKeywordText text={event.advice} keyword={timelineKeyword} />
                                 </p>
                               )}
                               {event.notes && (
                                 <p className="text-slate-600 break-words">
-                                  <strong>Ghi chú:</strong> {event.notes}
+                                  <strong>Ghi chú:</strong>{' '}
+                                  <HighlightedKeywordText text={event.notes} keyword={timelineKeyword} />
                                 </p>
                               )}
                               {event.nextFollowUp && (
                                 <div className="font-semibold text-amber-800 flex items-center gap-1.5">
                                   <Calendar className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                                  <span>Hẹn tái khám: {formatDateVN(event.nextFollowUp)}</span>
+                                  <span>
+                                    Hẹn tái khám:{' '}
+                                    <HighlightedKeywordText text={formatDateVN(event.nextFollowUp)} keyword={timelineKeyword} />
+                                  </span>
                                 </div>
                               )}
                             </div>

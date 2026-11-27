@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { App } from '@capacitor/app';
+import { formatDateVN } from './formatters';
 
 const NOTIFICATION_ID_BATCH_PROGRESS = 99001;
 const FOLLOW_UP_NOTIFICATION_STORAGE_KEY = 'health_follow_up_notification_ids_v1';
@@ -254,6 +255,29 @@ export async function updateBatchNotificationProgress(options: {
   }
 }
 
+export function buildBatchCompleteNotificationContent(options: {
+  total: number;
+  memberName?: string;
+  failedCount?: number;
+}): { title: string; body: string } {
+  const failed = options.failedCount || 0;
+  const completed = Math.max(0, options.total - failed);
+  const title = failed > 0
+    ? `Đã xử lý ${completed}/${options.total} tài liệu`
+    : `Đã xử lý ${options.total} tài liệu`;
+
+  let body = '';
+  if (failed > 0) {
+    body = `${failed} tài liệu cần thử lại.`;
+  } else if (options.memberName) {
+    body = `Đã lưu vào hồ sơ ${options.memberName}.`;
+  } else {
+    body = 'Đã lưu vào hồ sơ.';
+  }
+
+  return { title, body };
+}
+
 export async function updateBatchNotificationComplete(options: {
   total: number;
   memberName?: string;
@@ -264,16 +288,14 @@ export async function updateBatchNotificationComplete(options: {
     const hasPermission = isPermissionGranted || (await requestNotificationPermission());
     if (!hasPermission) return;
 
+    const { title, body } = buildBatchCompleteNotificationContent(options);
+
     await LocalNotifications.schedule({
       notifications: [
         {
           id: NOTIFICATION_ID_BATCH_PROGRESS,
-          title: options.failedCount
-            ? `Đã xử lý ${options.total - options.failedCount}/${options.total} tài liệu`
-            : `Đã xử lý ${options.total} tài liệu`,
-          body: options.failedCount
-            ? `${options.failedCount} tài liệu cần thử lại.`
-            : `Đã lưu${options.memberName ? ` vào hồ sơ ${options.memberName}` : ''}.`,
+          title,
+          body,
           schedule: { at: new Date(Date.now() + 50) },
           smallIcon: 'ic_stat_savings',
           iconColor: '#10b981',
@@ -304,4 +326,62 @@ export function setupBackgroundAppResumeListener(onResumeCallback: () => void): 
   return () => {
     void listener.then((h) => h.remove()).catch(() => undefined);
   };
+}
+
+const MENSTRUAL_NOTIFICATION_ID_BASE = 300000000;
+
+export async function scheduleMenstrualNotification(options: {
+  memberId: string;
+  memberName: string;
+  predictedDate?: string; // YYYY-MM-DD
+  remindBeforeDays?: number;
+  enabled?: boolean;
+}): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  const hash = Math.abs(
+    Array.from(options.memberId).reduce((acc, ch) => ((acc << 5) - acc) + ch.charCodeAt(0), 0)
+  ) % 100000;
+  const notifId = MENSTRUAL_NOTIFICATION_ID_BASE + hash;
+
+  if (options.enabled === false || !options.predictedDate) {
+    try {
+      await LocalNotifications.cancel({ notifications: [{ id: notifId }] });
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  const remindDays = options.remindBeforeDays ?? 2;
+  const targetDate = parseLocalDate(options.predictedDate);
+  if (!targetDate) return;
+
+  const scheduleAt = new Date(targetDate);
+  scheduleAt.setDate(scheduleAt.getDate() - remindDays);
+  scheduleAt.setHours(8, 0, 0, 0);
+
+  if (scheduleAt.getTime() <= Date.now()) {
+    return;
+  }
+
+  try {
+    const hasPermission = isPermissionGranted || (await requestNotificationPermission());
+    if (!hasPermission) return;
+
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: notifId,
+          title: `Nhắc chu kỳ kinh nguyệt: ${options.memberName}`,
+          body: `Dự kiến kỳ kinh tiếp theo sẽ bắt đầu sau ${remindDays} ngày (${formatDateVN(options.predictedDate)}).`,
+          schedule: { at: scheduleAt },
+          smallIcon: 'ic_stat_savings',
+          iconColor: '#f43f5e',
+          autoCancel: true,
+        },
+      ],
+    });
+  } catch (error) {
+    console.warn('[NotificationService] Failed to schedule menstrual notification:', error);
+  }
 }

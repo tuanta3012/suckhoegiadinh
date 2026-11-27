@@ -245,8 +245,10 @@ function compactProfileForAssistant(profile: HealthProfile): HealthProfile {
       ...(computedSummary?.bloodType || profile?.summary?.bloodType
         ? { bloodType: computedSummary?.bloodType ?? profile?.summary?.bloodType }
         : {}),
+      ...(profile?.summary?.menstrualCycleSummary ? { menstrualCycleSummary: profile.summary.menstrualCycleSummary } : {}),
       nextFollowUp: computedSummary?.nextFollowUp ?? profile?.summary?.nextFollowUp,
     },
+    ...(profile?.cycles && profile.cycles.length > 0 ? { cycles: profile.cycles.slice(0, 4) } : {}),
     createdAt: profile?.createdAt || '',
     updatedAt: profile?.updatedAt || '',
   };

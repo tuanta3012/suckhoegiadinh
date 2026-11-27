@@ -1,10 +1,12 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import type { FamilyMember, HealthEvent, HealthProfile } from '../types';
 import { getVietnamDateISO } from './date';
+import { formatDateVN } from './formatters';
 import {
   getValidGoogleAccessToken,
   trySilentRefresh,
 } from './googleDriveService';
+import { calculateCycleMetrics, DEFAULT_REMIND_BEFORE_DAYS } from './menstrualCycleService';
 import { findMemberForEmail } from './memberOrdering';
 
 const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
@@ -47,13 +49,14 @@ export interface GoogleCalendarEventResource {
 
 export interface FutureFollowUpItem {
   appointmentKey: string;
-  kind: 'follow_up' | 'vaccination';
+  kind: 'follow_up' | 'vaccination' | 'menstrual_cycle';
   member: FamilyMember;
-  event: HealthEvent;
+  event?: HealthEvent;
   followUpDate: string; // YYYY-MM-DD
   summary: string;
   facility?: string;
   description: string;
+  reminderMinutesBefore?: number;
   contentHash: string;
 }
 
@@ -201,86 +204,139 @@ export function collectFutureFollowUpsForMember(
   }
 
   const profile = profiles[member.id];
-  if (!profile?.timeline?.length) {
-    return { member, todayIso, items: [] };
-  }
-
   const items: FutureFollowUpItem[] = [];
   const seenKeys = new Set<string>();
 
-  for (const event of profile.timeline) {
-    const primaryFollowUpIso = normalizeFollowUpDateISO(event.nextFollowUp);
-    if (primaryFollowUpIso && primaryFollowUpIso >= todayIso) {
-      const appointmentKey = `followup:${event.id}`;
-      if (!seenKeys.has(appointmentKey)) {
-        seenKeys.add(appointmentKey);
-        const summary = `[Tái khám] ${event.title.trim() || 'Lịch hẹn y tế'}`;
-        const facility = event.facility?.trim() || undefined;
-        const description = buildFollowUpDescription(member, event);
-        const contentHash = hashSyncPayload(
-          JSON.stringify({
-            summary,
-            facility: facility || '',
-            description,
+  if (profile?.timeline?.length) {
+    for (const event of profile.timeline) {
+      const primaryFollowUpIso = normalizeFollowUpDateISO(event.nextFollowUp);
+      if (primaryFollowUpIso && primaryFollowUpIso >= todayIso) {
+        const appointmentKey = `followup:${event.id}`;
+        if (!seenKeys.has(appointmentKey)) {
+          seenKeys.add(appointmentKey);
+          const summary = `[Tái khám] ${event.title.trim() || 'Lịch hẹn y tế'}`;
+          const facility = event.facility?.trim() || undefined;
+          const description = buildFollowUpDescription(member, event);
+          const contentHash = hashSyncPayload(
+            JSON.stringify({
+              summary,
+              facility: facility || '',
+              description,
+              followUpDate: primaryFollowUpIso,
+            }),
+          );
+          items.push({
+            appointmentKey,
+            kind: 'follow_up',
+            member,
+            event,
             followUpDate: primaryFollowUpIso,
-          }),
-        );
-        items.push({
-          appointmentKey,
-          kind: 'follow_up',
-          member,
-          event,
-          followUpDate: primaryFollowUpIso,
-          summary,
-          facility,
-          description,
-          contentHash,
+            summary,
+            facility,
+            description,
+            contentHash,
+          });
+        }
+      }
+
+      if (Array.isArray(event.vaccinations)) {
+        event.vaccinations.forEach((vac, idx) => {
+          const nextDoseIso = normalizeFollowUpDateISO(vac.nextDoseDate);
+          if (!nextDoseIso || nextDoseIso < todayIso) return;
+          if (primaryFollowUpIso && nextDoseIso === primaryFollowUpIso) return;
+
+          const cleanVaccine = vac.vaccineName.trim();
+          const normalizedVac = cleanVaccine
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '');
+          const appointmentKey = `vaccine:${event.id}:${normalizedVac || idx}`;
+          if (seenKeys.has(appointmentKey)) return;
+          seenKeys.add(appointmentKey);
+
+          const summary = `[Tiêm nhắc] ${cleanVaccine || event.title.trim()}`;
+          const facility = event.facility?.trim() || undefined;
+          const extra = vac.targetDisease ? `Phòng bệnh: ${vac.targetDisease}` : undefined;
+          const description = buildFollowUpDescription(member, event, extra);
+          const contentHash = hashSyncPayload(
+            JSON.stringify({
+              summary,
+              facility: facility || '',
+              description,
+              followUpDate: nextDoseIso,
+            }),
+          );
+          items.push({
+            appointmentKey,
+            kind: 'vaccination',
+            member,
+            event,
+            followUpDate: nextDoseIso,
+            summary,
+            facility,
+            description,
+            contentHash,
+          });
         });
       }
     }
+  }
 
-    if (Array.isArray(event.vaccinations)) {
-      event.vaccinations.forEach((vac, idx) => {
-        const nextDoseIso = normalizeFollowUpDateISO(vac.nextDoseDate);
-        if (!nextDoseIso || nextDoseIso < todayIso) return;
-        if (primaryFollowUpIso && nextDoseIso === primaryFollowUpIso) return;
+  // Menstrual cycle predicted reminders for the signed-in member and female members without a separate email
+  const cycleTargetMembers = [
+    member,
+    ...members.filter((m) => m.id !== member.id && !m.email?.trim() && m.gender === 'female'),
+  ];
 
-        const cleanVaccine = vac.vaccineName.trim();
-        const normalizedVac = cleanVaccine
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/[^a-z0-9]+/g, '_')
-          .replace(/^_|_$/g, '');
-        const appointmentKey = `vaccine:${event.id}:${normalizedVac || idx}`;
-        if (seenKeys.has(appointmentKey)) return;
-        seenKeys.add(appointmentKey);
+  for (const targetMember of cycleTargetMembers) {
+    const targetProfile = profiles[targetMember.id];
+    if (!targetProfile?.cycles?.length) continue;
+    if (targetProfile.cycleSettings?.reminderEnabled === false) continue;
 
-        const summary = `[Tiêm nhắc] ${cleanVaccine || event.title.trim()}`;
-        const facility = event.facility?.trim() || undefined;
-        const extra = vac.targetDisease ? `Phòng bệnh: ${vac.targetDisease}` : undefined;
-        const description = buildFollowUpDescription(member, event, extra);
-        const contentHash = hashSyncPayload(
-          JSON.stringify({
-            summary,
-            facility: facility || '',
-            description,
-            followUpDate: nextDoseIso,
-          }),
-        );
-        items.push({
-          appointmentKey,
-          kind: 'vaccination',
-          member,
-          event,
-          followUpDate: nextDoseIso,
-          summary,
-          facility,
-          description,
-          contentHash,
-        });
-      });
-    }
+    const metrics = calculateCycleMetrics(
+      targetProfile.cycles,
+      targetProfile.cycleSettings,
+      todayIso,
+    );
+    const upcoming = metrics.predictedCycles.find((p) => p.startDate >= todayIso);
+    if (!upcoming) continue;
+
+    const appointmentKey = `menstrual:next_period:${targetMember.id}`;
+    if (seenKeys.has(appointmentKey)) continue;
+    seenKeys.add(appointmentKey);
+
+    const remindBeforeDays = Math.max(
+      0,
+      Math.min(7, targetProfile.cycleSettings?.remindBeforeDays ?? DEFAULT_REMIND_BEFORE_DAYS),
+    );
+    const reminderMinutesBefore = remindBeforeDays > 0 ? remindBeforeDays * 1440 - 480 : 0;
+    const summary = `Chu kỳ dự kiến · ${targetMember.name}`;
+    const reminderNote = remindBeforeDays > 0 ? ` · Nhắc trước ${remindBeforeDays} ngày` : '';
+    const description = [
+      `Dự kiến: ${formatDateVN(upcoming.startDate)} – ${formatDateVN(upcoming.endDate)} (${metrics.averagePeriodLength} ngày)`,
+      `Chu kỳ TB: ${metrics.averageCycleLength} ngày${reminderNote}`,
+    ].join('\n');
+    const contentHash = hashSyncPayload(
+      JSON.stringify({
+        summary,
+        description,
+        followUpDate: upcoming.startDate,
+        reminderMinutesBefore,
+      }),
+    );
+
+    items.push({
+      appointmentKey,
+      kind: 'menstrual_cycle',
+      member: targetMember,
+      followUpDate: upcoming.startDate,
+      summary,
+      description,
+      reminderMinutesBefore,
+      contentHash,
+    });
   }
 
   items.sort((a, b) => a.followUpDate.localeCompare(b.followUpDate) || a.summary.localeCompare(b.summary));
@@ -296,15 +352,15 @@ export function buildGoogleCalendarEventPayload(item: FutureFollowUpItem) {
     end: { date: addDaysToIsoDate(item.followUpDate, 1) },
     reminders: {
       useDefault: false,
-      // 900 minutes before 00:00 of the appointment date = 09:00 AM on the day before.
-      overrides: [{ method: 'popup', minutes: 900 }],
+      // Default 900 minutes before 00:00 of the appointment date = 09:00 AM on the day before.
+      overrides: [{ method: 'popup', minutes: item.reminderMinutesBefore ?? 900 }],
     },
     extendedProperties: {
       private: {
         familyHealthApp: FAMILY_HEALTH_CALENDAR_APP_TAG,
         appointmentKey: item.appointmentKey,
         memberId: item.member.id,
-        healthEventId: item.event.id,
+        healthEventId: item.event?.id || '',
         followUpDate: item.followUpDate,
         contentHash: item.contentHash,
       },
@@ -554,7 +610,7 @@ export function buildCalendarSyncPreviewPlan(params: {
     const key = priv?.appointmentKey;
     const evMemberId = priv?.memberId;
     if (!key || activeKeys.has(key)) continue;
-    if (evMemberId && evMemberId !== member.id) continue;
+    if (evMemberId && evMemberId !== member.id && !key.startsWith('menstrual:')) continue;
 
     const startDate = ev.start?.date || ev.start?.dateTime?.slice(0, 10) || '';
     if (startDate && startDate >= todayIso) {

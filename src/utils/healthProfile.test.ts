@@ -758,6 +758,45 @@ describe('health profile', () => {
       date: '2024-05-29',
     });
   });
+
+  it('keeps deleted menstrual cycles removed across remote merges and clears summary when empty', () => {
+    const base = createHealthProfile(member, '2026-11-26T00:00:00.000Z');
+    const remoteSnapshot: HealthProfile = {
+      ...base,
+      cycles: [
+        {
+          id: 'cycle-overlap',
+          startDate: '2026-11-26',
+          endDate: '2026-11-30',
+          flowLevel: 'medium',
+          updatedAt: '2026-11-26T08:00:00.000Z',
+        },
+      ],
+      cycleSettings: { defaultCycleLength: 28, defaultPeriodLength: 5, remindBeforeDays: 2, reminderEnabled: true },
+      cycleSettingsUpdatedAt: '2026-11-26T08:00:00.000Z',
+      updatedAt: '2026-11-26T08:00:00.000Z',
+    };
+
+    const localDeletion: HealthProfile = {
+      ...base,
+      cycles: [],
+      deletedCycles: [{ id: 'cycle-overlap', deletedAt: '2026-11-27T09:00:00.000Z' }],
+      cycleSettings: { defaultCycleLength: 30, defaultPeriodLength: 5, remindBeforeDays: 3, reminderEnabled: true },
+      cycleSettingsUpdatedAt: '2026-11-27T09:00:00.000Z',
+      updatedAt: '2026-11-27T09:00:00.000Z',
+    };
+
+    const merged = mergeHealthProfiles(remoteSnapshot, localDeletion, '2026-11-27T09:00:05.000Z');
+    expect(merged.cycles).toBeUndefined();
+    expect(merged.deletedCycles).toEqual([{ id: 'cycle-overlap', deletedAt: '2026-11-27T09:00:00.000Z' }]);
+    expect(merged.summary.menstrualCycleSummary).toBeUndefined();
+    expect(merged.cycleSettings?.defaultCycleLength).toBe(30);
+    expect(merged.cycleSettings?.remindBeforeDays).toBe(3);
+
+    const reparsed = parseHealthProfile(merged, member);
+    expect(reparsed.cycles).toBeUndefined();
+    expect(reparsed.summary.menstrualCycleSummary).toBeUndefined();
+  });
 });
 
 

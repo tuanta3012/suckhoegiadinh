@@ -169,7 +169,7 @@ describe('googleCalendarSyncService', () => {
       now,
     );
 
-    const unchangedItem = collected.items.find((i) => i.event.id === 'ev-unchanged')!;
+    const unchangedItem = collected.items.find((i) => i.event?.id === 'ev-unchanged')!;
     const unchangedPayload = buildGoogleCalendarEventPayload(unchangedItem);
 
     const plan = buildCalendarSyncPreviewPlan({
@@ -215,9 +215,9 @@ describe('googleCalendarSyncService', () => {
       ],
     });
 
-    expect(plan.unchanged.map((u) => u.item.event.id)).toEqual(['ev-unchanged']);
-    expect(plan.toUpdate.map((u) => u.item.event.id)).toEqual(['ev-changed']);
-    expect(plan.toCreate.map((c) => c.event.id)).toEqual(['ev-new']);
+    expect(plan.unchanged.map((u) => u.item.event?.id)).toEqual(['ev-unchanged']);
+    expect(plan.toUpdate.map((u) => u.item.event?.id)).toEqual(['ev-changed']);
+    expect(plan.toCreate.map((c) => c.event?.id)).toEqual(['ev-new']);
     expect(plan.staleEvents.map((s) => s.calendarEventId)).toEqual(['gcal-stale']);
   });
 
@@ -314,5 +314,66 @@ describe('googleCalendarSyncService', () => {
         ),
       ).rejects.toBeInstanceOf(CalendarPermissionError);
     });
+  });
+
+  it('collects predicted menstrual cycle alerts and updates/clears them cleanly', () => {
+    const adminMember = makeMember('m-admin', 'Tuấn', 'tuan@example.com');
+    const spouseFemale: FamilyMember = {
+      ...makeMember('m-wife', 'Tú Anh'),
+      gender: 'female',
+    };
+    const profiles: Record<string, HealthProfile> = {
+      [adminMember.id]: makeProfile(adminMember, []),
+      [spouseFemale.id]: {
+        ...makeProfile(spouseFemale, []),
+        cycles: [
+          {
+            id: 'cyc-1',
+            startDate: '2026-11-27',
+            flowLevel: 'medium',
+            updatedAt: '2026-11-27T08:00:00.000Z',
+          },
+        ],
+        cycleSettings: {
+          defaultCycleLength: 28,
+          defaultPeriodLength: 5,
+          remindBeforeDays: 2,
+          reminderEnabled: true,
+        },
+      },
+    };
+
+    const now = new Date('2026-11-28T08:00:00.000Z');
+    const collected = collectFutureFollowUpsForMember([adminMember, spouseFemale], profiles, 'tuan@example.com', now);
+
+    expect(collected.items).toHaveLength(1);
+    const cycleItem = collected.items[0];
+    expect(cycleItem.kind).toBe('menstrual_cycle');
+    expect(cycleItem.appointmentKey).toBe('menstrual:next_period:m-wife');
+    expect(cycleItem.followUpDate).toBe('2026-12-25');
+    expect(cycleItem.summary).toBe('Chu kỳ dự kiến · Tú Anh');
+    expect(cycleItem.description.split('\n')).toHaveLength(2);
+    expect(cycleItem.description).toContain('25/12/2026');
+
+    const payload = buildGoogleCalendarEventPayload(cycleItem);
+    expect(payload.reminders.overrides).toEqual([{ method: 'popup', minutes: 2400 }]);
+
+    // If cycles are deleted, stale menstrual event is marked for removal
+    const clearedPlan = buildCalendarSyncPreviewPlan({
+      signedInEmail: 'tuan@example.com',
+      member: adminMember,
+      todayIso: collected.todayIso,
+      items: [],
+      existingEvents: [
+        {
+          id: 'gcal-cyc-1',
+          summary: payload.summary,
+          start: payload.start,
+          end: payload.end,
+          extendedProperties: payload.extendedProperties,
+        },
+      ],
+    });
+    expect(clearedPlan.staleEvents.map((e) => e.calendarEventId)).toEqual(['gcal-cyc-1']);
   });
 });
