@@ -54,7 +54,7 @@ import {
   CameraSource,
 } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AppUpdateModal } from './AppUpdateModal';
 import { AiResourcesModal } from './AiResourcesModal';
 import { useAppUpdate } from '../hooks/useAppUpdate';
@@ -812,6 +812,32 @@ export function HealthDashboard({
   const [selectedMetric, setSelectedMetric] = useState('');
   const [timelineFilter, setTimelineFilter] = useState<string>('all');
   const [timelineKeyword, setTimelineKeyword] = useState<string>('');
+  const [isTimelineSearchOpen, setIsTimelineSearchOpen] = useState(false);
+  const timelineSearchInputRef = useRef<HTMLInputElement>(null);
+  const timelineSearchMeasureRef = useRef<HTMLSpanElement>(null);
+  const [timelineSearchWidth, setTimelineSearchWidth] = useState<number>(105);
+
+  const isTimelineSearchActive = isTimelineSearchOpen || Boolean(timelineKeyword.trim());
+
+  useLayoutEffect(() => {
+    if (!timelineKeyword && !isTimelineSearchOpen) {
+      setTimelineSearchWidth(32);
+      return;
+    }
+    const textWidth = timelineSearchMeasureRef.current?.getBoundingClientRect().width || 0;
+    // pl-7 is 28px, pr-7 is 28px, plus 8px safety margin = 64px
+    const calculated = Math.ceil(textWidth + 64);
+    const bounded = Math.min(340, Math.max(105, calculated));
+    setTimelineSearchWidth(bounded);
+  }, [timelineKeyword, isTimelineSearchOpen]);
+
+  const handleClearTimelineSearch = (e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTimelineKeyword('');
+    setIsTimelineSearchOpen(false);
+    timelineSearchInputRef.current?.blur();
+  };
   const [expandedMetricEventIds, setExpandedMetricEventIds] = useState<Record<string, boolean>>({});
   const [selectedAbnormalMetricByEvent, setSelectedAbnormalMetricByEvent] = useState<Record<string, number | null>>({});
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -8606,24 +8632,74 @@ export function HealthDashboard({
                 )}
                 {/* Timeline Filter Bar: Smart Keyword Input + Event Type Chips */}
                 <div className="flex items-center gap-1.5 w-full">
-                  <div className="relative w-28 sm:w-40 shrink-0">
-                    <Search className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  {/* Hidden span for accurate dynamic width calculation */}
+                  <span
+                    ref={timelineSearchMeasureRef}
+                    className="invisible fixed top-0 left-0 -z-50 whitespace-pre text-xs font-medium pointer-events-none select-none"
+                    aria-hidden="true"
+                  >
+                    {timelineKeyword || 'Search'}
+                  </span>
+
+                  {/* Dynamic-width Search Input: collapses to icon-only at line start when empty */}
+                  <div
+                    onClick={() => {
+                      if (!isTimelineSearchActive) {
+                        setIsTimelineSearchOpen(true);
+                        timelineSearchInputRef.current?.focus();
+                      }
+                    }}
+                    className={`relative flex items-center shrink-0 h-8 rounded-xl border transition-all duration-200 ease-out max-w-[calc(100vw-115px)] sm:max-w-sm ${
+                      isTimelineSearchActive
+                        ? 'border-slate-200 bg-white shadow-2xs focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/15'
+                        : 'w-8 border-slate-200 bg-white hover:bg-slate-50 text-slate-500 hover:text-slate-700 shadow-2xs cursor-pointer justify-center'
+                    }`}
+                    style={{ width: isTimelineSearchActive ? `${timelineSearchWidth}px` : '32px' }}
+                    title={!isTimelineSearchActive ? 'Tìm kiếm sự kiện hồ sơ' : undefined}
+                  >
+                    <Search
+                      className={`w-3.5 h-3.5 pointer-events-none transition-all duration-150 ${
+                        isTimelineSearchActive
+                          ? 'absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400'
+                          : 'text-slate-500'
+                      }`}
+                    />
                     <input
+                      ref={timelineSearchInputRef}
                       type="text"
                       inputMode="search"
                       enterKeyHint="search"
                       value={timelineKeyword}
                       onChange={(e) => setTimelineKeyword(e.target.value)}
-                      placeholder="Search"
+                      onFocus={() => setIsTimelineSearchOpen(true)}
+                      onBlur={() => {
+                        if (!timelineKeyword.trim()) {
+                          setIsTimelineSearchOpen(false);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          setTimelineKeyword('');
+                          setIsTimelineSearchOpen(false);
+                          timelineSearchInputRef.current?.blur();
+                        }
+                      }}
+                      placeholder={isTimelineSearchActive ? 'Search' : ''}
                       aria-label="Search sự kiện hồ sơ"
-                      className="w-full h-8 pl-7 pr-6 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/15 transition-all"
+                      className={`h-full text-xs font-medium text-slate-800 bg-transparent focus:outline-none border-0 transition-opacity ${
+                        isTimelineSearchActive
+                          ? 'w-full pl-7 pr-7 placeholder:text-slate-400 opacity-100'
+                          : 'absolute inset-0 w-full opacity-0 cursor-pointer'
+                      }`}
                     />
-                    {timelineKeyword && (
+                    {isTimelineSearchActive && (
                       <button
                         type="button"
-                        onClick={() => setTimelineKeyword('')}
-                        aria-label="Xóa từ khóa lọc"
-                        className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors"
+                        onClick={handleClearTimelineSearch}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onTouchStart={(e) => e.preventDefault()}
+                        aria-label={timelineKeyword ? 'Xóa từ khóa lọc' : 'Đóng tìm kiếm'}
+                        className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors shrink-0"
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -8680,6 +8756,7 @@ export function HealthDashboard({
                           onClick={() => {
                             setTimelineKeyword('');
                             setTimelineFilter('all');
+                            setIsTimelineSearchOpen(false);
                           }}
                           className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold transition-colors"
                         >
